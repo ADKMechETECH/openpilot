@@ -354,6 +354,9 @@ struct OnroadEventSP @0xda96579883444c35 {
     e2eChime @23;
     laneChangeRoadEdge @24;
     bigModelReady @25;
+    # fork-only (civic-cruise): manual low-speed handback. Ordinals may collide on a future sunnypilot rebase.
+    manualLowSpeedHandback @26;
+    manualLowSpeedNoEntry @27;
   }
 }
 

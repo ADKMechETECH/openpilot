@@ -11,6 +11,8 @@ from openpilot.common.constants import CV
 from openpilot.sunnypilot.selfdrive.selfdrived.events_base import EventsBase, Priority, ET, Alert, \
   NoEntryAlert, ImmediateDisableAlert, EngagementAlert, NormalPermanentAlert, AlertCallbackType, wrong_car_mode_alert
 from openpilot.sunnypilot.selfdrive.controls.lib.speed_limit import PCM_LONG_REQUIRED_MAX_SET_SPEED, CONFIRM_SPEED_THRESHOLD
+from openpilot.sunnypilot.selfdrive.controls.lib.manual_low_speed_handback import read_handback_params, ENGAGE_HYSTERESIS
+from openpilot.common.params import Params
 from openpilot.common.hardware import HARDWARE
 
 AlertSize = log.SelfdriveState.AlertSize
@@ -71,6 +73,13 @@ def speed_limit_pre_active_alert(CP: car.CarParams, CS: car.CarState, sm: messag
     "",
     AlertStatus.normal, alert_size,
     Priority.LOW, VisualAlert.none, AudibleAlertSP.promptSingleLow, .1)
+
+
+def manual_low_speed_no_entry_alert(CP: car.CarParams, CS: car.CarState, sm: messaging.SubMaster, metric: bool, soft_disable_time: int, personality) -> Alert:
+  # only built on an engage attempt, so reading the param here is cheap
+  speed = read_handback_params(Params())[0] + ENGAGE_HYSTERESIS
+  speed_conv = round(speed * (CV.MS_TO_KPH if metric else CV.MS_TO_MPH))
+  return NoEntryAlert(f"Manual: Drive Above {speed_conv} {'km/h' if metric else 'mph'} to Engage", priority=Priority.MID)
 
 
 class EventsSP(EventsBase):
@@ -259,5 +268,19 @@ EVENTS_SP: dict[int, dict[str, Alert | AlertCallbackType]] = {
       "",
       AlertStatus.normal, AlertSize.small,
       Priority.LOW, VisualAlert.none, AudibleAlert.prompt, 2.),
+  },
+
+  # Manual transmission low-speed handback (manual_low_speed_handback.py). The stock speedTooLow/belowEngageSpeed events
+  # do the disengage/refusal; these outrank their alerts so the driver gets one alert with the right text.
+  EventNameSP.manualLowSpeedHandback: {
+    ET.IMMEDIATE_DISABLE: Alert(
+      "Low Speed: Take Over",
+      "openpilot handed longitudinal back to you",
+      AlertStatus.userPrompt, AlertSize.mid,
+      Priority.HIGHEST, VisualAlert.none, AudibleAlert.prompt, 3.),
+  },
+
+  EventNameSP.manualLowSpeedNoEntry: {
+    ET.NO_ENTRY: manual_low_speed_no_entry_alert,
   },
 }

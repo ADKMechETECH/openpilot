@@ -12,6 +12,7 @@ from opendbc.car.chrysler.values import RAM_DT
 from openpilot.common.params import Params
 from openpilot.common.realtime import DT_CTRL
 from openpilot.selfdrive.selfdrived.events import Events
+from openpilot.sunnypilot.selfdrive.controls.lib.manual_low_speed_handback import LowSpeedHandback
 from openpilot.sunnypilot.selfdrive.selfdrived.events import EventsSP
 
 EventName = log.OnroadEvent.EventName
@@ -30,20 +31,32 @@ class CarSpecificEventsSP:
     self.params = params or Params()
     self.clutch_gate_available = CP.transmissionType == TransmissionType.manual
     self.clutch_gate_enabled = self.clutch_gate_available and self.params.get_bool("ClutchShiftGate")
+    self.low_speed_handback = LowSpeedHandback(CP, self.params, process="selfdrived")
     self._frame = 0
 
-  def update(self, CS: structs.CarState, events: Events):
+  def update(self, CS: structs.CarState, events: Events, enabled: bool = False):
     events_sp = EventsSP()
 
     if self.clutch_gate_available:
       if self._frame % int(1. / DT_CTRL) == 0:
         self.clutch_gate_enabled = self.params.get_bool("ClutchShiftGate")
+        self.low_speed_handback.read_params()
       self._frame += 1
       # Clutch/shift gate: with the clutch open the throttle only revs a disconnected engine (rev-match / heel-toe
       # blip), so it is not a driver accel override. controlsd's gate already coasts longitudinal, and the panda
       # still disallows longitudinal while gas is pressed. Brake events are untouched (heel-toe brake still counts).
       if self.clutch_gate_enabled and CS.deprecated.clutchPressed and events.has(EventName.gasPressedOverride):
         events.remove(EventName.gasPressedOverride)
+
+    # Manual low-speed handback: controlsd has ramped the command to 0; disengage, and refuse to engage at low speed
+    # (no brake-to-stop, no standstill hold, no launch). No-op for automatics and stock ACC.
+    self.low_speed_handback.update(enabled, CS.vEgo)
+    if self.low_speed_handback.disengage_due:
+      events.add(EventName.speedTooLow)
+      events_sp.add(EventNameSP.manualLowSpeedHandback)
+    if self.low_speed_handback.below_engage_speed(CS.vEgo):
+      events.add(EventName.belowEngageSpeed)
+      events_sp.add(EventNameSP.manualLowSpeedNoEntry)
 
     if self.CP.brand == 'chrysler':
       if self.CP.carFingerprint in RAM_DT:

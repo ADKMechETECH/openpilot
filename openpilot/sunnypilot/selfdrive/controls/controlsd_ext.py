@@ -18,6 +18,7 @@ from openpilot.sunnypilot.livedelay.helpers import get_lat_delay
 from openpilot.sunnypilot.modeld_v2.modeld_base import ModelStateBase
 from openpilot.sunnypilot.selfdrive.controls.lib.blinker_pause_lateral import BlinkerPauseLateral
 from openpilot.sunnypilot.selfdrive.controls.lib.clutch_shift_gate import ClutchShiftGate
+from openpilot.sunnypilot.selfdrive.controls.lib.manual_low_speed_handback import LowSpeedHandback
 from openpilot.sunnypilot.selfdrive.controls.lib.no_service_brake import apply_brake_floor, read_decel_floor
 from openpilot.sunnypilot.selfdrive.controls.lib.latcontrol_torque_v0 import LatControlTorque as LatControlTorqueV0
 
@@ -30,6 +31,7 @@ class ControlsExt(ModelStateBase):
     self._param_update_time: float = 0.0
     self.blinker_pause_lateral = BlinkerPauseLateral()
     self.clutch_shift_gate = ClutchShiftGate(CP, params)
+    self.low_speed_handback = LowSpeedHandback(CP, params, process="controlsd")
     self.no_service_brake_enabled = params.get_bool("NoServiceBrakeHold")
     self.no_service_brake_floor = read_decel_floor(params)
 
@@ -66,6 +68,7 @@ class ControlsExt(ModelStateBase):
     if time.monotonic() - self._param_update_time > PARAMS_UPDATE_PERIOD:
       self.blinker_pause_lateral.get_params()
       self.clutch_shift_gate.get_params()
+      self.low_speed_handback.read_params()
       self.no_service_brake_enabled = self.params.get_bool("NoServiceBrakeHold")
       self.no_service_brake_floor = read_decel_floor(self.params)
       self.update_lane_centering_params()
@@ -86,6 +89,11 @@ class ControlsExt(ModelStateBase):
     #  no driver pedal input for the length of a shift (no CRUISE_FAULT, no cruise cancel). Fleet gas overrides only
     #  exercise this frame with the pedal pressed.
     return self.clutch_shift_gate.update(sm['carState'])
+
+  def update_low_speed_handback(self, enabled: bool, v_ego: float, last_accel: float) -> bool:
+    """Manual transmission: returns True once the low-speed handback ramp is done (longitudinal must stop)."""
+    self.low_speed_handback.update(enabled, v_ego, last_accel)
+    return self.low_speed_handback.ramp_done
 
   def get_lat_active(self, sm: messaging.SubMaster) -> bool:
     if self.blinker_pause_lateral.update(sm['carState']):

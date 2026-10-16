@@ -119,8 +119,11 @@ class Controls(ControlsExt):
                    (not standstill or self.CP.steerAtStandstill)
     # Manual-transmission clutch/shift gate: coast (no gas, no brake) while shifting, without disengaging
     long_paused = self.get_long_paused(self.sm)
+    # Manual transmission low-speed handback: ramp to 0, then no longitudinal until selfdrived disengages
+    handback_done = self.update_low_speed_handback(CC.enabled, CS.vEgo, self.LoC.last_output_accel)
     CC.longActive = CC.enabled and not any(e.overrideLongitudinal for e in self.sm['onroadEvents']) and \
-                    (self.CP.openpilotLongitudinalControl or not self.CP_SP.pcmCruiseSpeed) and not long_paused
+                    (self.CP.openpilotLongitudinalControl or not self.CP_SP.pcmCruiseSpeed) and not long_paused and \
+                    not handback_done
 
     actuators = CC.actuators
     actuators.longControlState = self.LoC.long_control_state
@@ -139,6 +142,7 @@ class Controls(ControlsExt):
     # accel PID loop
     pid_accel_limits = self.CI.get_pid_accel_limits(self.CP, self.CP_SP, CS.vEgo, CS.vCruise * CV.KPH_TO_MS)
     pid_accel_limits = self.apply_no_service_brake(self.sm, pid_accel_limits)
+    pid_accel_limits = self.low_speed_handback.limit_accel(pid_accel_limits)
     actuators.accel = float(self.LoC.update(CC.longActive, CS, long_plan.aTarget, long_plan.shouldStop, pid_accel_limits))
 
     # Steering PID loop and lateral MPC

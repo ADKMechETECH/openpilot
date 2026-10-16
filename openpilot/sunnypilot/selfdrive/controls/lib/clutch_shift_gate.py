@@ -109,6 +109,10 @@ class ClutchShiftGate:
       self._set_state(GateState.idle)
       return False
 
+    # TODO(on-car): GEAR_MT == 0 means "no gear meshed": it reads 0 for clutch pressed AND for neutral with the clutch
+    #  out. Verify what it reads when coasting in neutral WHILE ROLLING with openpilot engaged - the gate would treat
+    #  that as a shift and coast for as long as the car stays in neutral. (At stops the low-speed handback has already
+    #  disengaged openpilot before the driver selects neutral.)
     clutch = CS.deprecated.clutchPressed
     # The backstop only *starts* a pause (a missed clutch signal). It must not extend a shift already in progress:
     # the RPM jump as the clutch bites on a downshift looks like a flare but is the engine re-coupling.
