@@ -94,10 +94,12 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
     # PCM cruise speed may be updated a few cycles later, check if initialized
     v_cruise_initialized = sm['carState'].vCruise != V_CRUISE_UNSET
     reset_state = reset_state or not v_cruise_initialized
+    LongitudinalPlannerSP.update_non_adaptive(self, reset_state)
 
     throttle_probs = sm['modelV2'].meta.disengagePredictions.gasPressProbs
     throttle_prob = throttle_probs[1] if len(throttle_probs) > 1 else 1.0
-    self.allow_throttle = throttle_prob > ALLOW_THROTTLE_THRESHOLD or v_ego <= MIN_ALLOW_THROTTLE_SPEED
+    # non-adaptive cruise holds set speed: don't let the model's predicted lift (traffic, stops) cap throttle
+    self.allow_throttle = throttle_prob > ALLOW_THROTTLE_THRESHOLD or v_ego <= MIN_ALLOW_THROTTLE_SPEED or self.non_adaptive
 
     steer_angle_without_offset = sm['carState'].steeringAngleDeg - sm['vehicleParameters'].angleOffsetDeg
 
@@ -138,17 +140,21 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
     output_a_target_e2e = sm['modelV2'].action.desiredAcceleration
     output_should_stop_e2e = sm['modelV2'].action.shouldStop
 
-    is_e2e = self.is_e2e(sm)
+    is_e2e = self.is_e2e(sm) and not self.non_adaptive
 
     self.a_cruise = get_cruise_accel(is_e2e, v_cruise, v_ego,
                                      self.a_cruise, steer_angle_without_offset, self.CP, self.dt,
                                      accel_coast, self.allow_throttle)
     cruise_should_stop = should_stop(v_ego, self.a_cruise)
 
-    candidates = [(output_a_target_mpc, self.mpc.source, output_should_stop_mpc),
-                  (self.a_cruise, LongitudinalPlanSource.cruise, cruise_should_stop)]
-    if is_e2e:
-      candidates.append((output_a_target_e2e, LongitudinalPlanSource.e2e, output_should_stop_e2e))
+    if self.non_adaptive:
+      # Set-speed only: drop the lead-following MPC and e2e candidates. The MPC still ran above, so FCW is unchanged.
+      candidates = [(self.a_cruise, LongitudinalPlanSource.cruise, cruise_should_stop)]
+    else:
+      candidates = [(output_a_target_mpc, self.mpc.source, output_should_stop_mpc),
+                    (self.a_cruise, LongitudinalPlanSource.cruise, cruise_should_stop)]
+      if is_e2e:
+        candidates.append((output_a_target_e2e, LongitudinalPlanSource.e2e, output_should_stop_e2e))
 
     output_a_target, self.mpc.source, _ = min(candidates, key=lambda c: c[0])
     self.output_should_stop = any(should_stop for _, _, should_stop in candidates)
