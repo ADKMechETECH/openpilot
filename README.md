@@ -16,8 +16,9 @@ Before you even consider it, understand:
 - It was built for one specific car — a **2024 Civic Sport 6MT (HONDA_CIVIC_2022, Bosch
   radarless)**. Behavior on any other car, trim, or model year is unknown and probably wrong.
 
-Features sit behind default-OFF toggles, but when enabled they are **real changes to how the car
-accelerates, brakes, and steers.**
+Features sit behind default-OFF toggles, except the manual low-speed handback, which is always on for
+manuals with openpilot longitudinal. When enabled, they are **real changes to how the car accelerates,
+brakes, and steers.**
 
 **You are 100% responsible for your own vehicle, your own safety, and everyone around you. If you
 flash this, enable it, and "just send it," that is entirely on you.** This fork exists so the
