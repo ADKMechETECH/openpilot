@@ -71,7 +71,10 @@ class ControlsExt(ModelStateBase):
       self._param_update_time = time.monotonic()
 
   def get_long_paused(self, sm: messaging.SubMaster) -> bool:
-    # Must run every frame (not short-circuited) so the gate sees every gas/clutch/RPM edge
+    # Must run every frame (not short-circuited) so the gate sees every gas/clutch/RPM edge.
+    # TODO(on-car): verify the Honda radarless VSA/PCM accept ACC_CONTROL with CONTROL_ON set but no gas/brake and
+    #  no driver pedal input for the length of a shift (no CRUISE_FAULT, no cruise cancel). Fleet gas overrides only
+    #  exercise this frame with the pedal pressed.
     return self.clutch_shift_gate.update(sm['carState'])
 
   def get_lat_active(self, sm: messaging.SubMaster) -> bool:

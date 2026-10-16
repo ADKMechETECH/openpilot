@@ -149,6 +149,8 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
 
     if self.non_adaptive:
       # Set-speed only: drop the lead-following MPC and e2e candidates. The MPC still ran above, so FCW is unchanged.
+      # TODO(on-car): verify set-speed hold on an empty road, and what the radarless brake path does above set speed
+      #  (a_cruise still asks for up to -1.2 m/s^2 downhill; see opendbc PR #2050).
       candidates = [(self.a_cruise, LongitudinalPlanSource.cruise, cruise_should_stop)]
     else:
       candidates = [(output_a_target_mpc, self.mpc.source, output_should_stop_mpc),
