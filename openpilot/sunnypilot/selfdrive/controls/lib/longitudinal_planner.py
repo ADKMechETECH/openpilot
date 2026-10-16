@@ -38,16 +38,19 @@ class LongitudinalPlannerSP:
     self.output_v_target = 0.
     self.output_a_target = 0.
 
-    # Non-adaptive (set-speed only) longitudinal: ignore leads and the e2e model, hold set speed
+    # Non-adaptive (set-speed only) longitudinal: ignore leads and the e2e model, hold set speed.
+    # Transmission- and platform-agnostic; only meaningful when openpilot owns longitudinal (with stock ACC the
+    # plan doesn't actuate, and must not be reshaped behind the stock controller's back).
     self._params = Params()
-    self.non_adaptive = self._params.get_bool("NonAdaptiveLongitudinal")
+    self.non_adaptive_available = bool(CP.openpilotLongitudinalControl)
+    self.non_adaptive = self.non_adaptive_available and self._params.get_bool("NonAdaptiveLongitudinal")
     self._non_adaptive_requested = self.non_adaptive
     self._non_adaptive_frame = 0
 
   def update_non_adaptive(self, long_inactive: bool) -> None:
     # The toggle is re-read at 1 Hz but only applied while longitudinal is inactive, so the mode never flips mid-engagement
     if self._non_adaptive_frame % int(1. / DT_MDL) == 0:
-      self._non_adaptive_requested = self._params.get_bool("NonAdaptiveLongitudinal")
+      self._non_adaptive_requested = self.non_adaptive_available and self._params.get_bool("NonAdaptiveLongitudinal")
     self._non_adaptive_frame += 1
     if long_inactive:
       self.non_adaptive = self._non_adaptive_requested

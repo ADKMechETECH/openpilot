@@ -85,6 +85,35 @@ class TestNonAdaptiveLongitudinal(OpenpilotTestCase):
     self.assertLess(logs[-1]["speed"], 12.0)
     self.assertGreater(min(l["distance_lead"] - l["distance"] for l in logs), 2.0)
 
+  def test_available_regardless_of_transmission(self):
+    # longitudinal-behavior feature: gated only on openpilot longitudinal, never on transmission or brand
+    from opendbc.car.structs import CarParams
+    Params().put_bool("NonAdaptiveLongitudinal", True)
+    for transmission in (CarParams.TransmissionType.manual, CarParams.TransmissionType.automatic,
+                         CarParams.TransmissionType.cvt):
+      with self.subTest(transmission=transmission):
+        planner = build_planner(op_long=True, transmission=transmission)
+        planner.update(build_sm(experimental_mode=True))
+        self.assertTrue(planner.non_adaptive)
+        self.assertEqual(planner.mpc.source, LongitudinalPlanSource.cruise)
+    # and on a non-Honda platform (Plant runs a Nidec Civic; also check a Toyota)
+    from opendbc.car.toyota.interface import CarInterface as ToyotaInterface
+    from opendbc.car.toyota.values import CAR as TOYOTA
+    CP = ToyotaInterface.get_non_essential_params(TOYOTA.TOYOTA_RAV4_TSS2)
+    CP.openpilotLongitudinalControl = True
+    planner = LongitudinalPlanner(CP, ToyotaInterface.get_non_essential_params_sp(CP, TOYOTA.TOYOTA_RAV4_TSS2), init_v=20.0)
+    self.assertTrue(planner.non_adaptive)
+
+  def test_inert_without_openpilot_longitudinal(self):
+    # stock ACC (pcmCruise) car: the toggle must no-op, plan identical to OFF
+    Params().put_bool("NonAdaptiveLongitudinal", True)
+    planner = build_planner(op_long=False)
+    planner.dec = MockDec(active=False, mode='acc')
+    planner.update(build_sm(experimental_mode=True))
+    self.assertFalse(planner.non_adaptive_available)
+    self.assertFalse(planner.non_adaptive)
+    self.assertEqual(planner.mpc.source, LongitudinalPlanSource.e2e)
+
   def test_toggle_only_latches_while_long_inactive(self):
     plant, _ = run(False, 0.5, V_CRUISE)
     Params().put_bool("NonAdaptiveLongitudinal", True)
