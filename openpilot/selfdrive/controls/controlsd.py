@@ -117,8 +117,10 @@ class Controls(ControlsExt):
 
     CC.latActive = _lat_active and not CS.steerFaultTemporary and not CS.steerFaultPermanent and \
                    (not standstill or self.CP.steerAtStandstill)
+    # Manual-transmission clutch/shift gate: coast (no gas, no brake) while shifting, without disengaging
+    long_paused = self.get_long_paused(self.sm)
     CC.longActive = CC.enabled and not any(e.overrideLongitudinal for e in self.sm['onroadEvents']) and \
-                    (self.CP.openpilotLongitudinalControl or not self.CP_SP.pcmCruiseSpeed)
+                    (self.CP.openpilotLongitudinalControl or not self.CP_SP.pcmCruiseSpeed) and not long_paused
 
     actuators = CC.actuators
     actuators.longControlState = self.LoC.long_control_state

@@ -17,6 +17,7 @@ from openpilot.sunnypilot import PARAMS_UPDATE_PERIOD
 from openpilot.sunnypilot.livedelay.helpers import get_lat_delay
 from openpilot.sunnypilot.modeld_v2.modeld_base import ModelStateBase
 from openpilot.sunnypilot.selfdrive.controls.lib.blinker_pause_lateral import BlinkerPauseLateral
+from openpilot.sunnypilot.selfdrive.controls.lib.clutch_shift_gate import ClutchShiftGate
 from openpilot.sunnypilot.selfdrive.controls.lib.latcontrol_torque_v0 import LatControlTorque as LatControlTorqueV0
 
 
@@ -27,6 +28,7 @@ class ControlsExt(ModelStateBase):
     self.params = params
     self._param_update_time: float = 0.0
     self.blinker_pause_lateral = BlinkerPauseLateral()
+    self.clutch_shift_gate = ClutchShiftGate(CP, params)
 
     self.lane_centering = LaneCenteringController()
     self.update_lane_centering_params()
@@ -60,12 +62,17 @@ class ControlsExt(ModelStateBase):
   def get_params_sp(self, sm: messaging.SubMaster) -> None:
     if time.monotonic() - self._param_update_time > PARAMS_UPDATE_PERIOD:
       self.blinker_pause_lateral.get_params()
+      self.clutch_shift_gate.get_params()
       self.update_lane_centering_params()
 
       if self.CP.lateralTuning.which() == 'torque':
         self.lat_delay = get_lat_delay(self.params, sm["lateralDelay"].lateralDelay)
 
       self._param_update_time = time.monotonic()
+
+  def get_long_paused(self, sm: messaging.SubMaster) -> bool:
+    # Must run every frame (not short-circuited) so the gate sees every gas/clutch/RPM edge
+    return self.clutch_shift_gate.update(sm['carState'])
 
   def get_lat_active(self, sm: messaging.SubMaster) -> bool:
     if self.blinker_pause_lateral.update(sm['carState']):
