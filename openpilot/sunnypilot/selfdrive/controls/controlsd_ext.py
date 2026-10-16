@@ -18,6 +18,7 @@ from openpilot.sunnypilot.livedelay.helpers import get_lat_delay
 from openpilot.sunnypilot.modeld_v2.modeld_base import ModelStateBase
 from openpilot.sunnypilot.selfdrive.controls.lib.blinker_pause_lateral import BlinkerPauseLateral
 from openpilot.sunnypilot.selfdrive.controls.lib.clutch_shift_gate import ClutchShiftGate
+from openpilot.sunnypilot.selfdrive.controls.lib.no_service_brake import apply_brake_floor, read_decel_floor
 from openpilot.sunnypilot.selfdrive.controls.lib.latcontrol_torque_v0 import LatControlTorque as LatControlTorqueV0
 
 
@@ -29,6 +30,8 @@ class ControlsExt(ModelStateBase):
     self._param_update_time: float = 0.0
     self.blinker_pause_lateral = BlinkerPauseLateral()
     self.clutch_shift_gate = ClutchShiftGate(CP, params)
+    self.no_service_brake_enabled = params.get_bool("NoServiceBrakeHold")
+    self.no_service_brake_floor = read_decel_floor(params)
 
     self.lane_centering = LaneCenteringController()
     self.update_lane_centering_params()
@@ -63,12 +66,19 @@ class ControlsExt(ModelStateBase):
     if time.monotonic() - self._param_update_time > PARAMS_UPDATE_PERIOD:
       self.blinker_pause_lateral.get_params()
       self.clutch_shift_gate.get_params()
+      self.no_service_brake_enabled = self.params.get_bool("NoServiceBrakeHold")
+      self.no_service_brake_floor = read_decel_floor(self.params)
       self.update_lane_centering_params()
 
       if self.CP.lateralTuning.which() == 'torque':
         self.lat_delay = get_lat_delay(self.params, sm["lateralDelay"].lateralDelay)
 
       self._param_update_time = time.monotonic()
+
+  def apply_no_service_brake(self, sm: messaging.SubMaster, accel_limits: tuple[float, float]) -> tuple[float, float]:
+    # plannerd decides (longitudinalPlan.allowBrake); an invalid plan never clamps (fails toward allowing braking)
+    return apply_brake_floor(accel_limits, sm['longitudinalPlan'].allowBrake, sm.valid['longitudinalPlan'],
+                             self.no_service_brake_enabled, self.no_service_brake_floor)
 
   def get_long_paused(self, sm: messaging.SubMaster) -> bool:
     # Must run every frame (not short-circuited) so the gate sees every gas/clutch/RPM edge.

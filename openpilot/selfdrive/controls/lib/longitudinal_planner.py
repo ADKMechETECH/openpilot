@@ -63,6 +63,7 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
     self.fcw = False
     self.dt = dt
     self.allow_throttle = True
+    self.allow_brake = True
 
     self.v_desired_filter = FirstOrderFilter(init_v, 2.0, self.dt)
     self.a_cruise = init_a
@@ -161,6 +162,8 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
     output_a_target, self.mpc.source, _ = min(candidates, key=lambda c: c[0])
     self.output_should_stop = any(should_stop for _, _, should_stop in candidates)
     self.output_a_target = np.clip(output_a_target, ACCEL_MIN, ACCEL_MAX)
+    # no-service-brake mode: controlsd applies the decel floor when braking isn't allowed (aTarget stays the plan's intent)
+    self.allow_brake = LongitudinalPlannerSP.update_no_service_brake(self, sm, reset_state, v_ego)
 
     self.v_desired_filter.x = self.v_desired_filter.x + self.dt * (self.output_a_target + a_prev) / 2.0
 
@@ -184,7 +187,7 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
 
     longitudinalPlan.aTarget = float(self.output_a_target)
     longitudinalPlan.shouldStop = bool(self.output_should_stop)
-    longitudinalPlan.allowBrake = True
+    longitudinalPlan.allowBrake = bool(self.allow_brake)
     longitudinalPlan.allowThrottle = bool(self.allow_throttle)
 
     pm.send('longitudinalPlan', plan_send)

@@ -12,6 +12,7 @@ from openpilot.common.params import Params
 from openpilot.common.realtime import DT_MDL
 from openpilot.selfdrive.car.cruise import V_CRUISE_MAX
 from openpilot.sunnypilot.selfdrive.controls.lib.dec.dec import DynamicExperimentalController
+from openpilot.sunnypilot.selfdrive.controls.lib.no_service_brake import NoServiceBrake
 from openpilot.sunnypilot.selfdrive.controls.lib.e2e_alerts_helper import E2EAlertsHelper
 from openpilot.sunnypilot.selfdrive.controls.lib.smart_cruise_control.smart_cruise_control import SmartCruiseControl
 from openpilot.sunnypilot.selfdrive.controls.lib.speed_limit.speed_limit_assist import SpeedLimitAssist
@@ -46,6 +47,13 @@ class LongitudinalPlannerSP:
     self.non_adaptive = self.non_adaptive_available and self._params.get_bool("NonAdaptiveLongitudinal")
     self._non_adaptive_requested = self.non_adaptive
     self._non_adaptive_frame = 0
+
+    # No-service-brake ("coast over set speed"); only ever active together with non-adaptive (see no_service_brake.py)
+    self.no_service_brake = NoServiceBrake(CP, self._params)
+
+  def update_no_service_brake(self, sm: messaging.SubMaster, long_inactive: bool, v_ego: float) -> bool:
+    v_set = min(sm['carState'].vCruise, V_CRUISE_MAX) * CV.KPH_TO_MS  # driver's set speed, before SCC/SLA targets
+    return self.no_service_brake.update(long_inactive, self.non_adaptive, v_ego, v_set, sm['controlsState'].forceDecel)
 
   def update_non_adaptive(self, long_inactive: bool) -> None:
     # The toggle is re-read at 1 Hz but only applied while longitudinal is inactive, so the mode never flips mid-engagement

@@ -370,6 +370,10 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"NonAdaptiveLongitudinal", {PERSISTENT | BACKUP, BOOL, "0"}},
     {"ClutchShiftGate", {PERSISTENT | BACKUP, BOOL, "0"}},
     {"ClutchShiftGateGasReleaseHint", {PERSISTENT | BACKUP, BOOL, "0"}},
+    {"NoServiceBrakeHold", {PERSISTENT | BACKUP, BOOL, "0"}},
+    {"NoServiceBrakeDecelFloor", {PERSISTENT | BACKUP, FLOAT, "0.3"}},
+    {"NoServiceBrakeOverspeedBackstop", {PERSISTENT | BACKUP, BOOL, "1"}},
+    {"NoServiceBrakeOverspeedMargin", {PERSISTENT | BACKUP, FLOAT, "3.6"}},
 
     // sunnypilot model params
     {"CameraOffset", {PERSISTENT | BACKUP, FLOAT, "0.0"}},
