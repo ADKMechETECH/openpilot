@@ -1,3 +1,30 @@
+# ⚠️ EXPERIMENTAL — NOT ROAD-VALIDATED — DO NOT FLASH THIS AND DRIVE IT
+
+**This is a personal, in-progress fork. It has NOT been tested on a real car.** Every feature
+here is sim/replay-tested only — there has been zero on-road validation. Do not flash this to a
+car and drive expecting it to behave safely.
+
+Before you even consider it, understand:
+
+- It runs **openpilot longitudinal on a radarless Honda, which DISABLES your car's factory
+  automatic emergency braking (CMBS)** while engaged. You lose stock AEB.
+- The manual-transmission features (clutch/shift gate, low-speed handback) are **experimental**
+  and rely on signals and assumptions (e.g. `GEAR_MT`, whether the car even has brake authority)
+  that are **not yet verified on-car**.
+- A "no-service-brake" coast mode **intentionally stops openpilot from braking** to hold set
+  speed on downhills.
+- It was built for one specific car — a **2024 Civic Sport 6MT (HONDA_CIVIC_2022, Bosch
+  radarless)**. Behavior on any other car, trim, or model year is unknown and probably wrong.
+
+Features sit behind default-OFF toggles, but when enabled they are **real changes to how the car
+accelerates, brakes, and steers.**
+
+**You are 100% responsible for your own vehicle, your own safety, and everyone around you. If you
+flash this, enable it, and "just send it," that is entirely on you.** This fork exists so the
+author can validate it carefully on his own car and share the approach with the community — it is
+NOT a ready-to-run release. Read the code, understand it, and do not trust it with your life or
+anyone else's until it has been properly road-validated.
+
 ![](https://user-images.githubusercontent.com/47793918/233812617-beab2e71-57b9-479e-8bff-c3931347ca40.png)
 
 ## 🌞 What is sunnypilot?
