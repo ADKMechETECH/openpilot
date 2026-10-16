@@ -9,23 +9,41 @@ from openpilot.cereal import log, custom
 from opendbc.car import structs
 
 from opendbc.car.chrysler.values import RAM_DT
+from openpilot.common.params import Params
+from openpilot.common.realtime import DT_CTRL
 from openpilot.selfdrive.selfdrived.events import Events
 from openpilot.sunnypilot.selfdrive.selfdrived.events import EventsSP
 
 EventName = log.OnroadEvent.EventName
 EventNameSP = custom.OnroadEventSP.EventName
 GearShifter = structs.CarState.GearShifter
+TransmissionType = structs.CarParams.TransmissionType
 
 
 class CarSpecificEventsSP:
-  def __init__(self, CP: structs.CarParams, CP_SP: structs.CarParamsSP):
+  def __init__(self, CP: structs.CarParams, CP_SP: structs.CarParamsSP, params: Params | None = None):
     self.CP = CP
     self.CP_SP = CP_SP
 
     self.low_speed_alert = False
 
+    self.params = params or Params()
+    self.clutch_gate_available = CP.transmissionType == TransmissionType.manual
+    self.clutch_gate_enabled = self.clutch_gate_available and self.params.get_bool("ClutchShiftGate")
+    self._frame = 0
+
   def update(self, CS: structs.CarState, events: Events):
     events_sp = EventsSP()
+
+    if self.clutch_gate_available:
+      if self._frame % int(1. / DT_CTRL) == 0:
+        self.clutch_gate_enabled = self.params.get_bool("ClutchShiftGate")
+      self._frame += 1
+      # Clutch/shift gate: with the clutch open the throttle only revs a disconnected engine (rev-match / heel-toe
+      # blip), so it is not a driver accel override. controlsd's gate already coasts longitudinal, and the panda
+      # still disallows longitudinal while gas is pressed. Brake events are untouched (heel-toe brake still counts).
+      if self.clutch_gate_enabled and CS.deprecated.clutchPressed and events.has(EventName.gasPressedOverride):
+        events.remove(EventName.gasPressedOverride)
 
     if self.CP.brand == 'chrysler':
       if self.CP.carFingerprint in RAM_DT:

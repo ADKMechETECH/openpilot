@@ -12,10 +12,14 @@ from openpilot.sunnypilot.selfdrive.controls.lib.dec.tests.test_dec_planner_gate
 V_CRUISE = 25.0  # m/s
 
 
-def build_planner() -> LongitudinalPlanner:
+def build_planner(op_long: bool = True, transmission=None) -> LongitudinalPlanner:
   from opendbc.car.honda.interface import CarInterface
   from opendbc.car.honda.values import CAR
   CP = CarInterface.get_non_essential_params(CAR.HONDA_CIVIC_2022)
+  CP.openpilotLongitudinalControl = op_long  # radarless Civic defaults to stock ACC unless alpha long is enabled
+  CP.pcmCruise = not op_long
+  if transmission is not None:
+    CP.transmissionType = transmission
   CP_SP = CarInterface.get_non_essential_params_sp(CP, CAR.HONDA_CIVIC_2022)
   planner = LongitudinalPlanner(CP, CP_SP, init_v=20.0)
   planner.dec = MockDec(active=False, mode='acc')  # DEC inactive: experimental mode alone decides e2e

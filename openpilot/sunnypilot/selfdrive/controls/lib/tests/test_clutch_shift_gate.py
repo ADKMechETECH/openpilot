@@ -17,11 +17,12 @@ def make_cp(transmission=TransmissionType.manual):
   return CP
 
 
-def cs(clutch=False, gas=False, rpm=CRUISE_RPM, v=V_CRUISE, a=0.):
+def cs(clutch=False, gas=False, rpm=CRUISE_RPM, v=V_CRUISE, a=0., brake=False):
   CS = car.CarState.new_message()
   CS.deprecated.clutchPressed = clutch
   CS.deprecated.engineRpm = rpm
   CS.gasPressed = gas
+  CS.brakePressed = brake
   CS.vEgo = v
   CS.aEgo = a
   return CS
@@ -80,14 +81,102 @@ class TestClutchShiftGate(OpenpilotTestCase):
     self.assertTrue(all(self.run_for(0.3, clutch=True)))
     self.assertEqual(self.gate.state, GateState.shifting)
 
+  def enable_gas_release_hint(self):
+    Params().put_bool("ClutchShiftGateGasReleaseHint", True)
+    self.gate.get_params()
+
+  def test_gas_release_hint_default_off(self):
+    # clutch is authoritative: by default a plain gas release (no clutch) never pauses longitudinal
+    self.assertFalse(self.gate.gas_release_hint)
+    self.run_for(1.0, gas=True)
+    self.assertFalse(any(self.run_for(1.0)))
+    self.assertEqual(self.gate.state, GateState.idle)
+
+  def test_rev_matched_downshift(self):
+    # 4th -> 3rd with a throttle blip while the clutch is open: gas pressed + RPM flare must not end the coast,
+    # must not be read as an override, and longitudinal resumes cleanly after the clutch re-engages
+    self.run_for(1.0)
+    self.assertTrue(all(self.run_for(0.2, clutch=True, rpm=1600.)))                      # clutch in, lift
+    blip = [self.gate.update(cs(clutch=True, gas=True, rpm=1600. + 120. * i)) for i in range(15)]  # +12000 rpm/s
+    self.assertTrue(all(blip))
+    self.assertEqual(self.gate.state, GateState.shifting)
+    self.assertTrue(all(self.run_for(0.2, clutch=True, rpm=3400.)))                      # off the gas, clutch still in
+    self.assertEqual(self.gate.state, GateState.shifting)
+    self.assertTrue(all(self.run_for(REENGAGE_DELAY - 0.05, rpm=3300., a=-0.3)))         # clutch out: re-engage hold
+    self.assert_resumes_within(0.05, rpm=3300., a=-0.3)
+
+  def test_rev_match_blip_never_uses_gas_release_hint(self):
+    # even with the hint on, a gas release while the clutch is open is part of the shift, not a new cue
+    self.enable_gas_release_hint()
+    self.run_for(1.0)
+    self.run_for(0.2, clutch=True, rpm=1600.)
+    self.run_for(0.15, clutch=True, gas=True, rpm=3000.)
+    self.run_for(0.1, clutch=True, rpm=3000.)
+    self.assertEqual(self.gate.state, GateState.shifting)
+    self.run_for(REENGAGE_DELAY + 0.1, rpm=3000.)
+    self.assertEqual(self.gate.state, GateState.idle)
+
+  def test_heel_toe_downshift(self):
+    # braking with the heel while blipping with the toe, clutch open: the gate stays coasting on clutch state
+    # alone (brake handling itself is stock - openpilot's normal brake disengage still applies upstream)
+    self.run_for(1.0)
+    held = self.run_for(0.2, clutch=True, brake=True, rpm=1800., a=-2.0)
+    held += [self.gate.update(cs(clutch=True, brake=True, gas=True, rpm=1800. + 120. * i, a=-2.0)) for i in range(15)]
+    held += self.run_for(0.2, clutch=True, brake=True, rpm=3500., a=-2.0)
+    self.assertTrue(all(held))
+    self.assertEqual(self.gate.state, GateState.shifting)
+    self.assertTrue(all(self.run_for(REENGAGE_DELAY - 0.05, brake=True, rpm=3400., a=-1.5)))
+    self.assert_resumes_within(0.05, rpm=3400., a=-1.0)
+
+  def test_clutch_out_with_gas_hands_over_to_override(self):
+    # once the clutch re-engages with the driver still on the gas, it is a real override again (gate idle)
+    self.run_for(1.0)
+    self.run_for(0.4, clutch=True, gas=True, rpm=3000.)
+    self.assertFalse(any(self.run_for(0.3, gas=True, rpm=3000., a=0.8)))
+    self.assertEqual(self.gate.state, GateState.idle)
+
+  def test_clutch_cancels_running_backstop_hold(self):
+    # backstop fired (clutch signal late), then the clutch signal shows up: the shift is now timed by the clutch
+    # (re-engage delay after clutch-out), not by the longer FLARE_CLEAR_TIME
+    self.run_for(1.0)
+    [self.gate.update(cs(rpm=CRUISE_RPM + 40. * i)) for i in range(10)]
+    self.assertGreater(self.gate.flare_clear_timer, 0.)
+    self.run_for(0.2, clutch=True, rpm=2600.)
+    self.assertEqual(self.gate.flare_clear_timer, 0.)
+    self.assertTrue(all(self.run_for(REENGAGE_DELAY - 0.05, rpm=2600.)))
+    self.assert_resumes_within(0.05, rpm=2600.)
+
+  def test_resume_reseeds_from_a_ego(self):
+    # the gate pauses via longActive=False -> LongControl off -> the planner resets its output to the measured aEgo,
+    # so resuming after a shift starts from the car's actual decel instead of the pre-shift command
+    from openpilot.cereal import messaging
+    from openpilot.selfdrive.controls.lib.longcontrol import LongCtrlState
+    from openpilot.sunnypilot.selfdrive.controls.lib.tests.test_non_adaptive_longitudinal import build_planner
+    from openpilot.sunnypilot.selfdrive.controls.lib.dec.tests.test_dec_planner_gate import build_sm
+    planner = build_planner()
+    sm = build_sm(experimental_mode=False)
+    planner.update(sm)  # engaged, cruising
+    for long_state, a_ego in ((LongCtrlState.off, -0.6), (LongCtrlState.pid, -0.6)):
+      car_state = messaging.new_message('carState')
+      car_state.carState.vEgo, car_state.carState.aEgo = 20.0, a_ego
+      car_state.carState.vCruise = car_state.carState.vCruiseCluster = 100.0
+      controls = messaging.new_message('controlsState')
+      controls.controlsState.longControlState = long_state
+      sm['carState'], sm['controlsState'] = car_state.carState.as_reader(), controls.controlsState.as_reader()
+      planner.update(sm)
+    # first frame back: starts from -0.6 and is jerk-limited toward the set-speed target, not a step
+    self.assertAlmostEqual(planner.output_a_target, -0.6, delta=0.15)
+
   def test_gas_release_then_clutch(self):
     # driver overriding on gas lifts, then clutches: no gap where longitudinal could resume between the two
+    self.enable_gas_release_hint()
     self.run_for(1.0, gas=True)
     paused = self.run_for(0.2) + self.run_for(0.5, clutch=True)
     self.assertTrue(all(paused))
     self.assertEqual(self.gate.state, GateState.shifting)
 
   def test_gas_release_without_clutch_resumes(self):
+    self.enable_gas_release_hint()
     self.run_for(1.0, gas=True)
     self.assertTrue(all(self.run_for(GAS_RELEASE_WINDOW - 0.05)))
     self.assert_resumes_within(0.05)
