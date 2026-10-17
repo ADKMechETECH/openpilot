@@ -180,6 +180,9 @@ procs += [
 
   # locationd
   NativeProcess("locationd_llk", "openpilot/sunnypilot/selfdrive/locationd", ["./locationd"], only_onroad),
+
+  # on-car test console (dev-test branch only): telemetry + wheel-button read, zero driving authority
+  PythonProcess("test_consoled", "openpilot.sunnypilot.selfdrive.test_console.test_consoled", only_onroad),
 ]
 
 if os.path.exists("../../sunnypilot/sunnylink/uploader.py"):

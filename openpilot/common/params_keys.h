@@ -383,6 +383,13 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"EngineBrakeLeadClosingSpeed", {PERSISTENT | BACKUP, FLOAT, "1.0"}},
     {"GearAwareAccel", {PERSISTENT | BACKUP, BOOL, "0"}},
 
+    // on-car test console — dev-test branch (civic-6mt-dev-test) only; never on the feature branch
+    {"TestConsoleSelected", {PERSISTENT, STRING}},
+    {"TestConsoleArmed", {CLEAR_ON_MANAGER_START, BOOL, "0"}},
+    {"TestConsoleBackground", {PERSISTENT, BOOL, "0"}},
+    {"TestConsoleStartButton", {PERSISTENT, STRING, "gapAdjustCruise"}},
+    {"TestConsoleStartPress", {PERSISTENT, STRING, "short"}},
+
     // sunnypilot model params
     {"CameraOffset", {PERSISTENT | BACKUP, FLOAT, "0.0"}},
     {"LagdToggle", {PERSISTENT | BACKUP, BOOL, "1"}},

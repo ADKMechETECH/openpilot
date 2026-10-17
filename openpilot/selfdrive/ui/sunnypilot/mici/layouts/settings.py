@@ -11,6 +11,7 @@ from openpilot.selfdrive.ui.mici.widgets.button import BigCircleButton
 from openpilot.selfdrive.ui.mici.widgets.dialog import BigConfirmationDialog, BigDialog
 from openpilot.selfdrive.ui.sunnypilot.mici.layouts.sunnylink import SunnylinkLayoutMici
 from openpilot.selfdrive.ui.sunnypilot.mici.layouts.models import ModelsLayoutMici
+from openpilot.selfdrive.ui.sunnypilot.mici.layouts.dev_test import DevTestLayoutMici, dev_test_button_icon
 from openpilot.selfdrive.ui.ui_state import ui_state
 from openpilot.system.ui.lib.application import gui_app, FontWeight
 from openpilot.system.ui.lib.multilang import tr
@@ -68,6 +69,12 @@ class SettingsLayoutSP(OP.SettingsLayout):
 
     items.insert(1, models_btn)
     items.insert(5, sunnylink_btn)
+
+    # dev-test build only: on-car test console (telemetry, sets no toggles), right after developer
+    dev_test_panel = DevTestLayoutMici()
+    dev_test_btn = SettingsBigButton(tr("dev test"), "", dev_test_button_icon())
+    dev_test_btn.set_click_callback(lambda: gui_app.push_widget(dev_test_panel))
+    items.append(dev_test_btn)
 
     # front slots (only one ever visible at a time): exit-always-offroad, then enable-onroad
     items.insert(0, self._enable_offroad_btn_onroad)
