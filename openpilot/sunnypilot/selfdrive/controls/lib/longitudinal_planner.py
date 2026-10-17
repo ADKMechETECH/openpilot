@@ -13,6 +13,8 @@ from openpilot.common.realtime import DT_MDL
 from openpilot.selfdrive.car.cruise import V_CRUISE_MAX
 from openpilot.sunnypilot.selfdrive.controls.lib.dec.dec import DynamicExperimentalController
 from openpilot.sunnypilot.selfdrive.controls.lib.no_service_brake import NoServiceBrake
+from openpilot.sunnypilot.selfdrive.controls.lib.engine_brake_model import CoastEventLogger
+from openpilot.sunnypilot.selfdrive.controls.lib.gear_aware_accel import GearAwareAccel
 from openpilot.sunnypilot.selfdrive.controls.lib.e2e_alerts_helper import E2EAlertsHelper
 from openpilot.sunnypilot.selfdrive.controls.lib.smart_cruise_control.smart_cruise_control import SmartCruiseControl
 from openpilot.sunnypilot.selfdrive.controls.lib.speed_limit.speed_limit_assist import SpeedLimitAssist
@@ -50,6 +52,25 @@ class LongitudinalPlannerSP:
 
     # No-service-brake ("coast over set speed"); only ever active together with non-adaptive (see no_service_brake.py)
     self.no_service_brake = NoServiceBrake(CP, self._params)
+
+    # Manual only: gear-indexed set-speed jerk shaping (toggle GearAwareAccel, default OFF), and coast-event telemetry
+    # for calibrating engine_brake_model (not a toggle: logging only, can't change driving — like the Phase 1 signals)
+    self.gear_aware_accel = GearAwareAccel(CP, self._params)
+    self.coast_logger = CoastEventLogger(CP.transmissionType == structs.CarParams.TransmissionType.manual, DT_MDL)
+
+  @staticmethod
+  def _pitch(sm: messaging.SubMaster) -> float | None:
+    orientation = sm['carControl'].orientationNED
+    return orientation[1] if len(orientation) == 3 else None
+
+  def update_coast_logger(self, sm: messaging.SubMaster, fcw: bool) -> None:
+    pitch = self._pitch(sm)
+    self.coast_logger.update(sm['carState'], sm['carControl'].longActive, fcw, pitch if pitch is not None else float('nan'))
+
+  def update_gear_aware_accel(self, sm: messaging.SubMaster, long_inactive: bool, fcw: bool, a_cruise_prev: float,
+                              cruise_target: float) -> tuple[float, float]:
+    return self.gear_aware_accel.update(long_inactive, sm['carState'], self._pitch(sm), fcw, sm['radarState'],
+                                        a_cruise_prev, cruise_target)
 
   def update_no_service_brake(self, sm: messaging.SubMaster, long_inactive: bool, v_ego: float) -> bool:
     v_set = min(sm['carState'].vCruise, V_CRUISE_MAX) * CV.KPH_TO_MS  # driver's set speed, before SCC/SLA targets

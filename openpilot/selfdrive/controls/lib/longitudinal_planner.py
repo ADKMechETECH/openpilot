@@ -35,7 +35,8 @@ def get_max_accel(v_ego):
 def get_coast_accel(pitch):
   return np.sin(pitch) * -5.65 - 0.3  # fitted from data using xx/projects/allow_throttle/compute_coast_accel.py
 
-def get_cruise_accel(e2e, v_cruise, v_ego, a_cruise_prev, angle_steers, CP, dt, accel_coast, allow_throttle):
+def get_cruise_accel(e2e, v_cruise, v_ego, a_cruise_prev, angle_steers, CP, dt, accel_coast, allow_throttle,
+                     j_scale=(1.0, 1.0)):
   max_accel = ACCEL_MAX if e2e else get_max_accel(v_ego)
 
   if not e2e:
@@ -50,7 +51,8 @@ def get_cruise_accel(e2e, v_cruise, v_ego, a_cruise_prev, angle_steers, CP, dt, 
 
   target_accel = np.clip(v_cruise - v_ego, A_CRUISE_MIN, max_accel)
   j_cruise = np.interp(v_ego, A_CRUISE_MAX_BP, J_CRUISE_VALS)
-  target_accel = float(np.clip(target_accel, a_cruise_prev - j_cruise * dt, a_cruise_prev + j_cruise * dt))
+  # j_scale = (rise, fall) factors from GearAwareAccel (manual only, <= 1.0); (1.0, 1.0) = stock
+  target_accel = float(np.clip(target_accel, a_cruise_prev - j_cruise * j_scale[1] * dt, a_cruise_prev + j_cruise * j_scale[0] * dt))
 
   return target_accel
 
@@ -143,9 +145,13 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
 
     is_e2e = self.is_e2e(sm) and not self.non_adaptive
 
+    # manual: engine-brake coast telemetry (never affects control) and gear-indexed set-speed jerk shaping
+    LongitudinalPlannerSP.update_coast_logger(self, sm, self.fcw)
+    j_scale = LongitudinalPlannerSP.update_gear_aware_accel(self, sm, reset_state, self.fcw, self.a_cruise,
+                                                            float(np.clip(v_cruise - v_ego, A_CRUISE_MIN, ACCEL_MAX)))
     self.a_cruise = get_cruise_accel(is_e2e, v_cruise, v_ego,
                                      self.a_cruise, steer_angle_without_offset, self.CP, self.dt,
-                                     accel_coast, self.allow_throttle)
+                                     accel_coast, self.allow_throttle, j_scale)
     cruise_should_stop = should_stop(v_ego, self.a_cruise)
 
     if self.non_adaptive:
