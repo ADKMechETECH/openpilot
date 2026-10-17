@@ -9,7 +9,7 @@ Before you even consider it, understand:
 - It runs **openpilot longitudinal on a radarless Honda, which DISABLES your car's factory
   automatic emergency braking (CMBS)** while engaged. You lose stock AEB.
 - The manual-transmission features (clutch/shift gate, low-speed handback) are **experimental**
-  and rely on signals and assumptions (e.g. `GEAR_MT`, whether the car even has brake authority)
+  and rely on signals and assumptions (e.g. `GEAR_MT`, how strongly openpilot's radarless braking actually brakes)
   that are **not yet verified on-car**.
 - A "no-service-brake" coast mode **intentionally stops openpilot from braking** to hold set
   speed on downhills.

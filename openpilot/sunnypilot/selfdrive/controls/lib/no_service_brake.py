@@ -29,8 +29,9 @@ from openpilot.common.swaglog import cloudlog
 #  be served by the brakes on some platforms (Honda radarless: VSA decides from ACCEL_COMMAND).
 DEFAULT_DECEL_FLOOR = 0.3       # m/s^2, magnitude of the most negative accel openpilot may command while clamped
 MAX_DECEL_FLOOR = 3.5
-# TODO(on-car): tune the overspeed margin. ~8 mph. The backstop is INERT if openpilot has no brake authority on the car
-#  (Honda radarless: only with COMPUTER_BRAKE_ASSIST, i.e. 0x1BE in the fingerprint — unverified on our car).
+# TODO(on-car): tune the overspeed margin. ~8 mph. The backstop is only as strong as openpilot's braking on the car
+#  (Honda radarless: the camera-path negative ACCEL_COMMAND; how hard the VSA brakes on it is the open opendbc PR #2050
+#  question — unverified on our car. Not 0x1BE: that is the alternate user-brake-pedal message, not brake authority.)
 DEFAULT_OVERSPEED_MARGIN = 3.6  # m/s above set speed at which braking is allowed again
 BACKSTOP_RELEASE_RATIO = 0.5    # braking stays allowed until back under set speed + margin * ratio (hysteresis)
 # The stock-AEB consequence of openpilot longitudinal is platform-specific (disabled on Honda radarless, retained on some
