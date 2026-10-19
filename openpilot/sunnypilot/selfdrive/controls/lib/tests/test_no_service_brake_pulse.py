@@ -17,9 +17,11 @@ from openpilot.common.test import OpenpilotTestCase
 from openpilot.selfdrive.controls.lib.longitudinal_planner import J_CRUISE_VALS
 from openpilot.sunnypilot.selfdrive.controls.controlsd_ext import ControlsExt
 from openpilot.sunnypilot.selfdrive.controls.lib.no_service_brake import NoServiceBrake, PulseFloor, PulseParams, \
-  apply_brake_floor, overspeed_urgent, read_decel_floor, read_overspeed_mode, read_pulse_params, BACKSTOP_RELEASE_RATIO, \
+  apply_brake_floor, read_decel_floor, read_overspeed_mode, read_pulse_params, BACKSTOP_RELEASE_RATIO, \
   DEFAULT_HARD_CEILING, DEFAULT_OVERSPEED_MARGIN, DEFAULT_PULSE_DECEL, DEFAULT_PULSE_JERK, DEFAULT_RELEASE_MARGIN, \
   HARD_CEILING_RANGE, PULSE_DECEL_RANGE, PULSE_JERK_RANGE, PULSE_MIN_BAND, RELEASE_MARGIN_RANGE
+from openpilot.sunnypilot.selfdrive.controls.lib.braking_urgency import braking_urgency
+from openpilot.sunnypilot.selfdrive.controls.lib.tests.manual_sim import FakeSM as _FakeSM
 from openpilot.sunnypilot.selfdrive.controls.lib.tests.test_no_service_brake import DownhillSim, V_SET
 from openpilot.sunnypilot.selfdrive.selfdrived.events import EVENTS_SP
 from openpilot.selfdrive.selfdrived.events import ET
@@ -90,15 +92,13 @@ def car_state(v=25., stock_aeb=False, stock_fcw=False):
   return cs
 
 
-class FakeSM(dict):
-  """plannerd/controlsd SubMaster stand-in: valid, logMonoTime, all_checks."""
+class FakeSM(_FakeSM):
+  """plannerd/controlsd SubMaster stand-in; valid=False marks every service invalid (all_checks fails)."""
   def __init__(self, *a, valid=True, **kw):
     super().__init__(*a, **kw)
-    self.valid = dict.fromkeys(('longitudinalPlan', 'longitudinalPlanSP', 'radarState'), valid)
-    self.logMonoTime = {'modelV2': 0}
-
-  def all_checks(self, service_list=None):
-    return True
+    if not valid:
+      self.invalid = set(self.keys())
+      self.valid = dict.fromkeys(self, False)
 
 
 class FakePM:
@@ -117,6 +117,7 @@ class _Ext(ControlsExt):
     self.no_service_brake_enabled = params.get_bool("NoServiceBrakeHold")
     self.no_service_brake_floor = read_decel_floor(params)
     self.no_service_brake_pulse = PF()
+    self.urgency = None   # controls_urgency(); these tests drive plannerd's side of Rule 5
 
 
 class PulseSim(DownhillSim):
@@ -140,6 +141,7 @@ class PulseSim(DownhillSim):
     for _ in range(round(seconds / DT_MDL)):
       sm = self._sm()
       self.planner.update(sm)
+      self.engaged = True
       self.events.append(list(self.planner.events_sp.names))
       pm = FakePM()
       self.planner.publish(sm, pm)
@@ -221,11 +223,11 @@ class TestPulseStateMachine(OpenpilotTestCase):
   def make(self, **params):
     p = setup(**params)
     nsb = NoServiceBrake(FakeCP(), p)
-    nsb.update(True, True, V_SET, V_SET, False)  # latch while long inactive
+    nsb.update(False, True, V_SET, V_SET, False)  # latch while disengaged
     return nsb
 
   def step(self, nsb, over, urgent=None, force_decel=False, long_inactive=False, non_adaptive=True):
-    return nsb.update(long_inactive, non_adaptive, V_SET + over, V_SET, force_decel, urgent)
+    return nsb.update(not long_inactive, non_adaptive, V_SET + over, V_SET, force_decel, urgent)
 
   def test_coast_pulse_coast(self):
     nsb = self.make()
@@ -329,22 +331,26 @@ class TestPulseStateMachine(OpenpilotTestCase):
   def test_mode_latches_only_while_inactive(self):
     p = setup(mode="maintain")
     nsb = NoServiceBrake(FakeCP(), p)
-    nsb.update(True, True, V_SET, V_SET, False)
+    nsb.update(False, True, V_SET, V_SET, False)
     p.put("NoServiceBrakeOverspeedMode", "pulse", block=True)
     for _ in range(50):
-      nsb.update(False, True, V_SET, V_SET, False)
+      nsb.update(True, True, V_SET, V_SET, False)
     self.assertEqual(nsb.mode, "maintain")
-    nsb.update(True, True, V_SET, V_SET, False)
+    nsb.update(False, True, V_SET, V_SET, False)
     self.assertEqual(nsb.mode, "pulse")
 
-  def test_overspeed_urgent(self):
-    self.assertIsNone(overspeed_urgent(car_state(), False, radar()))
-    self.assertEqual(overspeed_urgent(car_state(), True, radar()), "fcw_aeb")
-    self.assertEqual(overspeed_urgent(car_state(stock_aeb=True), False, radar()), "fcw_aeb")
-    self.assertEqual(overspeed_urgent(car_state(stock_fcw=True), False, radar()), "fcw_aeb")
-    self.assertEqual(overspeed_urgent(car_state(), False, radar(lead(80., -2.))), "lead")    # closing
-    self.assertEqual(overspeed_urgent(car_state(), False, radar(lead(15., 0.))), "lead")    # close
-    self.assertIsNone(overspeed_urgent(car_state(), False, radar(lead(80., 1.))))           # pulling away
+  def test_rule5_urgency_covers_the_former_overspeed_urgent(self):
+    # Task 12 R5: overspeed_urgent() is gone; the shared predicate flags every case it did (and more)
+    def urg(cs, fcw, r):
+      return braking_urgency(plan_ok=True, radar_ok=True, force_decel=False, fcw=fcw, stock_aeb=cs.stockAeb or cs.stockFcw,
+                             should_stop=False, a_target=0., v_ego=cs.vEgo, radar=r)
+    self.assertIsNone(urg(car_state(), False, radar()))
+    self.assertEqual(urg(car_state(), True, radar()), "fcw")
+    self.assertEqual(urg(car_state(stock_aeb=True), False, radar()), "stock_aeb")
+    self.assertEqual(urg(car_state(stock_fcw=True), False, radar()), "stock_aeb")
+    self.assertTrue(urg(car_state(), False, radar(lead(80., -2.))).startswith("lead"))   # closing
+    self.assertTrue(urg(car_state(), False, radar(lead(15., 0.))).startswith("lead"))    # close
+    self.assertIsNone(urg(car_state(), False, radar(lead(80., 1.))))                     # pulling away
 
 
 class TestMaintainUnchanged(OpenpilotTestCase):
@@ -353,14 +359,16 @@ class TestMaintainUnchanged(OpenpilotTestCase):
     for backstop in (True, False):
       setup(mode="maintain", NoServiceBrakeOverspeedBackstop=backstop)
       nsb = NoServiceBrake(FakeCP(), Params())
-      nsb.update(True, True, V_SET, V_SET, False)
+      nsb.update(False, True, V_SET, V_SET, False)
       ref = LegacyNoServiceBrake(True, backstop=backstop)
       v = V_SET
       for _ in range(3000):
         v = float(np.clip(v + rng.uniform(-0.4, 0.4), V_SET - 3, V_SET + 9))
         non_adaptive, force_decel = rng.random() > 0.05, rng.random() < 0.03
-        urgent = rng.choice((None, None, "lead", "fcw_aeb"))
-        self.assertEqual(nsb.update(False, non_adaptive, v, V_SET, force_decel, urgent), ref.update(non_adaptive, v, V_SET, force_decel))
+        urgent = rng.choice((None, None, "lead_close", "fcw"))
+        # the only change since Task 11: Rule 5 (Task 12) - any urgency also allows braking
+        self.assertEqual(nsb.update(True, non_adaptive, v, V_SET, force_decel, urgent),
+                         ref.update(non_adaptive, v, V_SET, force_decel) or urgent is not None)
         self.assertEqual(nsb.state, "off")
 
   def test_maintain_closed_loop_identical(self):
@@ -452,7 +460,7 @@ class TestPulseFloor(OpenpilotTestCase):
     sp = messaging.new_message('longitudinalPlanSP').longitudinalPlanSP
     sp.noServiceBrake.state, sp.noServiceBrake.accelFloor = "pulsing", -1.0
     sm = FakeSM({'longitudinalPlan': plan, 'longitudinalPlanSP': sp})
-    sm.valid['longitudinalPlanSP'] = False
+    sm.invalid.add('longitudinalPlanSP')
     self.assertEqual(ext.apply_no_service_brake(sm, (-3.5, 2.0), True, -0.3), (-3.5, 2.0))
 
 
