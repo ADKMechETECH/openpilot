@@ -14,6 +14,7 @@ from opendbc.car import Bus, structs
 from openpilot.common.swaglog import cloudlog
 
 NAN = float("nan")
+STALE_NS = 200_000_000   # a raw role not refreshed for 0.2 s (relative to the bus) reads as unavailable (Task 12 D-16)
 
 
 class RawCanTap:
@@ -24,6 +25,8 @@ class RawCanTap:
     self.raw_17c = -1
     self.accel_sent = NAN
     self.brake_assist = -1
+    self.t_bus = 0                       # newest bus time seen (ns)
+    self.t_17c = self.t_sent = 0         # when raw_17c / the sent ACC_CONTROL were last refreshed (ns)
     try:
       from opendbc.can import CANParser
       from opendbc.car.honda.hondacan import CanBus
@@ -42,6 +45,7 @@ class RawCanTap:
     if not self.available:
       return
     if can_list:
+      self.t_bus = max(self.t_bus, max(t for t, _ in can_list))
       updated = self.cp.update(can_list)
       if updated:
         vl = self.cp.vl
@@ -49,17 +53,28 @@ class RawCanTap:
           self.gear_mt = int(vl["GEARBOX_ALT_2"]["GEAR_MT"])
         if self.cp.ts_nanos["POWERTRAIN_DATA"]["PEDAL_GAS"]:
           self.pedal_gas = float(vl["POWERTRAIN_DATA"]["PEDAL_GAS"])
-      for _, frames in can_list:
+      for t, frames in can_list:
         for address, dat, src in frames:
           if address == 0x17C and src == self.bus:
             self.raw_17c = int.from_bytes(dat, "big")
+            self.t_17c = t
     if sendcan_list:
       self.cp_send.update(sendcan_list, sendcan=True)
       if self.cp_send.ts_nanos["ACC_CONTROL"]["ACCEL_COMMAND"]:
         self.accel_sent = float(self.cp_send.vl["ACC_CONTROL"]["ACCEL_COMMAND"])
         self.brake_assist = int(self.cp_send.vl["ACC_CONTROL"]["COMPUTER_BRAKE_ASSIST"])
+        self.t_sent = max(t for t, _ in sendcan_list)
+
+  def _fresh(self, t_ns: int) -> bool:
+    return t_ns > 0 and self.t_bus - t_ns < STALE_NS
 
   def fill(self, s) -> None:
-    """The raw roles of a Sample (signals.Sample)."""
-    s.gear_raw, s.gas_raw, s.raw_payload = self.gear_mt, self.pedal_gas, self.raw_17c
-    s.accel_sent, s.brake_assist = self.accel_sent, self.brake_assist
+    """The raw roles of a Sample (signals.Sample); a role whose source went quiet reads as unavailable (D-16)."""
+    ts = self.cp.ts_nanos if self.available else {}
+    gear_ok = self.available and self._fresh(ts["GEARBOX_ALT_2"]["GEAR_MT"])
+    gas_ok = self.available and self._fresh(ts["POWERTRAIN_DATA"]["PEDAL_GAS"])
+    s.gear_raw = self.gear_mt if gear_ok else -1
+    s.gas_raw = self.pedal_gas if gas_ok else NAN
+    s.raw_payload = self.raw_17c if self._fresh(self.t_17c) else -1
+    sent_ok = self._fresh(self.t_sent)
+    s.accel_sent, s.brake_assist = (self.accel_sent, self.brake_assist) if sent_ok else (NAN, -1)

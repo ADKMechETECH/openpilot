@@ -14,6 +14,7 @@ TC = "openpilot/sunnypilot/selfdrive/test_console"
 R = f"{TC}/profiles/civic_6mt/results.py"
 UI = "openpilot/selfdrive/ui/sunnypilot/mici/layouts"
 T = [f"{TC}/tests/test_test_console.py", f"{TC}/tests/test_task12_console.py", f"{TC}/tests/test_sessions.py"]
+SMOKE = [f"{TC}/tests/test_ui_smoke.py"]
 
 
 def m(mid, finding, file, old, new, tests=T):
@@ -51,6 +52,26 @@ MUTATIONS = [
   m("d3_g2_no_shifting_ok", "D3 D-06", R, '''  no_gate = [e for e in a.episodes if "shifting" not in e["gate_states"]]''', "  no_gate = []"),
   m("d3_s2_no_coverage", "D3 D-13", R, "  if low:\n", "  if False:\n"),
   m("d3_n1_fcw_note", "D3 D-12", R, '(" (FCW not exercised)" if a.fcw_edges == 0 else "")', '""'),
+  m("d4_bit_hunt_uncached", "D4 D-07", f"{TC}/analyzers.py", '    return self._cached("edges", self._candidates)',
+    "    return self._candidates()"),
+  m("d4_signature_no_tail", "D4 D-19", f"{TC}/analyzers.py", "    if frac >= 1. and self.t_now - self.t_last_edge < self.TAIL:",
+    "    if False:"),
+  m("d4_prune_only_on_open", "D4 D-21", f"{TC}/capture.py",
+    '    if s.t - self._t_pruned > PRUNE_PERIOD and (self.state == "capturing" or self.bg_runs):', "    if False:"),
+  m("d4_tap_never_stale", "D4 D-16", f"{TC}/profiles/civic_6mt/tap.py", "    return t_ns > 0 and self.t_bus - t_ns < STALE_NS",
+    "    return t_ns > 0"),
+  m("d4_cancel_allowed", "D4 D-10", f"{TC}/profiles/civic_6mt/__init__.py",
+    'allowed=("gapAdjustCruise", "accelCruise", "decelCruise", "lkas"),',
+    'allowed=("gapAdjustCruise", "accelCruise", "decelCruise", "cancel", "mainCruise", "lkas"),'),
+  m("d4_gap_long_allowed", "D4 D-10", f"{TC}/profiles/civic_6mt/__init__.py", 'modes={"gapAdjustCruise": ("triple", "short")},',
+    'modes={"gapAdjustCruise": ("short", "triple", "long")},'),
+  m("d4_name_unresolved", "D4 D-15", f"{TC}/button.py", "    self.name = self.buttons.resolve(name)",
+    "    self.name = name if name else self.buttons.default"),
+  m("d4_chip_over_alert", "D4 D-08", "openpilot/selfdrive/ui/sunnypilot/mici/onroad/test_console_chip.py",
+    "or not self._poller.live(time.monotonic()) or alert_showing():", "or not self._poller.live(time.monotonic()):", SMOKE),
+  m("d5_ui_reads_unsanitized", "D5 D-05", f"{TC}/status_io.py",
+    "  return sanitize_state(read_json(os.path.join(console_dir(), STATE_FILE)))",
+    "  return read_json(os.path.join(console_dir(), STATE_FILE))", SMOKE),
   m("d3_g1_old_semantics", "D3 / A2", R, 'bad = [e for e in a.episodes if not e.get("paused_open") or e["accel_out_max_open"] > 0.05 or',
     'bad = [e for e in a.episodes if e["accel_out_max_open"] > 0.05 or'),
 ]

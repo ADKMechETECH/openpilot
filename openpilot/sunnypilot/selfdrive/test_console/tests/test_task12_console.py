@@ -232,3 +232,65 @@ class TestD2TruthfulWrites(OpenpilotTestCase):
           status = console.run.summary()["status"]
           self.assertEqual(status == "PASS", want_pass, console.run.summary())
           self.assertFalse(math.isnan(console.run.summary()["frac"]))
+
+
+class TestD4Nits(OpenpilotTestCase):
+  def test_bit_hunt_scores_are_cached(self):
+    from openpilot.sunnypilot.selfdrive.test_console.analyzers import make_analyzer
+    a = make_analyzer(CIVIC.registry.tests_by_id["S6"], ctx())
+    calls = []
+    real = a._candidates
+    a._candidates = lambda: (calls.append(1), real())[1]
+    sim = Sim(v_ego=0., gear_raw=3)
+    raw = 0
+    for i in range(300):
+      raw ^= 1 << 4
+      a.feed(sim.step(raw_payload=raw, gear_raw=0 if 100 <= i < 150 else 3), True)
+      a.candidates()   # what status() / result() call at up to 5 Hz
+    self.assertLessEqual(len(calls), 3, "re-scored only on new edges, at most every 2 s")   # D-07
+    n = len(calls)
+    a.finish()
+    a.candidates()
+    self.assertEqual(len(calls), n + 1, "a window close always re-scores")
+
+  def test_raw_tap_goes_stale(self):
+    from opendbc.can import CANPacker
+    from opendbc.car import Bus
+    from opendbc.car.car_helpers import interfaces
+    from opendbc.car.honda.values import CAR, DBC
+    from openpilot.sunnypilot.selfdrive.test_console.profiles.civic_6mt.tap import RawCanTap
+    from openpilot.sunnypilot.selfdrive.test_console.signals import Sample
+    CP = interfaces[CAR.HONDA_CIVIC_2022].get_non_essential_params(CAR.HONDA_CIVIC_2022)
+    tap = RawCanTap(CP)
+    packer = CANPacker(DBC[CAR.HONDA_CIVIC_2022][Bus.pt])
+    gear = packer.make_can_msg("GEARBOX_ALT_2", tap.bus, {"GEAR_MT": 4})
+    pt = packer.make_can_msg("POWERTRAIN_DATA", tap.bus, {"PEDAL_GAS": 37})
+    acc = packer.make_can_msg("ACC_CONTROL", tap.bus, {"ACCEL_COMMAND": -0.42, "CONTROL_ON": 1})
+    t = int(1e9)
+    tap.update([(t, [gear, pt])], [(t, [acc])])
+    s = Sample()
+    tap.fill(s)
+    self.assertEqual((s.gear_raw, s.gas_raw), (4, 37))
+    self.assertAlmostEqual(s.accel_sent, -0.42, places=2)
+    # 0.3 s of bus traffic without GEARBOX_ALT_2 / ACC_CONTROL (POWERTRAIN_DATA keeps coming)
+    for k in range(1, 31):   # (a fresh packed frame each time: the parser rejects a repeated counter)
+      tap.update([(t + k * 10_000_000, [packer.make_can_msg("POWERTRAIN_DATA", tap.bus, {"PEDAL_GAS": 37})])], [])
+    s = Sample()
+    tap.fill(s)
+    self.assertEqual(s.gear_raw, -1, "D-16: a quiet GEAR_MT is unavailable, not its last value")
+    self.assertTrue(math.isnan(s.accel_sent))
+    self.assertEqual(s.brake_assist, -1)
+    self.assertEqual(s.gas_raw, 37, "a live signal stays")
+
+  def test_capture_dir_cap_enforced_periodically(self):
+    with tempfile.TemporaryDirectory() as d:
+      store = Store(d)
+      prunes = []
+      real = store.prune
+      store.prune = lambda: (prunes.append(1), real())[1]
+      console = Console(store, ctx())
+      console.set_control("D1", True, False)   # its conditions never hold here: the window stays open the whole time
+      sim = Sim(gear_raw=4, v_ego=20.)
+      for i, s in enumerate(sim.run(150.)):
+        console.update(s, i == 1)
+      self.assertGreaterEqual(len(prunes), 3, "D-21: not only when a capture file opens")

@@ -76,7 +76,7 @@ def run_console(params: Params, CP, CP_bytes: bytes, profile) -> None:
       return False
     read_context(params, ctx)
     name, mode = params.get(P_BUTTON, return_default=True), params.get(P_PRESS, return_default=True)
-    if (name or "") != button.name or (mode or "") != button.mode:
+    if button.differs(name, mode):
       button.configure(name, mode)
     console.set_control(params.get(P_SELECTED) or "", params.get_bool(P_ARMED), params.get_bool(P_BACKGROUND))
     return True
@@ -99,7 +99,8 @@ def run_console(params: Params, CP, CP_bytes: bytes, profile) -> None:
     console.update(s, button.update(t, sm["carState"].buttonEvents))
 
   def save(exited: bool = False) -> None:
-    info = {"name": button.name, "mode": button.mode, "seen": button.seen}
+    info = {"name": button.name, "mode": button.mode, "seen": button.seen,
+            "note": profile.buttons.side_effect.get(button.name, "")}
     state = console.status(frame["s"], info)
     if guard.errors:
       state["error"] = f"{guard.errors} console errors (see the rlog){' - inert' if guard.inert else ''}"

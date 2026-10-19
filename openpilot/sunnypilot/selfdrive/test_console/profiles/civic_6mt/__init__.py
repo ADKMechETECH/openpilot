@@ -69,9 +69,16 @@ POWERTRAIN = Powertrain(
 #  shows "button seen" after a press.
 BUTTONS = ButtonMap(
   default="gapAdjustCruise",
-  # every button the Honda carstate emits (TestConsoleStartButton may pick any; each keeps its native function)
-  allowed=("gapAdjustCruise", "accelCruise", "decelCruise", "cancel", "mainCruise", "lkas"),
+  # buttons the Honda carstate emits that are safe to borrow (each keeps its native function). Not cancel / mainCruise:
+  # their native function ends the engagement or switches cruise off mid-test (Task 12 D-10)
+  allowed=("gapAdjustCruise", "accelCruise", "decelCruise", "lkas"),
   short={"gapAdjustCruise": "gap"},
+  # the gap button: short (steps the distance; irrelevant in non-adaptive) or triple (three steps = back where it was,
+  # recommended); never long (a >= 0.5 s hold toggles Experimental mode)
+  modes={"gapAdjustCruise": ("triple", "short")},
+  side_effect={"gapAdjustCruise": "gap press also steps the follow distance (triple = net 0)",
+               "accelCruise": "press also raises the set speed", "decelCruise": "press also lowers the set speed",
+               "lkas": "press also toggles lane keeping"},
   note="distance button: a short press also steps the following-distance personality on release; a >= 0.5 s hold " +
        "toggles Experimental mode (sunnypilot's distance-button long press)",
 )

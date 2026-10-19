@@ -42,13 +42,20 @@ class StartButton:
     self.seen = 0          # press events seen this drive (on-car decode check)
 
   def configure(self, name: str | None, mode: str | None) -> None:
-    self.name = name if name else self.buttons.default
+    # Task 12 D-15: store (and show) the RESOLVED button - an unknown / disallowed name is the profile default - and a
+    # press mode this button allows (D-10)
+    self.requested = (name or "", mode or "")
+    self.name = self.buttons.resolve(name)
     self.type = button_type(self.name, self.buttons)
-    self.mode = mode if mode in PRESS_MODES else "short"
+    self.mode = self.buttons.resolve_mode(self.name, mode)
     self.pressed = False
     self.t_down = 0.
     self.long_fired = False
     self.taps: list[float] = []
+
+  def differs(self, name: str | None, mode: str | None) -> bool:
+    """The Params ask for something other than what this button is configured as (compared after resolving)."""
+    return (name or "", mode or "") != self.requested
 
   def update(self, t: float, button_events) -> bool:
     """Returns True on the frame the configured gesture completes."""

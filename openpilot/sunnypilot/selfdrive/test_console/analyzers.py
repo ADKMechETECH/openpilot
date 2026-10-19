@@ -871,6 +871,8 @@ class BitHuntAnalyzer(Analyzer):
   """
   WINDOW = 0.3
   SIG_GAP = 3.0      # s of stillness that separates the signature's groups (quick <1 s and slow ~2 s gaps stay inside)
+  TAIL = 1.0         # s after the last press before the press count completes the window (its release lands) - D-19
+  CACHE_PERIOD = 2.0  # s: the scorers re-run at most at 0.5 Hz, and only on new edges/toggles or a window close - D-07
 
   def __init__(self, spec: TestSpec, ctx: Context):
     super().__init__(spec, ctx)
@@ -883,8 +885,13 @@ class BitHuntAnalyzer(Analyzer):
     self.toggles: dict[int, list[float]] = defaultdict(list)
     self.edges: list[float] = []      # raw gear 0-edges (in and out)
     self.press_count = 0
+    self.t_now = 0.
+    self.t_last_edge = -math.inf
+    self._cache: dict[str, tuple[tuple, float, object]] = {}
+    self._closed = 0
 
   def _feed(self, s: Sample, ok: bool, dt: float) -> list[str]:
+    self.t_now = s.t
     if not ok or s.raw_payload < 0:
       return []
     notes = []
@@ -898,6 +905,7 @@ class BitHuntAnalyzer(Analyzer):
         diff &= diff - 1
     if self.prev_mt is not None and (s.gear_raw == 0) != (self.prev_mt == 0):
       self.edges.append(s.t)
+      self.t_last_edge = s.t
       if s.gear_raw == 0:
         self.press_count += 1
         notes.append(f"clutch press {self.press_count}")
@@ -907,6 +915,8 @@ class BitHuntAnalyzer(Analyzer):
   def progress(self) -> tuple[str, float]:
     text = f"clutch presses {self.press_count}/{self.presses}"
     frac = self.press_count / self.presses
+    if frac >= 1. and self.t_now - self.t_last_edge < self.TAIL:
+      frac = 0.99   # D-19: hold the window open a moment so the last release is in it
     if self.seconds:
       text += f" • window {self.window_ok:.0f}/{self.seconds:.0f}s"
       frac = max(frac, self.window_ok / self.seconds)
@@ -929,12 +939,30 @@ class BitHuntAnalyzer(Analyzer):
         start = i
     return groups[0] // 2 if len(groups) == 3 and len(set(groups)) == 1 and groups[0] % 2 == 0 else 0
 
+  def finish(self) -> list[str]:
+    self._closed += 1   # a window close always re-scores
+    return []
+
+  def _cached(self, name: str, fn):
+    key = (len(self.edges), sum(len(ts) for ts in self.toggles.values()), self._closed)
+    hit = self._cache.get(name)
+    if hit is not None and (hit[0] == key or (self.t_now - hit[1] < self.CACHE_PERIOD and hit[0][2] == key[2])):
+      return hit[2]
+    out = fn()
+    self._cache[name] = (key, self.t_now, out)
+    return out
+
   def signature_candidates(self) -> list[tuple[int, int]]:
-    """(DBC bit, N) for every bit whose toggles form the press signature; the registry's N first."""
-    out = [(self.dbc_bit(bit), n) for bit, ts in self.toggles.items() if (n := self.signature_count(ts))]
-    return sorted(out, key=lambda c: (c[1] != self.signature_n, c[0]))
+    """(DBC bit, N) for every bit whose toggles form the press signature; the registry's N first. Cached (D-07)."""
+    def compute():
+      out = [(self.dbc_bit(bit), n) for bit, ts in self.toggles.items() if (n := self.signature_count(ts))]
+      return sorted(out, key=lambda c: (c[1] != self.signature_n, c[0]))
+    return self._cached("signature", compute)
 
   def candidates(self) -> list[tuple[int, float, int]]:
+    return self._cached("edges", self._candidates)
+
+  def _candidates(self) -> list[tuple[int, float, int]]:
     out = []
     n = len(self.edges)
     if not n:

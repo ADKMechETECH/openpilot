@@ -22,7 +22,7 @@ from openpilot.selfdrive.ui.ui_state import ui_state
 from openpilot.sunnypilot.selfdrive.test_console.button import PRESS_MODES
 from openpilot.sunnypilot.selfdrive.test_console.conditions import Context, condition_label, toggle_label
 from openpilot.sunnypilot.selfdrive.test_console.registry import TestSpec
-from openpilot.sunnypilot.selfdrive.test_console.status_io import (P_ARMED, P_BACKGROUND, P_PRESS, P_SELECTED, StatusPoller,
+from openpilot.sunnypilot.selfdrive.test_console.status_io import (P_ARMED, P_BACKGROUND, P_BUTTON, P_PRESS, P_SELECTED, StatusPoller,
                                                                      prereq_hint, result_line)
 from openpilot.system.ui.lib.application import gui_app
 from openpilot.system.ui.widgets.scroller import NavScroller
@@ -132,13 +132,20 @@ class TestDetailPage(NavScroller):
       conds = condition_lines(st.get("conditions", []))
       btn = st.get("button", {})
       button = f"{btn.get('name', '?')}, {btn.get('mode', '?')} press • seen {btn.get('seen', 0)}x this drive"
+      if btn.get("note"):
+        button += f" • {btn['note']}"
     else:
       title = f"{spec.id}: {result_line(res)}"
       text = res.get("progress", "") if res else "arm it, then drive"
       result = f"{res.get('status')}: {res.get('detail', '')}" if res.get("status") else "no result yet"
       needs = [toggle_label(k, v) for k, v in spec.toggles.items()] + [condition_text(self.profile, c) for c in spec.conditions]
       conds = "conditions: " + ", ".join(needs)
-      button = "live once armed and onroad (shows whether the wheel button decodes)"
+      buttons = self.profile.buttons
+      name = buttons.resolve(ui_state.params.get(P_BUTTON, return_default=True))
+      note = buttons.side_effect.get(name, "")
+      button = f"{buttons.label(name)}, {'/'.join(buttons.modes.get(name, PRESS_MODES))} press" + \
+               (f" ({buttons.modes[name][0]} recommended)" if name in buttons.modes else "") + \
+               (f" • {note}" if note else "") + " • live once armed and onroad (shows whether it decodes)"
     self._status.update_text(title, text)
     self._result.update_text("result", result)
     self._button.update_text("start/stop button", button)
@@ -179,9 +186,15 @@ class DevTestLayoutMici(NavScroller):
     self._live = InfoCard("dev test • phases", "")
     self._background = BigToggle("background telemetry", initial_state=ui_state.params.get_bool(P_BACKGROUND),
                                  toggle_callback=guarded(lambda v: write_param(ui_state.params, P_BACKGROUND, v)))
+    # only the press modes the start button allows (Task 12 D-10: the gap button = triple / short, never long)
+    profile = ui_profile()
+    buttons = profile.buttons if profile is not None else None
+    name = buttons.resolve(ui_state.params.get(P_BUTTON, return_default=True)) if buttons is not None else ""
+    modes = list(buttons.modes.get(name, PRESS_MODES)) if buttons is not None else list(PRESS_MODES)
     current = ui_state.params.get(P_PRESS, return_default=True)
-    self._press = BigMultiToggle("start press", list(PRESS_MODES), select_callback=self._on_press)
-    self._press.set_value(current if current in PRESS_MODES else PRESS_MODES[0])
+    self._press = BigMultiToggle("start press", modes, select_callback=self._on_press)
+    self._press.set_value(buttons.resolve_mode(name, current) if buttons is not None else
+                          (current if current in PRESS_MODES else PRESS_MODES[0]))
     self._profile = object()
     self._build(ui_profile())
 

@@ -129,6 +129,8 @@ class ButtonMap:
   allowed: tuple[str, ...] = ()                  # names TestConsoleStartButton may select (empty = default only)
   short: Mapping[str, str] = field(default_factory=dict)   # UI label per name
   note: str = ""                                 # its native function / side effects on this car
+  modes: Mapping[str, tuple[str, ...]] = field(default_factory=dict)   # name -> allowed press modes, recommended first
+  side_effect: Mapping[str, str] = field(default_factory=dict)         # name -> one short line for the chip (D-10)
 
   def resolve(self, name: str | None) -> str:
     """The button actually used for a TestConsoleStartButton value ("" / unknown / not allowed -> the default)."""
@@ -137,6 +139,13 @@ class ButtonMap:
   def label(self, name: str | None) -> str:
     name = self.resolve(name)
     return self.short.get(name, name)
+
+  def resolve_mode(self, name: str | None, mode: str | None) -> str:
+    """The press mode actually used: an allowed one for this button (its recommended one otherwise)."""
+    allowed = self.modes.get(self.resolve(name))
+    if not allowed:
+      return mode if mode in ("short", "triple", "long") else "short"
+    return mode if mode in allowed else allowed[0]
 
 
 @dataclass(frozen=True)

@@ -183,7 +183,7 @@ class TestConditions(OpenpilotTestCase):
 
 class TestButton(OpenpilotTestCase):
   def test_short(self):
-    b = StartButton()
+    b = StartButton(mode="short")
     self.assertFalse(b.update(0., btn(True)))
     self.assertTrue(b.update(0.2, btn(False)))
     self.assertFalse(b.update(1.0, btn(True)))
@@ -192,12 +192,17 @@ class TestButton(OpenpilotTestCase):
     self.assertEqual(b.seen, 2)
 
   def test_long(self):
-    b = StartButton(mode="long")
-    b.update(0., btn(True))
+    up = ButtonType.accelCruise
+    b = StartButton("accelCruise", "long")
+    b.update(0., btn(True, up))
     self.assertFalse(b.update(0.3, []))
     self.assertTrue(b.update(0.5, []))
     self.assertFalse(b.update(0.9, []), "fires once per hold")
-    self.assertFalse(b.update(1.0, btn(False)))
+    self.assertFalse(b.update(1.0, btn(False, up)))
+    # Task 12 D-10: never long on the gap button (a hold toggles Experimental mode); its recommended mode is triple
+    self.assertEqual(StartButton(mode="long").mode, "triple")
+    self.assertEqual(StartButton().mode, "triple")
+    self.assertEqual(StartButton(mode="short").mode, "short")
 
   def test_triple(self):
     b = StartButton(mode="triple")
@@ -216,8 +221,13 @@ class TestButton(OpenpilotTestCase):
     self.assertFalse(b.update(0.1, btn(False)))
     b.update(0.2, btn(True, ButtonType.lkas))
     self.assertTrue(b.update(0.3, btn(False, ButtonType.lkas)))
-    self.assertEqual(StartButton("notAButton").name, "notAButton")
-    self.assertEqual(StartButton("notAButton").type, int(ButtonType.gapAdjustCruise), "unknown name falls back")
+    # Task 12 D-15: the RESOLVED name is stored and shown; cancel / mainCruise are no longer allowed (D-10)
+    for name in ("notAButton", "cancel", "mainCruise", ""):
+      self.assertEqual(StartButton(name).name, "gapAdjustCruise", name)
+      self.assertEqual(StartButton(name).type, int(ButtonType.gapAdjustCruise), "falls back to the default")
+    b = StartButton("cancel", "short")
+    self.assertFalse(b.differs("cancel", "short"), "no reconfigure loop on an unresolvable name")
+    self.assertTrue(b.differs("lkas", "short"))
 
 
 class TestLogTap(OpenpilotTestCase):
@@ -665,6 +675,10 @@ class TestCustom(OpenpilotTestCase):
         raw ^= counter_bit
         a.feed(sim.step(raw_payload=raw, gear_raw=0 if _ >= 5 else 3), True)  # GEAR_MT lags the switch by 50 ms
       raw &= ~clutch_bit
+    self.assertFalse(a.complete, "Task 12 D-19: the last release needs a tail")
+    for _ in range(110):
+      raw ^= counter_bit
+      a.feed(sim.step(raw_payload=raw, gear_raw=3), True)
     self.assertTrue(a.complete)
     cands = a.candidates()
     self.assertEqual(len(cands), 1, cands)
@@ -879,7 +893,11 @@ class TestUiHelpers(OpenpilotTestCase):
     self.assertEqual(key, "capturing")
     lines, key = chip_lines({**st, "state": "complete", "status": "FAIL", "detail": "x"})
     self.assertEqual(key, "FAIL")
-    self.assertEqual(chip_lines({**st, "state": "armed"})[0][0], "G1 armed: press to start")
+    self.assertEqual(chip_lines({**st, "state": "armed"})[0][0], "G1 armed: short-press to start")
+    armed = {**st, "state": "armed", "conditions": [], "button": {"name": "gapAdjustCruise", "mode": "triple",
+                                                                  "note": "gap press also steps the follow distance"}}
+    self.assertEqual(chip_lines(armed)[0], ["G1 armed: triple-press gapAdjustCruise to start",
+                                            "gap press also steps the follow distance"], "Task 12 D-10")
 
   def test_condition_lines_and_hints(self):
     from openpilot.selfdrive.ui.sunnypilot.mici.layouts.dev_test import condition_lines

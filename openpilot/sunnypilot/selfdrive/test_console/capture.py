@@ -36,6 +36,7 @@ MARKER_BACKUPS = 5
 CAPTURE_FILE_MAX = 20 * 1024 * 1024   # bytes per capture file; rows past it are dropped (marker says so)
 CAPTURE_DIR_MAX = 300 * 1024 * 1024   # oldest capture files are pruned past this
 RESULTS_SAVE_PERIOD = 5.0             # s, progress survives a crash/offroad mid-capture
+PRUNE_PERIOD = 60.                    # s: the capture-directory cap is enforced on this period too, not only when a file opens (D-21)
 KEY_SIGNALS = ("v_ego", "a_ego", "gear_raw", "gear", "rpm", "enabled", "long_active", "accel_cmd", "v_cruise", "pitch")
 
 
@@ -219,6 +220,7 @@ class Console:
     self.background = False
     self.bg_runs: dict[str, Run] = {}
     self._t_saved = 0.
+    self._t_pruned = 0.
     self._last_t = 0.
 
   # -- markers ---------------------------------------------------------------------------------------------------
@@ -314,6 +316,9 @@ class Console:
   # -- per frame ----------------------------------------------------------------------------------------------------
   def update(self, s: Sample, button: bool) -> None:
     self._last_t = s.t
+    if s.t - self._t_pruned > PRUNE_PERIOD and (self.state == "capturing" or self.bg_runs):
+      self._t_pruned = s.t
+      self.store.prune()
     spec = self.registry.tests_by_id.get(self.selected)
     if spec is not None:
       self.conditions = check_conditions(spec.conditions, spec.toggles, s, self.ctx)

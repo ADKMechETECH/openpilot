@@ -42,9 +42,12 @@ def chip_lines(st: dict) -> tuple[list[str], str]:
   if state == "complete":
     status = st.get("status") or "DONE"
     return [f"{test} {status}", st.get("detail", "")[:60]], status if status in BG else "CAPTURED"
-  lines = [f"{test} armed: press to start"]
+  btn = st.get("button") if isinstance(st.get("button"), dict) else {}
+  lines = [f"{test} armed: {btn.get('mode', 'short')}-press {btn.get('name', '')} to start".replace("  ", " ")]
   if failing:
     lines.append(f"× {failing}")
+  elif btn.get("note"):
+    lines.append(btn["note"])   # the button's native side effect (Task 12 D-10)
   return lines, "armed"
 
 
