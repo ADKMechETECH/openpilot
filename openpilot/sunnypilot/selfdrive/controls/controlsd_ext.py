@@ -10,6 +10,7 @@ import openpilot.cereal.messaging as messaging
 from openpilot.cereal import log, custom
 
 from opendbc.car import structs
+from openpilot.selfdrive.controls.lib.longcontrol import LongCtrlState
 from openpilot.common.params import Params
 from openpilot.common.swaglog import cloudlog
 from openpilot.selfdrive.controls.lib.lane_centering import LaneCenteringController
@@ -17,6 +18,7 @@ from openpilot.sunnypilot import PARAMS_UPDATE_PERIOD
 from openpilot.sunnypilot.livedelay.helpers import get_lat_delay
 from openpilot.sunnypilot.modeld_v2.modeld_base import ModelStateBase
 from openpilot.sunnypilot.selfdrive.controls.lib.blinker_pause_lateral import BlinkerPauseLateral
+from openpilot.sunnypilot.selfdrive.controls.lib.clutch_reengage import TakeoverRamp, takeover_urgent
 from openpilot.sunnypilot.selfdrive.controls.lib.clutch_shift_gate import ClutchShiftGate
 from openpilot.sunnypilot.selfdrive.controls.lib.engine_brake_preferred import EngineBrakePreferred
 from openpilot.sunnypilot.selfdrive.controls.lib.manual_low_speed_handback import LowSpeedHandback
@@ -32,6 +34,7 @@ class ControlsExt(ModelStateBase):
     self._param_update_time: float = 0.0
     self.blinker_pause_lateral = BlinkerPauseLateral()
     self.clutch_shift_gate = ClutchShiftGate(CP, params)
+    self.clutch_takeover = TakeoverRamp()
     self.low_speed_handback = LowSpeedHandback(CP, params, process="controlsd")
     self.no_service_brake_enabled = params.get_bool("NoServiceBrakeHold")
     self.no_service_brake_floor = read_decel_floor(params)
@@ -102,6 +105,27 @@ class ControlsExt(ModelStateBase):
     #  no driver pedal input for the length of a shift (no CRUISE_FAULT, no cruise cancel). Fleet gas overrides only
     #  exercise this frame with the pedal pressed.
     return self.clutch_shift_gate.update(sm['carState'])
+
+  def apply_clutch_takeover(self, sm: messaging.SubMaster, long_active: bool,
+                            accel_limits: tuple[float, float]) -> tuple[float, float]:
+    """Clutch gate: throttle cap after a coast timeout; smart re-engagement seed + ramp (bridge from the shift back to
+    the plan). Call after the NSB/EBP floors (the seed and ramp stay inside them) and before the low-speed handback."""
+    gate = self.clutch_shift_gate
+    accel_limits = gate.limit_accel(accel_limits)
+    CS, plan = sm['carState'], sm['longitudinalPlan']
+    if gate.resumed and gate.reengage.smart and long_active:
+      self.clutch_takeover.start(CS.aEgo, plan.aTarget, accel_limits, gate.ratio_lock.gear, gate.reengage.max_ramp)
+    if not self.clutch_takeover.active:
+      return accel_limits
+    force_decel = bool(sm['driverMonitoringState'].noResponseForceDecel or
+                       sm['selfdriveState'].state == log.SelfdriveState.OpenpilotState.softDisabling)
+    urgent = takeover_urgent(CS, plan, sm.valid['longitudinalPlan'], sm['radarState'], sm.valid['radarState'], force_decel)
+    return self.clutch_takeover.limit_accel(long_active, CS.vEgo, urgent, accel_limits)
+
+  def post_clutch_takeover(self, LoC) -> None:
+    pid = LoC.pid
+    self.clutch_takeover.post_update(LoC.last_output_accel, pid.p + pid.i + pid.d + pid.f,
+                                     LoC.long_control_state == LongCtrlState.pid)
 
   def update_low_speed_handback(self, enabled: bool, v_ego: float, last_accel: float) -> bool:
     """Manual transmission: returns True once the low-speed handback ramp is done (longitudinal must stop)."""

@@ -143,12 +143,15 @@ class Controls(ControlsExt):
     pid_accel_limits = self.CI.get_pid_accel_limits(self.CP, self.CP_SP, CS.vEgo, CS.vCruise * CV.KPH_TO_MS)
     # Brake-range clamps compose by only ever RAISING the lower limit (max of the floors), so their order doesn't
     # matter and they can't fight: no-service-brake (-floor when holding set speed) and engine-brake-preferred (coast
-    # target for gentle, non-urgent decel). The low-speed handback then shrinks whatever range is left (tighter wins).
+    # target for gentle, non-urgent decel). The clutch gate's takeover ramp (manual, smart re-engagement) then slews
+    # inside that range, and the low-speed handback shrinks whatever range is left (tighter wins).
     pid_accel_limits = self.apply_no_service_brake(self.sm, pid_accel_limits)
     pid_accel_limits = self.apply_engine_brake_preferred(self.sm, CC.longActive, pid_accel_limits, self.LoC.long_control_state,
                                                          self.calibrated_pose)
+    pid_accel_limits = self.apply_clutch_takeover(self.sm, CC.longActive, pid_accel_limits)
     pid_accel_limits = self.low_speed_handback.limit_accel(pid_accel_limits)
     actuators.accel = float(self.LoC.update(CC.longActive, CS, long_plan.aTarget, long_plan.shouldStop, pid_accel_limits))
+    self.post_clutch_takeover(self.LoC)
 
     # Steering PID loop and lateral MPC
     # Reset desired curvature to current to avoid violating the limits on engage

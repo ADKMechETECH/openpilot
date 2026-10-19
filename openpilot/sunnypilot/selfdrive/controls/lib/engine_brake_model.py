@@ -79,14 +79,14 @@ def measured_ratio(rpm: float, v_ego: float) -> float:
   return rpm * 2. * math.pi / 60. * WHEEL_RADIUS / v_ego
 
 
-def infer_gear(rpm: float, v_ego: float, clutch_pressed: bool = False) -> int:
-  """Gear (1-6) whose ratio matches rpm/speed, else 0 (clutch in, neutral, slipping, no RPM, too slow, unknown)."""
+def infer_gear(rpm: float, v_ego: float, clutch_pressed: bool = False, tol: float = GEAR_MATCH_TOL) -> int:
+  """Gear (1-6) whose ratio matches rpm/speed within +-tol, else 0 (clutch in, neutral, slipping, no RPM, too slow)."""
   if clutch_pressed or not (math.isfinite(rpm) and math.isfinite(v_ego)) or v_ego < INFER_MIN_SPEED or rpm < INFER_MIN_RPM:
     return 0
   ratio = measured_ratio(rpm, v_ego)
   errors = [abs(ratio / overall_ratio(g) - 1.) for g in range(1, len(GEAR_RATIOS) + 1)]
   best = int(np.argmin(errors))
-  return best + 1 if errors[best] <= GEAR_MATCH_TOL else 0
+  return best + 1 if errors[best] <= tol else 0
 
 
 def engine_brake_torque(rpm: float) -> float:
