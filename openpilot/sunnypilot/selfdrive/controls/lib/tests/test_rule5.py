@@ -6,6 +6,11 @@ its limiting states in the closed loop (planner -> real controlsd glue -> LongCo
 frame is run with each braking-urgency reason injected. Within that frame the lower limit must be back at stock
 (ACCEL_MIN) and the command must go negative (the plan asks for braking in every state).
 
+The low-speed handback is the one limiter with a narrower carve-out (Task 13 A1, like non-adaptive's collision_threat):
+it steps aside on braking_urgency.handback_urgency() — every non-lead reason except "stopping", plus an imminent lead —
+and must NOT freeze for the plan's stop request or a lead that is merely close / closing / braking somewhere ahead
+(HANDBACK_CONTINUES); that is what held a manual at a standstill in ordinary traffic.
+
 Tripwire: an AST scan of the controls code. Any function that raises a lower accel limit (`max(<..>limits[0], ..)`,
 `lo = max(..)`) or writes `longActive` must consult the urgency predicate itself, or be listed in REVIEWED with the
 function that does it for it (which is then checked to consult it).
@@ -22,7 +27,9 @@ from openpilot.sunnypilot.selfdrive.controls.lib.clutch_shift_gate import GateSt
 from openpilot.sunnypilot.selfdrive.controls.lib.tests.manual_sim import FakeSM, ManualCarSim, Pose, controls_frame
 
 REASONS = ("fcw", "force_decel", "stock_aeb", "stopping", "hard_decel", "invalid_plan", "stale_plan", "invalid_radar",
-           "lead_close", "lead_closing", "lead_ttc", "lead_braking")
+           "lead_close", "lead_closing", "lead_ttc", "lead_braking", "lead_imminent")
+# Task 13 A1: reasons the low-speed handback deliberately does not step aside for (not imminent from where it stands)
+HANDBACK_CONTINUES = ("stopping", "lead_close", "lead_closing", "lead_braking")
 
 
 def inject(sim, reason):
@@ -51,7 +58,8 @@ def inject(sim, reason):
     lead.present, lead.radar, lead.modelProb = True, True, 1.0
     v = sim.speed
     d, v_rel, a_lead = {"lead_close": (max(v * 0.6, 5.), 0., 0.), "lead_closing": (150., -2., 0.),
-                        "lead_ttc": (40., -10., 0.), "lead_braking": (80., 0., -2.5)}[reason]
+                        "lead_ttc": (40., -10., 0.), "lead_braking": (80., 0., -2.5),
+                        "lead_imminent": (3., -v, 0.)}[reason]   # a stopped car 3 m ahead
     lead.dRel, lead.vRel, lead.vLead, lead.vLeadK, lead.aLeadK = d, v_rel, v + v_rel, v + v_rel, a_lead
   csm = FakeSM(common, invalid=tuple(invalid), stale=tuple(stale))
   csm.update({'longitudinalPlan': plan, 'longitudinalPlanSP': sim.plan_sp, '_pose': Pose(sim.grade)})
@@ -188,7 +196,7 @@ class TestRule5Matrix(OpenpilotTestCase):
         from openpilot.sunnypilot.selfdrive.controls.lib.braking_urgency import controls_urgency
         got = controls_urgency(csm)
         self.assertIsNotNone(got, reason)
-        if reason.startswith("lead_") or reason in ("fcw", "stopping", "hard_decel", "invalid_radar", "force_decel"):
+        if (reason.startswith("lead_") and reason != "lead_imminent") or reason in ("fcw", "stopping", "hard_decel", "invalid_radar", "force_decel"):
           self.assertEqual(got, reason)
 
   def test_matrix(self):
@@ -203,6 +211,11 @@ class TestRule5Matrix(OpenpilotTestCase):
           else:
             self.assertGreater(before["limits"][0], ACCEL_MIN, f"{name}: precondition, the feature is limiting")
           long_active, limits, cmd = one_frame(sim, inject(sim, reason))
+          if name == "handback_ramp" and reason in HANDBACK_CONTINUES:
+            # Task 13 A1: not an emergency for the handback — the ramp keeps going (the driver takes the stop)
+            self.assertFalse(sim.ext.low_speed_handback.urgent, f"{reason} must not freeze the handback")
+            self.assertGreater(limits[0], ACCEL_MIN, "the handback keeps ramping the braking side")
+            continue
           self.assertTrue(long_active, "urgency never drops longitudinal")
           self.assertEqual(limits[0], ACCEL_MIN, "lower limit back at stock in the same frame")
           self.assertLess(cmd, 0., "the command brakes")

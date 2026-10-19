@@ -24,7 +24,10 @@ from openpilot.selfdrive.selfdrived.events import Events
 from openpilot.selfdrive.selfdrived.state import StateMachine
 from openpilot.sunnypilot.selfdrive.car.car_specific import CarSpecificEventsSP
 from openpilot.sunnypilot.selfdrive.controls.lib.manual_low_speed_handback import LowSpeedHandback, \
-  DEFAULT_HANDBACK_SPEED, DEFAULT_RAMP_TIME, DISENGAGE_MARGIN, MIN_HANDBACK_SPEED, ENGAGE_HYSTERESIS
+  DEFAULT_HANDBACK_SPEED, DEFAULT_RAMP_TIME, DISENGAGE_MARGIN, MIN_HANDBACK_SPEED, ENGAGE_HYSTERESIS, STANDSTILL_RESOLVE, \
+  STANDSTILL_SPEED
+from openpilot.sunnypilot.selfdrive.controls.lib.braking_urgency import HANDBACK_DRIVER_DECEL, HANDBACK_DRIVER_REACTION, \
+  HANDBACK_MARGIN, handback_lead_reason, handback_urgency
 from openpilot.sunnypilot.selfdrive.controls.lib.tests.manual_sim import Ext, FakeSM, make_cp, set_params
 
 TransmissionType = structs.CarParams.TransmissionType
@@ -49,6 +52,8 @@ class Sim:
     self.speed, self.a_ego, self.distance, self.grade, self.v_set = speed, 0., 0., grade, v_set
     self.lead = lead  # dict(pos, v, decel) or None
     self.driver_brake = 0.  # m/s^2 the driver applies once openpilot hands back
+    self.driver_reaction = 0.  # s after longitudinal stops before the driver brakes
+    self._released = 0.
     self.brake_pedal = False  # driver on the brake pedal (Honda: disengages, like selfdrived's pedalPressed)
     self.enable_request = False
     self.force_decel = False
@@ -151,8 +156,10 @@ class Sim:
     self.ml = custom.CarControlSP.new_message().manualLongitudinal
     self.ext.fill_manual_longitudinal(self.ml)
 
-    # vehicle: openpilot's command while active, else the driver's own braking; brakes hold a stopped car
-    a = cmd if self.long_active else -self.driver_brake
+    # vehicle: openpilot's command while active, else the driver's own braking (after the reaction time); brakes hold
+    # a stopped car
+    self._released = self._released + DT_CTRL if not self.long_active else 0.
+    a = cmd if self.long_active else (-self.driver_brake if self._released > self.driver_reaction else 0.)
     self.a_ego = a + self.grade
     self.speed = max(self.speed + self.a_ego * DT_CTRL, 0.)
     self.distance += self.speed * DT_CTRL
@@ -164,6 +171,7 @@ class Sim:
            "long_active": self.long_active, "state": self.long_state, "handback": self.ext.low_speed_handback.active,
            "events": set(events.names), "allow_brake": self.plan.allowBrake, "fcw": self.plan.fcw, "limits": limits,
            "events_sp": set(events_sp.names), "alert": self.AM.current_alert, "urgency": self.ext.urgency,
+           "hb_urgent": self.ext.low_speed_handback.urgent,
            "gap": (self.lead["pos"] - self.distance) if self.lead else None,
            "alert_types": list(self.state.current_alert_types), "collision": self.planner.collision_hold > 0.}
     self.frame += 1
@@ -187,6 +195,14 @@ class TestManualLowSpeedHandback(OpenpilotTestCase):
     CP, CP_SP = make_cp()
     sim = Sim(CP, CP_SP, speed=4., grade=-3.0, v_set=10., **kw)
     return sim, sim.run(6.)
+
+  def assert_not_held(self, log):
+    """[Task 13 A1] openpilot never holds a manual at a stop: engaged at standstill for at most the standstill
+    resolution + the ramp + the disengage margin, and the run ends handed back."""
+    held = sum(1 for l in log if l["enabled"] and l["speed"] < STANDSTILL_SPEED) * DT_CTRL
+    self.assertLessEqual(held, STANDSTILL_RESOLVE + DEFAULT_RAMP_TIME + DISENGAGE_MARGIN + 0.05, "held at a standstill")
+    self.assertFalse(log[-1]["enabled"], "the run must end handed back")
+    self.assertFalse(log[-1]["long_active"])
 
   def test_defaults(self):
     CP, _ = make_cp()
@@ -230,6 +246,7 @@ class TestManualLowSpeedHandback(OpenpilotTestCase):
         self.assertEqual(log[-1]["speed"], 0., "the car stops")
         self.assertTrue(any(l["handback"] for l in log))
         self.assertTrue(all(l["long_active"] for l in log if l["speed"] > 0.), "braking stays while urgent")
+        self.assert_not_held(log)
 
   def test_lead_stopping_ahead_adaptive(self):
     # following a lead that brakes to a stop: the lead is urgent (braking / close), so openpilot brakes to the stop
@@ -239,6 +256,7 @@ class TestManualLowSpeedHandback(OpenpilotTestCase):
     self.assertFalse(sim.contact)
     self.assertGreater(min(l["gap"] for l in log), 1.0)
     self.assertEqual(log[-1]["speed"], 0.)
+    self.assert_not_held(log)
 
   def test_force_decel_blocks_and_aborts(self):
     # [B-M1] driver-monitoring forceDecel while crossing the handback speed: no handback, the car stops
@@ -272,17 +290,22 @@ class TestManualLowSpeedHandback(OpenpilotTestCase):
     self.assertTrue(all(l["enabled"] for l in log), "no handback disengage while FCW is up")
 
   def test_throttle_start_then_lead_stops(self):
-    # [B-M4] the handback started on the throttle (uphill), then a car ahead stops: braking is available at once
+    # [B-M4] the handback started on the throttle (uphill), then a stopped car appears 4 m ahead at ~2 m/s — imminent
+    # (Task 13 A1: the lead must be one the driver couldn't stop for after the handback): braking is available at once,
+    # the car stops short of it, then hands back (standstill resolution) instead of holding.
     CP, CP_SP = make_cp()
-    sim = Sim(CP, CP_SP, speed=2.6, grade=-3.0, v_set=10.)
-    log = sim.run(0.6)
+    sim = Sim(CP, CP_SP, speed=2.35, grade=-1.0, v_set=10.)
+    log = sim.run(0.5)
     self.assertTrue(any(l["handback"] and l["cmd"] > 0. for l in log), "handback starts while openpilot is on the gas")
-    sim.lead = {"pos": sim.distance + 6., "v": 0., "decel": 0.}
-    log += sim.run(4.)
+    self.assertTrue(log[-1]["handback"] and log[-1]["long_active"], "precondition: still in the ramp")
+    sim.lead = {"pos": sim.distance + 4., "v": 0., "decel": 0.}
+    log += sim.run(5.)
     after = [l for l in log if l["gap"] is not None]
     self.assertFalse(sim.contact)
-    self.assertLess(min(l["limits"][0] for l in after), -1.0, "braking side back at the stock limit")
+    self.assertEqual(after[1]["limits"][0], ACCEL_MIN, "braking side back at the stock limit the frame it's seen")
     self.assertLess(min(l["cmd"] for l in after), -0.5)
+    self.assertGreater(min(l["gap"] for l in after), 1.0)
+    self.assert_not_held(log)
 
   def test_no_brake_to_stop_no_standstill_hold_no_launch_when_not_urgent(self):
     sim, log = self._uphill()
@@ -412,3 +435,147 @@ class TestManualLowSpeedHandback(OpenpilotTestCase):
     self.assertEqual(hb.limit_accel((-3.5, 2.))[0], -3.5)
     hb.update(True, 1., -2.0)   # urgency clears: the ramp restarts from the current command
     self.assertAlmostEqual(hb.limit_accel((-3.5, 2.))[0], -2.0, delta=0.05)
+
+
+class TestTask13HandbackCarveOut(OpenpilotTestCase):
+  """Task 13 A1 [N-1, review2 N6]: only a genuinely imminent lead freezes the handback; ordinary approach to slow or
+  stopped traffic hands back at the handback speed; a stop while urgent ends in a clean handback, never a held stop."""
+  def setUp(self):
+    super().setUp()
+    set_params(NonAdaptiveLongitudinal=False)
+
+  def _driver(self, sim):
+    # the driver the kinematic test assumes: brakes at HANDBACK_DRIVER_DECEL, HANDBACK_DRIVER_REACTION after the handback
+    sim.driver_brake, sim.driver_reaction = HANDBACK_DRIVER_DECEL, HANDBACK_DRIVER_REACTION
+    return sim
+
+  def test_stopped_car_40m_ahead_hands_back(self):
+    # the finding: approaching a stopped car 40 m ahead at ~3 m/s used to freeze the handback (lead_closing) and hold
+    # the manual engaged at a standstill for the rest of the run
+    CP, CP_SP = make_cp()
+    sim = self._driver(Sim(CP, CP_SP, speed=3., lead={"pos": 40., "v": 0., "decel": 0.}, v_set=10.))
+    log = sim.run(30.)
+    start = first(log, lambda l: l["handback"])
+    off = first(log, lambda l: not l["enabled"])
+    self.assertIsNotNone(start)
+    self.assertTrue(any(l["urgency"] in ("lead_closing", "lead_ttc") for l in log[:start + 1]),
+                    "precondition: the broad Rule-5 lead reasons are present (they used to freeze it)")
+    self.assertFalse(any(l["hb_urgent"] for l in log), "not imminent: the handback is never frozen")
+    self.assertAlmostEqual((off - start) * DT_CTRL, DEFAULT_RAMP_TIME + DISENGAGE_MARGIN, delta=0.04,
+                           msg="hands back at the handback speed, on the no-lead schedule")
+    self.assertGreater(log[off]["v_in"], 1.0, "disengaged while still rolling, not after a stop")
+    self.assertIn(EventName.speedTooLow, log[off]["events"])
+    # end state, not just the ramp: disengaged for the rest of the run, never engaged at a standstill, stopped short
+    self.assertFalse(any(l["enabled"] for l in log[off:]))
+    self.assertFalse(any(l["enabled"] and l["speed"] < STANDSTILL_SPEED for l in log))
+    self.assertEqual(log[-1]["speed"], 0.)
+    self.assertFalse(sim.contact)
+    self.assertGreater(min(l["gap"] for l in log), HANDBACK_MARGIN)
+    prompts = [i for i in range(1, len(log)) if log[i]["alert"].alert_type == HANDBACK_ALERT and
+               log[i - 1]["alert"].alert_type != HANDBACK_ALERT]
+    self.assertEqual(len(prompts), 1, "one prompt")
+
+  def test_slow_lead_ahead_hands_back(self):
+    # following a 1 m/s lead (stop-and-go crawl): used to keep openpilot driving the manual below the handback speed
+    CP, CP_SP = make_cp()
+    sim = self._driver(Sim(CP, CP_SP, speed=3., lead={"pos": 40., "v": 1., "decel": 0.}, v_set=10.))
+    log = sim.run(30.)
+    start, off = first(log, lambda l: l["handback"]), first(log, lambda l: not l["enabled"])
+    self.assertAlmostEqual((off - start) * DT_CTRL, DEFAULT_RAMP_TIME + DISENGAGE_MARGIN, delta=0.04)
+    self.assertFalse(any(l["enabled"] for l in log[off:]))
+    self.assertFalse(sim.contact)
+
+  def test_slow_far_lead_does_not_freeze_the_ramp(self):
+    # the uphill handback with a slow car 40 m ahead (closing > 1 m/s: a broad lead_closing reason). Non-adaptive (the
+    # planner ignores that lead, so only the handback could react to it): the same handback as with no lead, frame for
+    # frame. Adaptive (the MPC slows for it first): the ramp still runs on the no-lead schedule.
+    def run(lead, non_adaptive):
+      set_params(NonAdaptiveLongitudinal=non_adaptive)
+      CP, CP_SP = make_cp()
+      sim = Sim(CP, CP_SP, speed=4., grade=-3.0, v_set=10., lead=lead)
+      log = sim.run(6.)
+      return log, first(log, lambda l: l["handback"]), first(log, lambda l: not l["enabled"])
+    log_none, start_none, off_none = run(None, True)
+    log, start, off = run({"pos": 40., "v": 0.5, "decel": 0.}, True)
+    self.assertTrue(any(l["urgency"] == "lead_closing" for l in log[start:off]), "precondition: broad reason present")
+    self.assertFalse(any(l["hb_urgent"] for l in log))
+    self.assertEqual((start, off), (start_none, off_none))
+    self.assertEqual([l["cmd"] for l in log[start:off]], [l["cmd"] for l in log_none[start:off]])
+    log, start, off = run({"pos": 40., "v": 0.5, "decel": 0.}, False)
+    self.assertFalse(any(l["hb_urgent"] for l in log))
+    self.assertAlmostEqual((off - start) * DT_CTRL, DEFAULT_RAMP_TIME + DISENGAGE_MARGIN, delta=0.04)
+
+  def test_imminent_lead_during_ramp_keeps_full_braking(self):
+    # a stopped car 3 m ahead appears mid-ramp at ~2 m/s: braking at the stock limit the same frame, no contact
+    CP, CP_SP = make_cp()
+    sim = Sim(CP, CP_SP, speed=2.35, grade=-1.0, v_set=10.)
+    log = sim.run(0.5)
+    self.assertTrue(log[-1]["handback"] and log[-1]["long_active"])
+    sim.lead = {"pos": sim.distance + 3., "v": 0., "decel": 0.}
+    log2 = sim.run(5.)
+    self.assertTrue(log2[0]["hb_urgent"])
+    self.assertEqual(log2[0]["limits"][0], ACCEL_MIN)
+    self.assertFalse(sim.contact)
+    self.assertEqual(log2[-1]["speed"], 0.)
+    self.assertTrue(all(l["long_active"] for l in log2 if l["speed"] > 0.), "braking until the stop (latched)")
+    self.assertFalse(log2[-1]["enabled"], "then a clean handback, not a held stop")
+
+  def test_standstill_resolution(self):
+    CP, _ = make_cp()
+    hb = LowSpeedHandback(CP, Params())
+    hb.update(True, 2.0, -1.0, "lead_imminent")
+    self.assertTrue(hb.active and hb.urgent)
+    t = 0.
+    while hb.urgent:   # stopped, the lead still "imminent" (it's 2 m ahead): resolves after STANDSTILL_RESOLVE
+      hb.update(True, 0., -1.0, "lead_imminent")
+      t += DT_CTRL
+      self.assertLess(t, 5.)
+    self.assertAlmostEqual(t, STANDSTILL_RESOLVE, delta=1.5 * DT_CTRL)
+    # the brake ramps off from the command at the stop, then the handback is due
+    lo = [hb.limit_accel((ACCEL_MIN, ACCEL_MAX))[0]]
+    while not hb.disengage_due:
+      hb.update(True, 0., lo[-1], "lead_imminent")
+      lo.append(hb.limit_accel((ACCEL_MIN, ACCEL_MAX))[0])
+      self.assertLess(len(lo), 500)
+    self.assertAlmostEqual(lo[1], -1.0, delta=0.05)
+    self.assertEqual(lo[-1], 0.)
+    self.assertTrue(all(b >= a - 1e-9 for a, b in zip(lo[1:], lo[2:], strict=False)), "monotonic release, no step")
+    # rolling again before the disengage: urgency counts again
+    hb2 = LowSpeedHandback(CP, Params())
+    hb2.update(True, 2.0, -1.0, "lead_imminent")
+    for _ in range(round(STANDSTILL_RESOLVE / DT_CTRL) + 2):
+      hb2.update(True, 0., -1.0, "lead_imminent")
+    self.assertFalse(hb2.urgent)
+    hb2.update(True, 0.8, -0.2, "lead_imminent")
+    self.assertTrue(hb2.urgent)
+
+  def test_fcw_is_never_resolved(self):
+    CP, _ = make_cp()
+    hb = LowSpeedHandback(CP, Params())
+    hb.update(True, 2.0, -1.0, "fcw")
+    for _ in range(round(5. / DT_CTRL)):
+      hb.update(True, 0., -1.0, "fcw")
+    self.assertTrue(hb.urgent)
+    self.assertFalse(hb.ramp_done)
+
+  def test_handback_lead_reason(self):
+    from openpilot.cereal import messaging
+    def lead(d, v_rel, v_lead, a=0.):
+      l = messaging.new_message('radarState').radarState.leadOne
+      l.present, l.dRel, l.vRel, l.vLead, l.aLeadK = True, d, v_rel, v_lead, a
+      return l
+    r = DEFAULT_RAMP_TIME + DISENGAGE_MARGIN + HANDBACK_DRIVER_REACTION
+    v = DEFAULT_HANDBACK_SPEED
+    cases = [  # (gap, vRel, vLead, aLead) at the handback speed -> imminent?
+      ((40., -v, 0.), False), ((10.4, -v, 0.), False), ((7., -v, 0.), True), ((4., -v, 0.), True),
+      ((9., -1.24, 1.), False), ((1.5, 0., v), False), ((6., 0., v, -2.), True), ((12., 0., v, -1.0), False)]
+    for args, want in cases:
+      with self.subTest(args=args):
+        self.assertEqual(handback_lead_reason(lead(*args), v, r) is not None, want)
+    radar = messaging.new_message('radarState').radarState
+    for reason in ("invalid_plan", "invalid_radar", "force_decel", "fcw", "stock_aeb", "hard_decel"):
+      self.assertEqual(handback_urgency(reason, radar, v, r), reason)
+    for reason in ("stopping", "lead_close", "lead_closing", "lead_ttc", "lead_braking", None):
+      self.assertIsNone(handback_urgency(reason, radar, v, r), reason)
+    radar.leadOne = lead(4., -v, 0.)
+    self.assertEqual(handback_urgency(None, radar, v, r), "lead_imminent")

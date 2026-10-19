@@ -133,4 +133,16 @@ MUTATIONS = [
     "ret.deprecated.clutchPressed = gear_mt not in GEAR_MT_COUPLED", "ret.deprecated.clutchPressed = gear_mt == 0", ODBC),
   m("b5_odbc_integra_rpm", "B5 B-M7", "opendbc_repo/opendbc/car/honda/carstate.py",
     "        if self.CP.carFingerprint == CAR.ACURA_INTEGRA:\n", "        if False:\n", ODBC),
+  # --- Task 13 (verification fix-ups) -------------------------------------------------------------------------------
+  m("t13_a1_broad_urgency", "T13 A1 N-1", f"{SP}/controlsd_ext.py",
+    "urgency = handback_urgency(self.urgency, sm['radarState'], v_ego, hb.reaction_time) if hb.available else None",
+    "urgency = self.urgency if hb.available else None", HB + R5),
+  m("t13_a1_imminent_ignored", "T13 A1", f"{SP}/lib/braking_urgency.py",
+    "    reason = handback_lead_reason(lead, v_ego, reaction)\n", "    reason = None\n", HB + R5),
+  m("t13_a1_no_standstill_resolution", "T13 A1 review2 N6", f"{SP}/lib/manual_low_speed_handback.py",
+    "        self.resolved = True\n", "        self.resolved = False\n", HB),
+  m("t13_a1_no_imminent_latch", "T13 A1", f"{SP}/lib/manual_low_speed_handback.py",
+    "      self.lead_latched = True\n", "      pass\n", HB),
+  m("t13_a1_fcw_resolved", "T13 A1", f"{SP}/lib/manual_low_speed_handback.py",
+    "urgency not in UNCONDITIONAL and ", "", HB),
 ]
