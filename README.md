@@ -6,10 +6,11 @@ car and drive expecting it to behave safely.
 
 Before you even consider it, understand:
 
-- It runs **openpilot longitudinal on a radarless Honda, which DISABLES your car's factory
-  automatic emergency braking (CMBS)** while engaged. You lose stock AEB.
+- It runs **openpilot longitudinal on a radarless Honda. Whenever openpilot longitudinal is enabled, the car's own
+  collision-mitigation braking (CMBS / AEB) is disabled for the ENTIRE DRIVE**, engaged or not: the panda statically
+  blocks the camera's `ACC_CONTROL` (0x1C8), which is the message that carries it. openpilot has no AEB of its own.
 - The manual-transmission features (clutch/shift gate, low-speed handback) are **experimental**
-  and rely on signals and assumptions (e.g. `GEAR_MT`, how strongly openpilot's radarless braking actually brakes)
+  and rely on signals and assumptions (e.g. `GEAR_MT`, whether the car even has brake authority)
   that are **not yet verified on-car**.
 - A "no-service-brake" coast mode **intentionally stops openpilot from braking** to hold set
   speed on downhills.
