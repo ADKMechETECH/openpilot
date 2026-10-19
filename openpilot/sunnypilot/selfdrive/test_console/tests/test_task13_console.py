@@ -247,3 +247,18 @@ class TestB3CaughtErrors(OpenpilotTestCase):
     self.assertIn('guard.run("status", save, force=True)', src)
     self.assertIn('guard.run("shutdown", console.shutdown, force=True)', src)
     self.assertIn("status_for(guard, console", src)
+
+
+class TestA2KnockOn(OpenpilotTestCase):
+  def test_console_scores_against_the_clamped_margin(self):
+    # Task 13 A2 on the console: NSB2 compares the trigger speed with ctx.nsb_margin, which must be the margin the car
+    # uses (min(configured, 6.7, ceiling - 0.45)), not the raw param
+    from openpilot.sunnypilot.selfdrive.controls.lib.no_service_brake import MAX_OVERSPEED_MARGIN, read_nsb_params
+    from openpilot.sunnypilot.selfdrive.controls.lib.tests.manual_sim import set_params
+    from openpilot.sunnypilot.selfdrive.test_console.test_consoled import read_context
+    p = set_params(NoServiceBrakeOverspeedMargin=15., NoServiceBrakeOverspeedHardCeiling=11.)
+    c = ctx()
+    read_context(p, c)
+    self.assertEqual(c.nsb_margin, read_nsb_params(p, True).margin)
+    self.assertLessEqual(c.nsb_margin, MAX_OVERSPEED_MARGIN)
+    self.assertTrue(0. <= c.nsb_release < c.nsb_trigger < c.nsb_ceiling)

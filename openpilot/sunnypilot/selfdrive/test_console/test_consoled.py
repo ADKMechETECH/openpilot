@@ -20,7 +20,7 @@ from opendbc.car.structs import car
 from openpilot.common.params import Params
 from openpilot.common.swaglog import cloudlog
 from openpilot.selfdrive.pandad import can_capnp_to_list
-from openpilot.sunnypilot.selfdrive.controls.lib.no_service_brake import read_overspeed_mode, read_pulse_params
+from openpilot.sunnypilot.selfdrive.controls.lib.no_service_brake import read_nsb_params
 from openpilot.sunnypilot.selfdrive.test_console.button import StartButton
 from openpilot.sunnypilot.selfdrive.test_console.capture import Console, Store
 from openpilot.sunnypilot.selfdrive.test_console.conditions import Context
@@ -39,10 +39,11 @@ def read_context(params: Params, ctx: Context) -> None:
   # return_default: Params.get_bool() ignores registered defaults (NoServiceBrakeOverspeedBackstop defaults ON)
   for key in ctx.watched_toggles:
     ctx.toggles[key] = bool(params.get(key, return_default=True))
-  ctx.nsb_floor = float(params.get("NoServiceBrakeDecelFloor", return_default=True))
-  ctx.nsb_margin = float(params.get("NoServiceBrakeOverspeedMargin", return_default=True))
-  ctx.nsb_mode = read_overspeed_mode(params)
-  pulse = read_pulse_params(params, min(max(ctx.nsb_margin, 0.5), 15.))  # the margin clamp NoServiceBrake applies
+  # the values NoServiceBrake itself uses, clamps included (Task 13 A2: the margin is capped at a fixed 6.7 m/s and kept
+  # under the ceiling - a raw param read scored NSB2 against a margin the car never used)
+  nsb = read_nsb_params(params, True)
+  ctx.nsb_floor, ctx.nsb_margin, ctx.nsb_mode = nsb.decel_floor, nsb.margin, nsb.mode
+  pulse = nsb.pulse
   ctx.nsb_trigger, ctx.nsb_release, ctx.nsb_ceiling = pulse.trigger, pulse.release, pulse.ceiling
   ctx.nsb_pulse_decel, ctx.nsb_pulse_jerk = pulse.decel, pulse.jerk
   ctx.handback_ramp = float(params.get("ManualLowSpeedHandbackRamp", return_default=True))
