@@ -90,6 +90,18 @@ MUTATIONS = [
   m("t13_b2_gas_at_release_is_leak", "T13 B2 D-04", R,
     '  gm_leaks = len({e["leak"] for e in a.episodes if e.get("leak") is not None})',
     '  gm_leaks = len({e["leak"] for e in a.episodes if e.get("leak") is not None}) + sum(bool(e.get("close_gas")) for e in a.episodes)'),
+  m("t13_b3_dropped_still_passes", "T13 B3 review2 p3", f"{TC}/capture.py", "    if self.dropped:\n      if status == PASS:",
+    "    if self.dropped:\n      if False:", T13),
+  m("t13_b3_errors_not_counted", "T13 B3", f"{TC}/test_consoled.py",
+    "  if guard.errors != before or guard.inert:", "  if False:", T13),
+  m("t13_b3_bookkeeping_resets_streak", "T13 B3", f"{TC}/test_consoled.py",
+    "(inert would never come)\n      console.note_dropped()\n", "(inert would never come)\n      guard.run('d', console.note_dropped)\n",
+    T13),
+  m("t13_b3_inert_status_skipped", "T13 B3", f"{TC}/guard.py", "    if self.inert and not force:", "    if self.inert:", T13),
+  m("t13_b3_errors_not_shown", "T13 B3", "openpilot/selfdrive/ui/sunnypilot/mici/onroad/test_console_chip.py",
+    "  if st.get(\"errors\"):\n", "  if False:\n", T13),
+  m("t13_b3_inert_chip_vanishes", "T13 B3", "openpilot/selfdrive/ui/sunnypilot/mici/onroad/test_console_chip.py",
+    "  if st.get(\"inert\"):\n", "  if False:\n", T13),
 ]
 
 

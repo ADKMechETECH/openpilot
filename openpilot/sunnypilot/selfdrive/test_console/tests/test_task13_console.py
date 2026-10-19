@@ -155,3 +155,95 @@ class TestB1CoastFit(OpenpilotTestCase):
     self.assertEqual(status, FAIL, detail)
     self.assertEqual(run({"E0b": e0b_capture()}, sent=math.nan)[0], CAPTURED)
 
+
+class TestB3CaughtErrors(OpenpilotTestCase):
+  """Task 13 B3 [review2 problem 3]: errors the daemon's guard catches are visible (state.json, chip, detail page), and a
+  run that lost frames to them can't PASS (provisional); an inert daemon keeps saying so instead of vanishing."""
+
+  def setUp(self):
+    import tempfile
+    from openpilot.sunnypilot.selfdrive.test_console.capture import Console, Store
+    self.tmp = tempfile.TemporaryDirectory()
+    self.console = Console(Store(self.tmp.name), ctx())
+
+  def tearDown(self):
+    self.tmp.cleanup()
+
+  def run_s3(self, fail_frames=()):
+    """S3 (rpm noise: 60 s clean in 4th -> PASS) through the daemon's guarded_step; frames in fail_frames raise."""
+    from openpilot.sunnypilot.selfdrive.test_console.guard import Guard
+    from openpilot.sunnypilot.selfdrive.test_console.test_consoled import guarded_step
+    guard, console = Guard(), self.console
+    console.set_control("S3", True, False)
+    sim = Sim(gear_raw=4, v_ego=20.)
+    console.update(sim.step(), True)
+    for i, s in enumerate(sim.run(62.)):
+      def step(s=s, i=i):
+        if i in fail_frames:
+          raise ValueError("injected console bug")
+        console.update(s, False)
+      guarded_step(guard, console, "frame", step)
+    return guard
+
+  def test_clean_run_passes(self):
+    guard = self.run_s3()
+    self.assertEqual(guard.errors, 0)
+    self.assertEqual(self.console.state, "complete")
+    self.assertEqual(self.console.store.results["S3"]["status"], PASS)
+
+  def test_caught_errors_make_the_verdict_provisional_and_visible(self):
+    from openpilot.selfdrive.ui.sunnypilot.mici.onroad.test_console_chip import chip_lines
+    from openpilot.sunnypilot.selfdrive.test_console.test_consoled import status_for
+    guard = self.run_s3(fail_frames=(100, 101, 2000, 3000, 4000))
+    self.assertEqual(guard.errors, 5)
+    res = self.console.store.results["S3"]
+    self.assertTrue(res["complete"])
+    self.assertNotEqual(res["status"], PASS, res)
+    self.assertEqual(res["status"], CAPTURED)
+    self.assertIn("5 frame(s) lost to console errors", res["detail"])
+    self.assertEqual(res["dropped"], 5)
+    st = status_for(guard, self.console, None, {})
+    self.assertEqual(st["errors"], 5)
+    self.assertFalse(st["inert"])
+    self.assertIn("5 console errors", st["error"])
+    lines, _ = chip_lines(st)
+    self.assertTrue(any("5 console errors" in line for line in lines), lines)
+
+  def test_inert_daemon_says_so(self):
+    from openpilot.selfdrive.ui.sunnypilot.mici.onroad.test_console_chip import chip_lines
+    from openpilot.sunnypilot.selfdrive.test_console.guard import Guard
+    from openpilot.sunnypilot.selfdrive.test_console.test_consoled import guarded_step, status_for
+    guard, console = Guard(), self.console
+    console.set_control("S3", True, False)
+    sim = Sim(gear_raw=4, v_ego=20.)
+    console.update(sim.step(), True)
+
+    def boom():
+      raise ValueError("persistent bug")
+    for _ in range(Guard.MAX_CONSECUTIVE + 20):
+      guarded_step(guard, console, "frame", boom)
+    self.assertTrue(guard.inert)
+    self.assertEqual(console.run.dropped, Guard.MAX_CONSECUTIVE + 20, "frames keep counting as lost once inert")
+    st = guard.run("status", status_for, guard, console, None, {}, force=True)
+    self.assertIsNotNone(st, "the status writer still runs when inert")
+    self.assertTrue(st["inert"])
+    self.assertEqual(st["state"], "inert")
+    lines, key = chip_lines(st)
+    self.assertIn("INERT", lines[0])
+    self.assertEqual(key, "FAIL")
+    # the run's verdict, if it is saved (shutdown), is never a PASS
+    status, detail = console.run.result()
+    self.assertNotEqual(status, PASS)
+    self.assertIn("lost to console errors", detail)
+
+  def test_daemon_loop_wiring(self):
+    # the loop itself needs messaging; its wiring is pinned structurally: frames/drains go through guarded_step (lost
+    # frames are counted), the status writer runs even when inert, and results are still saved at shutdown
+    import inspect
+    from openpilot.sunnypilot.selfdrive.test_console import test_consoled
+    src = inspect.getsource(test_consoled.run_console)
+    self.assertIn('guarded_step(guard, console, "frame", step)', src)
+    self.assertIn('guarded_step(guard, console, "drain", drain)', src)
+    self.assertIn('guard.run("status", save, force=True)', src)
+    self.assertIn('guard.run("shutdown", console.shutdown, force=True)', src)
+    self.assertIn("status_for(guard, console", src)

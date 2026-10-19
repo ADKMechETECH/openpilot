@@ -32,7 +32,16 @@ BG = {
 
 
 def chip_lines(st: dict) -> tuple[list[str], str]:
-  """(lines, color key) for a live, armed status dict."""
+  """(lines, color key) for a live, armed (or inert) status dict. Task 13 B3: caught console errors are shown."""
+  if st.get("inert"):
+    return ["test console INERT", f"{st.get('errors', 0)} errors - see the rlog; results provisional"], "FAIL"
+  lines, key = _chip_lines(st)
+  if st.get("errors"):
+    lines.append(f"! {st['errors']} console errors" + (f", {st['dropped']} frames lost" if st.get("dropped") else ""))
+  return lines, key
+
+
+def _chip_lines(st: dict) -> tuple[list[str], str]:
   test, state, progress = st.get("selected", ""), st.get("state", ""), st.get("progress", "")
   failing = next((label for label, ok in st.get("conditions", []) if not ok), None)
   if state == "capturing":
@@ -67,7 +76,7 @@ class TestConsoleChip:
   def render(self, rect: rl.Rectangle) -> None:
     self._poller.update(time.monotonic())
     st = self._poller.state
-    if not st.get("armed") or not self._poller.live(time.monotonic()) or alert_showing():
+    if not (st.get("armed") or st.get("inert")) or not self._poller.live(time.monotonic()) or alert_showing():
       return
     lines, key = chip_lines(st)
     max_w = rect.width - 2 * SIDE_CLEARANCE - 2 * PAD_X

@@ -46,8 +46,9 @@ class Guard:
     self.consecutive = 0
     self.inert = False
 
-  def run(self, site: str, fn, *a, **kw):
-    if self.inert:
+  def run(self, site: str, fn, *a, force: bool = False, **kw):
+    """force: run even when inert (the status writer: it must keep saying the console is inert, Task 13 B3)."""
+    if self.inert and not force:
       return None
     try:
       out = fn(*a, **kw)

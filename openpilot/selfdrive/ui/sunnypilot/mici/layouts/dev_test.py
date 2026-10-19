@@ -146,6 +146,8 @@ class TestDetailPage(NavScroller):
       button = f"{buttons.label(name)}, {'/'.join(buttons.modes.get(name, PRESS_MODES))} press" + \
                (f" ({buttons.modes[name][0]} recommended)" if name in buttons.modes else "") + \
                (f" • {note}" if note else "") + " • live once armed and onroad (shows whether it decodes)"
+    if st.get("error"):   # Task 13 B3: caught console errors are visible here too
+      result += f" • ! {st['error']}"
     self._status.update_text(title, text)
     self._result.update_text("result", result)
     self._button.update_text("start/stop button", button)

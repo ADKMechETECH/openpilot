@@ -24,7 +24,7 @@ from openpilot.sunnypilot.selfdrive.controls.lib.no_service_brake import read_ov
 from openpilot.sunnypilot.selfdrive.test_console.button import StartButton
 from openpilot.sunnypilot.selfdrive.test_console.capture import Console, Store
 from openpilot.sunnypilot.selfdrive.test_console.conditions import Context
-from openpilot.sunnypilot.selfdrive.test_console.guard import Guard
+from openpilot.sunnypilot.selfdrive.test_console.guard import Guard, log_once
 from openpilot.sunnypilot.selfdrive.test_console.profile import inactive_reason, select_profile
 from openpilot.sunnypilot.selfdrive.test_console.signals import LogEventTap, SampleBuilder
 from openpilot.sunnypilot.selfdrive.test_console.status_io import P_ARMED, P_BACKGROUND, P_BUTTON, P_PRESS, P_SELECTED, console_dir
@@ -47,6 +47,32 @@ def read_context(params: Params, ctx: Context) -> None:
   ctx.nsb_pulse_decel, ctx.nsb_pulse_jerk = pulse.decel, pulse.jerk
   ctx.handback_ramp = float(params.get("ManualLowSpeedHandbackRamp", return_default=True))
   ctx.ebp_coast_target = float(params.get("EngineBrakeCoastTarget", return_default=True))
+
+
+def guarded_step(guard: Guard, console: Console, site: str, fn) -> None:
+  """Run a per-frame step under the guard; if it failed, the frame's data is lost for every active run (Task 13 B3:
+  their verdicts become provisional instead of PASSing on partial data)."""
+  before = guard.errors
+  guard.run(site, fn)
+  if guard.errors != before or guard.inert:   # inert: nothing runs, so every frame is lost
+    try:   # not through guard.run: this bookkeeping succeeding must not reset the failure streak (inert would never come)
+      console.note_dropped()
+    except Exception:
+      log_once("note_dropped")
+
+
+def status_for(guard: Guard, console: Console, s, button_info: dict) -> dict:
+  """The state.json the UI reads. Task 13 B3: errors the guard caught are in it (count + inert); once inert the
+  console's own state isn't trusted, so a minimal state says so - the chip shows "INERT" instead of vanishing."""
+  if guard.inert:
+    state = {"version": 1, "stamp": round(time.monotonic(), 3), "selected": console.selected, "armed": console.armed,
+             "state": "inert", "background": console.background}
+  else:
+    state = console.status(s, button_info)
+  if guard.errors:
+    state["errors"], state["inert"] = guard.errors, guard.inert
+    state["error"] = f"{guard.errors} console errors (see the rlog){' - INERT for this drive' if guard.inert else ''}"
+  return state
 
 
 def run_console(params: Params, CP, CP_bytes: bytes, profile) -> None:
@@ -101,9 +127,7 @@ def run_console(params: Params, CP, CP_bytes: bytes, profile) -> None:
   def save(exited: bool = False) -> None:
     info = {"name": button.name, "mode": button.mode, "seen": button.seen,
             "note": profile.buttons.side_effect.get(button.name, "")}
-    state = console.status(frame["s"], info)
-    if guard.errors:
-      state["error"] = f"{guard.errors} console errors (see the rlog){' - inert' if guard.inert else ''}"
+    state = status_for(guard, console, frame["s"], info)
     store.save_state({**state, "exited": True} if exited else state)
 
   try:
@@ -116,18 +140,18 @@ def run_console(params: Params, CP, CP_bytes: bytes, profile) -> None:
           cloudlog.event("test_console_carparams_changed")
           return
         guard.run("params", read_params)
-      guard.run("drain", drain)
+      guarded_step(guard, console, "drain", drain)
       if not sm.updated["carState"]:
         continue
-      guard.run("frame", step)
+      guarded_step(guard, console, "frame", step)
       if now - t_status > STATUS_PERIOD:
         t_status = now
-        guard.run("status", save)
+        guard.run("status", save, force=True)   # keeps reporting (errors / inert) after going inert
   finally:
-    guard.inert = False   # the exit status is written even after going inert
-    guard.run("shutdown", console.shutdown)
+    # results are saved even after going inert (marked provisional: their runs counted the lost frames)
+    guard.run("shutdown", console.shutdown, force=True)
     if frame["s"] is not None:
-      guard.run("exit_status", save, True)
+      guard.run("exit_status", save, True, force=True)
 
 
 def main() -> None:

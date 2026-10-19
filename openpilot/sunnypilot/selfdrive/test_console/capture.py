@@ -179,6 +179,7 @@ class Run:
     self.file: CaptureFile | None = None
     self.t_start = 0.
     self.complete = False
+    self.dropped = 0   # frames lost to errors the daemon's guard caught while this run was active (Task 13 B3)
 
   def open_window(self, t: float) -> None:
     self.window += 1
@@ -198,12 +199,22 @@ class Run:
       self.file.add(s)
     return notes
 
+  def result(self) -> tuple[str | None, str]:
+    """The analyzer's verdict, except (Task 13 B3) a run that lost frames to caught console errors never PASSes: its
+    data is partial, so a PASS is only provisional (CAPTURED); any verdict says how many frames were lost."""
+    status, detail = self.analyzer.result()
+    if self.dropped:
+      if status == PASS:
+        status = CAPTURED
+      detail += f" [provisional: {self.dropped} frame(s) lost to console errors]"
+    return status, detail
+
   def summary(self) -> dict:
     text, frac = self.analyzer.progress()
-    status, detail = self.analyzer.result()
+    status, detail = self.result()
     return {**self.analyzer.data, "status": status, "detail": detail, "progress": text, "frac": round(frac, 3),
             "complete": self.complete, "wall": time.time(), "phase": self.spec.phase,  # noqa: TID251  (human-readable wall clock in the files)
-            "background": self.background}
+            "background": self.background, "dropped": self.dropped}
 
 
 class Console:
@@ -234,7 +245,7 @@ class Console:
       text, _ = run.analyzer.progress()
       rec["progress"] = text
       if action in ("complete", "stop", "abort"):
-        rec["status"], rec["detail"] = run.analyzer.result()
+        rec["status"], rec["detail"] = run.result()
     if note:
       rec["note"] = note
     if s is not None:
@@ -361,6 +372,14 @@ class Console:
     if self.background:
       self._update_background(s)
 
+  def note_dropped(self) -> None:
+    """The daemon's guard caught an error that lost this frame (Task 13 B3): every active run's data is now partial."""
+    if self.run is not None and self.state == "capturing":
+      self.run.dropped += 1
+    for r in self.bg_runs.values():
+      if not r.complete:
+        r.dropped += 1
+
   # -- status for the UI -----------------------------------------------------------------------------------------------
   def status(self, s: Sample | None, button_info: dict) -> dict:
     # stamp: CLOCK_MONOTONIC is system-wide, so the UI process can judge staleness against its own time.monotonic()
@@ -371,7 +390,8 @@ class Console:
     if self.run is not None:
       summary = self.run.summary()
       out.update(progress=summary["progress"], frac=summary["frac"], status=summary["status"], detail=summary["detail"],
-                 window=self.run.window, elapsed=round(self._last_t - self.run.t_start, 1) if self.state == "capturing" else 0.)
+                 window=self.run.window, elapsed=round(self._last_t - self.run.t_start, 1) if self.state == "capturing" else 0.,
+                 dropped=self.run.dropped)
     if s is not None:
       out["live"] = {"v": _num(s.v_ego, 2), "rpm": _num(s.rpm, 0), self.ctx.column("gear_raw"): s.gear_raw, "gear": s.gear,
                      "pitch": _num(s.pitch, 4), "gate": s.gate, "long_active": s.long_active,

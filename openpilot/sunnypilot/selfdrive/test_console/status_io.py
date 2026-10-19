@@ -58,9 +58,10 @@ def read_json(path: str) -> dict:
 _STR, _BOOL, _NUM = (str,), (bool,), (int, float)
 STATE_TYPES = {"selected": _STR, "armed": _BOOL, "state": _STR, "qualifying": _BOOL, "background": _BOOL,
                "progress": _STR, "frac": _NUM, "status": _STR, "detail": _STR, "stamp": _NUM, "mono": _NUM,
-               "exited": _BOOL, "window": _NUM, "elapsed": _NUM, "version": _NUM, "error": _STR}
+               "exited": _BOOL, "window": _NUM, "elapsed": _NUM, "version": _NUM, "error": _STR, "errors": _NUM,
+               "inert": _BOOL, "dropped": _NUM}
 RESULT_TYPES = {"status": _STR, "complete": _BOOL, "progress": _STR, "frac": _NUM, "detail": _STR, "runs": _NUM,
-                "window": _NUM, "background": _BOOL, "coast_fit": (dict,)}
+                "window": _NUM, "background": _BOOL, "coast_fit": (dict,), "dropped": _NUM}
 
 
 def _typed(d: dict, types: dict) -> dict:
