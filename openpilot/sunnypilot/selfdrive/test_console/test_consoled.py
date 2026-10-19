@@ -13,6 +13,7 @@ Vehicle-agnostic: the console runs the plan of the vehicle profile selected for 
 profile for the platform -> inactive: it subscribes to nothing and writes nothing (the UI shows "no test-console profile
 for this platform"); a CarParams change is re-checked every second either way.
 """
+import os
 import time
 
 import openpilot.cereal.messaging as messaging
@@ -30,6 +31,9 @@ from openpilot.sunnypilot.selfdrive.test_console.signals import LogEventTap, Sam
 from openpilot.sunnypilot.selfdrive.test_console.status_io import P_ARMED, P_BACKGROUND, P_BUTTON, P_PRESS, P_SELECTED, console_dir
 
 PARAMS_PERIOD = 1.0      # s
+# proof tooling only (the console replay tool's isolation mode): "frame" makes every frame step raise, so the replay
+# can show that a persistently failing console goes inert without touching controlsd / plannerd. Unset = never.
+FAULT_INJECT = os.environ.get("TEST_CONSOLE_FAULT_INJECT", "")
 STATUS_PERIOD = 0.2      # s
 SERVICES = ["carState", "carControl", "carOutput", "longitudinalPlan", "radarState", "selfdriveState", "pandaStates",
             "carControlSP", "longitudinalPlanSP"]   # Task 12: the features' published (latched) state
@@ -116,6 +120,8 @@ def run_console(params: Params, CP, CP_bytes: bytes, profile) -> None:
         tap.update(can_capnp_to_list(can_raw), can_capnp_to_list(sendcan_raw, "sendcan"))
 
   def step() -> None:
+    if FAULT_INJECT == "frame":
+      raise RuntimeError("injected console fault (TEST_CONSOLE_FAULT_INJECT=frame)")
     t = sm.logMonoTime["carState"] / 1e9
     tx_blocked = sum(ps.safetyTxBlocked for ps in sm["pandaStates"])
     s = builder.build(t, sm["carState"], sm["carControl"], sm["carOutput"], sm["longitudinalPlan"],

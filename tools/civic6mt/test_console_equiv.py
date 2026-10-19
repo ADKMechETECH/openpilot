@@ -8,13 +8,19 @@ the pre-refactor spelling) to <outdir>/<run>.json. Run it before and after the r
 inputs; `diff -r before after` must be empty. (Written for the Task 10 refactor. Task 12 changes console behavior on
 purpose - published gate state, verdict rules - so a before/after across Task 12 is expected to differ.)
 
+Task 13 B4: it is also a proof on its own - it exits 1 unless every armed test's capture actually started (a "start"
+marker) and wrote a non-empty capture file. The gap button resolves to its recommended TRIPLE press (Task 12 D-10), so
+the scripted presses are triples (single presses never started a capture after Task 12). The frames carry the features'
+PUBLISHED state as Task 12 runs them (carControlSP.manualLongitudinal / longitudinalPlanSP, built per run from that run's
+toggles): longitudinal stays active through an engaged shift and the gate publishes 'shifting' + paused.
+
 Inputs (deterministic): the HONDA CI segment's rlog, re-labelled a 6-speed manual (RPM from a speed->gear schedule, a
 0.6 s clutch window with the raw gear reading 0 at each gear change, the raw gear signal otherwise), synthetic feature
 cloudlog records (clutch gate states, handback, NSB backstop + Task 11 pulse phases, EBP), the escalation alert, and
 gap-button presses (start at +2 s, stop at +20 s, resume at +25 s); then a scripted 6MT drive (Synth: reverse, the
 clutch-bit signature parked, a pull-away through the gears, engaged cruise, braking requests, a downhill clamp + pulse +
 escalation, engaged plain and rev-matched downshifts, a lead approach, a brake-press disengage, the low-speed handback,
-a stop and hold, a neutral coast, an uphill pull, EBP records). The capture window stays open across both.
+a stop and hold, a neutral coast, an uphill pull, a downhill coast, EBP records). The capture window stays open across both.
 
   cd ~/civic-cruise/openpilot && source .venv/bin/activate && export PYTHONPATH="$(pwd)"   # civic-6mt-dev-test
   python tools/civic6mt/test_console_equiv.py <outdir>
@@ -35,7 +41,9 @@ ButtonType = structs.CarState.ButtonEvent.Type
 OLD_NAMES = {"gear_raw": "gear_mt", "raw_payload": "raw_17c", "gas_raw": "pedal_gas"}   # post-refactor role -> old field
 SCHEDULE = [(4.5, 1), (8., 2), (12., 3), (17., 4), (23., 5)]
 CLUTCH_S = 0.6
-BUTTON = {2.0: True, 2.2: False, 20.0: True, 20.2: False, 25.0: True, 25.2: False}
+# start / stop / resume, each a TRIPLE press (the gap button's default gesture since Task 12 D-10)
+BUTTON = {round(at + dt, 2): pressed for at in (2.0, 20.0, 25.0)
+          for dt, pressed in ((0., True), (0.1, False), (0.3, True), (0.4, False), (0.6, True), (0.7, False))}
 
 
 def api():
@@ -139,7 +147,8 @@ def strip(d: dict, *keys) -> dict:
 
 
 class Frame:
-  __slots__ = ("t", "cs", "cc", "co", "plan", "plan_valid", "radar", "ss", "tx", "records", "raw_gear", "payload", "buttons")
+  __slots__ = ("t", "cs", "cc", "co", "plan", "plan_valid", "radar", "ss", "tx", "records", "raw_gear", "payload", "buttons",
+               "gate", "paused", "handback", "ebp")
 
 
 def real_frames(msgs) -> list[Frame]:
@@ -177,6 +186,10 @@ def real_frames(msgs) -> list[Frame]:
     f.records = scripted_events(rel)
     f.raw_gear = -1 if rel < 1. else (0 if clutch else gear)   # the raw gear signal (tap) once "live"
     f.payload = -1
+    # the published gate state (Task 12 A2): paused while the clutch is in with openpilot engaged, longActive untouched
+    f.paused = clutch and bool(f.cc.enabled)
+    f.gate = "shifting" if f.paused else "idle"
+    f.handback, f.ebp = 36. <= rel < 36.6, 3. <= rel < 6.
     out.append(f)
   return out
 
@@ -188,9 +201,11 @@ class Synth:
 
   def __init__(self, t0: float):
     self.t, self.frames = t0, []
-    self.st = dict(v=0., a=0.,  # noqa: C408 gear=0, clutch=False, gas=False, brake=False, rpm=800., coupled=False, enabled=False, long=False,
-                   cmd=0., a_target=0., v_cruise=0., pitch=0.005, allow=True, fcw=False, lead=None, alert="", raw_gear=0,
-                   payload=0, hold=False, reverse=False, cruise=False)
+    # (Task 13 B4: a lint fix had moved most of these keys into the `noqa` comment - the drive raised KeyError)
+    self.st = dict(v=0., a=0., gear=0, clutch=False, gas=False, brake=False, rpm=800., coupled=False,  # noqa: C408
+                   enabled=False, long=False, cmd=0., a_target=0., v_cruise=0., pitch=0.005, allow=True, fcw=False,
+                   lead=None, alert="", raw_gear=0, payload=0, hold=False, reverse=False, cruise=False, gate="idle",
+                   paused=False, handback=False, ebp=False)
 
   def step(self, seconds: float, records=(), buttons=(), **kw) -> None:
     st = self.st
@@ -229,6 +244,7 @@ class Synth:
       f.cs, f.cc, f.co, f.plan, f.plan_valid, f.radar, f.ss, f.tx = cs, cc, co, plan, True, radar, ss, 0
       f.records = list(records) if i == 0 else []
       f.raw_gear, f.payload = st["raw_gear"], st["payload"]
+      f.gate, f.paused, f.handback, f.ebp = st["gate"], st["paused"], st["handback"], st["ebp"]
       self.frames.append(f)
 
   def toggle_sig(self, n: int, gap: float) -> None:
@@ -238,14 +254,18 @@ class Synth:
       self.step(gap / 2)
 
   def shift(self, to: int, blip: bool = False, engaged: bool = False) -> None:
+    """Task 12 A2 semantics: an engaged shift keeps longitudinal ACTIVE; the gate publishes 'shifting' + paused (throttle
+    capped at the coast accel, braking available), then 'reengaging', then 'idle'. A blip: exactly 0 commanded."""
     gate = [log_record("clutch_shift_gate", state="shifting")] if engaged else []
+    pub = {"gate": "shifting", "paused": True} if engaged else {}
     self.step(0.25, gas=False, a=-0.2, cmd=0. if engaged else self.st["cmd"])
-    self.step(0.15, records=gate, clutch=True, raw_gear=0, coupled=False, long=False, rpm=self.st["rpm"] * 0.9)
-    self.step(0.2, gas=blip, rpm=self.st["rpm"] * (1.4 if blip else 0.9))
+    self.step(0.15, records=gate, clutch=True, raw_gear=0, coupled=False, rpm=self.st["rpm"] * 0.9, **pub)
+    self.step(0.2, gas=blip, rpm=self.st["rpm"] * (1.4 if blip else 0.9), **({"cmd": 0.} if engaged and blip else {}))
     self.step(0.25, gas=False)
     self.step(0.2, records=[log_record("clutch_shift_gate", state="reengaging")] if engaged else [], clutch=False, raw_gear=to,
-              gear=to, rpm=float(engine_rpm_at(to, self.st["v"]) * 1.15))
-    self.step(0.6, records=[log_record("clutch_shift_gate", state="idle")] if engaged else [], coupled=True, long=engaged)
+              gear=to, rpm=float(engine_rpm_at(to, self.st["v"]) * 1.15), **({"gate": "reengaging"} if engaged else {}))
+    self.step(0.6, records=[log_record("clutch_shift_gate", state="idle")] if engaged else [], coupled=True,
+              **({"gate": "idle", "paused": False} if engaged else {}))
 
 
 def synth_frames(t0: float) -> list[Frame]:
@@ -297,8 +317,8 @@ def synth_frames(t0: float) -> list[Frame]:
   while d.st["v"] > 2.3:
     d.step(0.1, a=-0.6, cmd=-0.6)
   d.step(0.5, records=[log_record("manual_low_speed_handback", process="controlsd", v_ego=2.2, accel=-0.6, ramp=0.5)],
-         alert="manualLowSpeedHandback/immediateDisable", cmd=-0.3)
-  d.step(1., enabled=False, long=False, alert="", cmd=0.)
+         alert="manualLowSpeedHandback/immediateDisable", cmd=-0.3, handback=True)
+  d.step(1., enabled=False, long=False, alert="", cmd=0., handback=False)
   d.step(2., clutch=True, raw_gear=0, coupled=False, rpm=800., brake=True, a=-1.1)
   d.step(2., a=0., v=0., hold=True)
   d.step(3., brake=False)
@@ -307,14 +327,45 @@ def synth_frames(t0: float) -> list[Frame]:
   while d.st["v"] < 12.:
     d.step(0.1, a=1.5)
   d.step(1., gas=False, a=-0.1, enabled=True, long=True, cruise=True, raw_gear=0, coupled=False, rpm=850.)
-  d.step(8., records=[log_record("clutch_shift_gate", state="coastTimeout")])
-  d.step(1., gear=3, raw_gear=3, coupled=True, long=True)
+  d.step(0.5, gate="shifting", paused=True)
+  d.step(8., records=[log_record("clutch_shift_gate", state="coastTimeout")], gate="coastTimeout", paused=False)
+  d.step(1., gear=3, raw_gear=3, coupled=True, long=True, gate="idle")
   d.step(6., pitch=0.035, gas=True, a=1.0, enabled=False, long=False)
+  d.step(8., pitch=-0.04, gas=False, a=0.15)   # downhill coast in 3rd, openpilot off (E0a)
   d.step(2., records=[log_record("engine_brake_preferred", active=True, gear=3, a_eb=-0.4)], gas=False, a=-0.4, pitch=0.005,
-         enabled=True, long=True, cmd=0.)
-  d.step(2., records=[log_record("engine_brake_preferred", active=False, reason="plan")])
+         enabled=True, long=True, cmd=0., ebp=True)
+  d.step(2., records=[log_record("engine_brake_preferred", active=False, reason="plan")], ebp=False)
   d.step(2., enabled=False, long=False, cruise=False)
   return d.frames
+
+
+class Published:
+  """carControlSP / longitudinalPlanSP as controlsd / plannerd publish them for this run's latched toggles."""
+
+  def __init__(self, toggles: dict, nsb_mode: str):
+    from openpilot.cereal import custom
+    self.custom, self.t, self.mode = custom, toggles, nsb_mode
+    self._plan_sp = self._make_plan_sp()
+
+  def _make_plan_sp(self):
+    plan_sp = self.custom.LongitudinalPlanSP.new_message()
+    plan_sp.features.nonAdaptive, plan_sp.features.gearAware = self.t["NonAdaptiveLongitudinal"], self.t["GearAwareAccel"]
+    nsb = plan_sp.noServiceBrake
+    nsb.enabled = self.t["NoServiceBrakeHold"] and self.t["NonAdaptiveLongitudinal"]
+    nsb.backstop, nsb.mode, nsb.margin, nsb.decelFloor = self.t["NoServiceBrakeOverspeedBackstop"], self.mode, 3.6, 0.3
+    return plan_sp.as_reader()
+
+  def build(self, f: Frame):
+    cc_sp = self.custom.CarControlSP.new_message()
+    ml = cc_sp.manualLongitudinal
+    gate_on = self.t["ClutchShiftGate"] and not self.t["DisengageOnAccelerator"]
+    ml.gateEnabled, ml.gateBlocked = gate_on, self.t["ClutchShiftGate"] and not gate_on
+    ml.gateState = f.gate if gate_on else "idle"
+    ml.gatePaused = bool(f.paused) and gate_on
+    ml.ebpEnabled = self.t["EngineBrakePreferred"]
+    ml.ebpSuppressing = bool(f.ebp) and ml.ebpEnabled
+    ml.handbackAvailable, ml.handbackActive = True, bool(f.handback)
+    return cc_sp.as_reader(), self._plan_sp
 
 
 def run(A, frames: list[Frame], test_id: str, nsb_mode: str) -> dict:
@@ -329,9 +380,12 @@ def run(A, frames: list[Frame], test_id: str, nsb_mode: str) -> dict:
   console.set_control(test_id, bool(test_id), True)
   builder, log_tap, button = A.builder(), A.log_tap(), A.button()
   digest, statuses = hashlib.sha256(), []
+  published = Published(toggles, nsb_mode)
   for frame, f in enumerate(frames):
     log_events = log_tap.update(f.records)
-    s = A.build(builder, f.t, f.cs, f.cc, f.co, f.plan, f.plan_valid, f.radar, f.ss, f.tx, None, log_tap, log_events)
+    cc_sp, plan_sp = published.build(f)
+    s = A.build(builder, f.t, f.cs, f.cc, f.co, f.plan, f.plan_valid, f.radar, f.ss, f.tx, None, log_tap, log_events,
+                cc_sp, True, plan_sp, True)
     s_names = set(s.__slots__)
     setattr(s, "gear_raw" if "gear_raw" in s_names else "gear_mt", f.raw_gear)
     setattr(s, "raw_payload" if "raw_payload" in s_names else "raw_17c", f.payload)
@@ -364,14 +418,22 @@ def main() -> None:
   frames = real_frames(list(LogReader.from_bytes(dat)))
   frames += synth_frames(frames[-1].t + 10.)
   runs = [("", "maintain")] + [(t.id, "maintain") for t in A.tests] + [("NSB2", "pulse")]
+  no_capture = []
   for test_id, mode in runs:
     out = run(A, frames, test_id, mode)
     name = f"{test_id or 'background'}{'@pulse' if mode == 'pulse' else ''}"
     with open(os.path.join(outdir, f"{name}.json"), "w") as f:
       json.dump(out, f, sort_keys=True, indent=1, default=str)
     res = out["results"].get(test_id, {})
+    # Task 13 B4: an armed test must really capture - a start marker and a capture file with rows
+    started = any(m.get("action") == "start" and m.get("test") == test_id and not m.get("background") for m in out["markers"])
+    rows = sum(len(v) - 1 for k, v in out["captures"].items() if k.startswith(test_id + "_") and "_bg" not in k) if test_id else 0
+    if test_id and not (started and rows > 0):
+      no_capture.append(name)
     print(f"{name:12s} {out['frames']} frames, {len(out['markers'])} markers, {len(out['captures'])} captures, " +
-          f"{res.get('status')} {res.get('progress', '')}")
+          f"{'started' if started else 'NOT started'}, {rows} rows, {res.get('status')} {res.get('progress', '')}")
+  print("OK: every armed test captured" if not no_capture else f"FAILED: no capture for {no_capture}")
+  sys.exit(1 if no_capture else 0)
 
 
 if __name__ == "__main__":

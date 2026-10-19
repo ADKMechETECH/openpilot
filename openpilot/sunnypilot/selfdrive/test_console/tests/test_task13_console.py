@@ -262,3 +262,25 @@ class TestA2KnockOn(OpenpilotTestCase):
     self.assertEqual(c.nsb_margin, read_nsb_params(p, True).margin)
     self.assertLessEqual(c.nsb_margin, MAX_OVERSPEED_MARGIN)
     self.assertTrue(0. <= c.nsb_release < c.nsb_trigger < c.nsb_ceiling)
+
+
+class TestB4ProofTools(OpenpilotTestCase):
+  def test_equiv_presses_start_a_capture(self):
+    # Task 13 B4: the equivalence tool's scripted presses must fire the console's start button as the profile resolves it
+    # by default (the gap button's recommended TRIPLE press since Task 12 D-10) - single presses never started anything
+    import importlib.util
+    from opendbc.car import structs
+    from openpilot.common.basedir import BASEDIR
+    from openpilot.sunnypilot.selfdrive.test_console.button import StartButton
+    from openpilot.sunnypilot.selfdrive.test_console.profiles.civic_6mt import PROFILE
+    spec = importlib.util.spec_from_file_location("tc_equiv", f"{BASEDIR}/tools/civic6mt/test_console_equiv.py")
+    equiv = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(equiv)
+    button = StartButton(None, None, buttons=PROFILE.buttons)
+    self.assertEqual(button.mode, "triple", "precondition: the default gesture")
+    fired = []
+    for at in sorted(equiv.BUTTON):
+      ev = [structs.CarState.ButtonEvent(pressed=equiv.BUTTON[at], type=structs.CarState.ButtonEvent.Type.gapAdjustCruise)]
+      if button.update(100. + at, ev):
+        fired.append(at)
+    self.assertEqual(len(fired), 3, f"start / stop / resume, got {fired}")
