@@ -162,6 +162,8 @@ class ManualCarSim:
     self.curvature = 0.   # 1/m: the road ahead (the model's predicted yaw rate) and the car's own, for SCC-V
     self.lead = None if lead is None else {"pos": lead[0], "v": lead[1], "a": lead[2] if len(lead) > 2 else 0.}
     self.contact = False
+    self.driver_brake, self.driver_reaction = 0., 0.   # m/s^2 / s: the driver after a low-speed handback (Task 13 A1)
+    self._handed_back = 0.
     self.t = 0.
     self.log: list[dict] = []
     self.plan = self.plan_sp = None
@@ -294,7 +296,11 @@ class ManualCarSim:
         csm.valid = {k: k not in csm.invalid for k in csm}
         self.long_active, limits, cmd = controls_frame(self.ext, csm, self.loc, self.enabled, self.gas)
         sent = cmd if self.long_active else 0.
-        self.a_ego += (self.car_accel(sent, self.long_active) - self.a_ego) * DT_CTRL / ACTUATOR_TAU
+        a_car = self.car_accel(sent, self.long_active)
+        self._handed_back = self._handed_back + DT_CTRL if self.ext.low_speed_handback.ramp_done else 0.
+        if self.driver_brake and self._handed_back > self.driver_reaction and self.speed > 0.:
+          a_car -= self.driver_brake
+        self.a_ego += (a_car - self.a_ego) * DT_CTRL / ACTUATOR_TAU
         self.speed = max(self.speed + self.a_ego * DT_CTRL, 0.)
         if self.speed <= 0.:
           self.a_ego = max(self.a_ego, 0.)
