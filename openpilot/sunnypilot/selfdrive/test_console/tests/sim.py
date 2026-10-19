@@ -1,4 +1,5 @@
-"""Synthetic 100 Hz Sample streams for the test console tests (a manual Civic in a chosen gear, no physics)."""
+"""Synthetic 100 Hz Sample streams for the test console tests (a manual Civic in a chosen gear, no physics).
+The Civic profile's powertrain is engine_brake_model, used directly here."""
 import math
 from dataclasses import replace
 
@@ -12,8 +13,8 @@ class Sim:
   """Holds the current Sample; step() advances time and applies field overrides. Gear 1-6 keeps rpm locked to speed."""
 
   def __init__(self, **kw):
-    self.s = Sample(t=100., v_ego=10., pitch=0., v_cruise=10., plan_valid=True, allow_brake=True, gear_mt=3, rpm=0.)
-    self.locked = True       # engine rpm follows the wheel speed through gear_mt (clutch engaged)
+    self.s = Sample(t=100., v_ego=10., pitch=0., v_cruise=10., plan_valid=True, allow_brake=True, gear_raw=3, rpm=0.)
+    self.locked = True       # engine rpm follows the wheel speed through gear_raw (clutch engaged)
     self.idle_rpm = 800.
     self.events: list = []
     self.apply(**kw)
@@ -23,7 +24,7 @@ class Sim:
 
   def _sync(self) -> None:
     s = self.s
-    g = s.gear_mt if 1 <= s.gear_mt <= 6 else 0
+    g = s.gear_raw if 1 <= s.gear_raw <= 6 else 0
     if self.locked and g and not s.clutch:
       s.rpm = engine_rpm_at(g, s.v_ego)
     elif not self.locked or s.clutch:

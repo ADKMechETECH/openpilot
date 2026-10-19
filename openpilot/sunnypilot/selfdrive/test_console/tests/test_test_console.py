@@ -19,22 +19,41 @@ from openpilot.common.test import OpenpilotTestCase
 from openpilot.sunnypilot.selfdrive.controls.lib.engine_brake_model import engine_rpm_at
 from openpilot.sunnypilot.selfdrive.test_console import analyzers as A
 from openpilot.sunnypilot.selfdrive.test_console.analyzers import CAPTURED, FAIL, PASS, make_analyzer
-from openpilot.sunnypilot.selfdrive.test_console.button import StartButton
+from openpilot.sunnypilot.selfdrive.test_console.button import StartButton as _StartButton
 from openpilot.sunnypilot.selfdrive.test_console.capture import Console, Store
-from openpilot.sunnypilot.selfdrive.test_console.conditions import BINS, CONDITIONS, WATCHED_TOGGLES, Context, check_conditions
-from openpilot.sunnypilot.selfdrive.test_console.registry import PHASES, TESTS, TESTS_BY_ID, Kind
-from openpilot.sunnypilot.selfdrive.test_console.signals import SAMPLE_FIELDS, LogEventTap, RawCanTap, Sample, SampleBuilder
+from openpilot.sunnypilot.selfdrive.test_console.conditions import BINS, Context, check_conditions
+from openpilot.sunnypilot.selfdrive.test_console.profiles.civic_6mt import PROFILE as CIVIC, WATCHED_TOGGLES
+from openpilot.sunnypilot.selfdrive.test_console.profiles.civic_6mt.registry import PHASES, TESTS, TESTS_BY_ID
+from openpilot.sunnypilot.selfdrive.test_console.profiles.civic_6mt.tap import RawCanTap
+from openpilot.sunnypilot.selfdrive.test_console.registry import Kind
+from openpilot.sunnypilot.selfdrive.test_console.signals import SAMPLE_FIELDS, LogEventTap, Sample
+from openpilot.sunnypilot.selfdrive.test_console.signals import SampleBuilder as _SampleBuilder
 from openpilot.sunnypilot.selfdrive.test_console.status_io import MARKERS_FILE, RESULTS_FILE, read_json
 from openpilot.sunnypilot.selfdrive.test_console.tests.sim import DT, Sim, feed
 
 ButtonType = structs.CarState.ButtonEvent.Type
 PKG = pathlib.Path(__file__).resolve().parents[1]
+# the console's code: the core and every vehicle profile (Task 10), not the tests
+CONSOLE_SRCS = sorted(p for p in PKG.rglob("*.py") if "tests" not in p.relative_to(PKG).parts)
 
 ALL_ON = dict.fromkeys(WATCHED_TOGGLES, False)
 
 
 def ctx(**toggles) -> Context:
-  return Context(manual=True, op_long=True, toggles={**ALL_ON, **toggles})
+  return Context(profile=CIVIC, manual=True, op_long=True, toggles={**ALL_ON, **toggles})
+
+
+# Task 10: the core runs the Civic through its vehicle profile
+CONDITIONS = ctx().conditions
+RESULTS = A.results_for(ctx())
+
+
+def StartButton(*a, **kw):
+  return _StartButton(*a, buttons=CIVIC.buttons, **kw)
+
+
+def SampleBuilder():
+  return _SampleBuilder(CIVIC)
 
 
 def btn(pressed: bool, t=ButtonType.gapAdjustCruise):
@@ -45,7 +64,7 @@ def shift(sim: Sim, g_from: int, g_to: int, open_s=0.6, bite_lag=0.2, blip=False
           long_active=None, post_gas=False, post=3.5):
   """A clutch shift: gas in g_from, lift, clutch in (GEAR_MT 0), clutch out (GEAR_MT g_to), clutch bites bite_lag later."""
   kw = {} if enabled is None else {"enabled": enabled}
-  out = list(sim.run(1.0, gas=True, gear_mt=g_from, clutch=False, **kw))
+  out = list(sim.run(1.0, gas=True, gear_raw=g_from, clutch=False, **kw))
   out += sim.run(lift_dt, gas=False)
   sim.locked = False
   sim.s.rpm = engine_rpm_at(g_from, sim.s.v_ego)
@@ -58,13 +77,13 @@ def shift(sim: Sim, g_from: int, g_to: int, open_s=0.6, bite_lag=0.2, blip=False
     clutch = True
     if flicker and 0.45 < frac < 0.47:
       mt, clutch = g_to, False
-    out.append(sim.step(clutch=clutch, gear_mt=mt, gas=blipping, rpm=rpm, **la))
+    out.append(sim.step(clutch=clutch, gear_raw=mt, gas=blipping, rpm=rpm, **la))
   # clutch out: GEAR_MT reports the new gear immediately, rpm is still 15% off until the clutch bites
   target = engine_rpm_at(g_to, sim.s.v_ego)
   for _ in range(int(round(bite_lag / DT))):
-    out.append(sim.step(clutch=False, gear_mt=g_to, rpm=target * 1.15, gas=post_gas, **la))
+    out.append(sim.step(clutch=False, gear_raw=g_to, rpm=target * 1.15, gas=post_gas, **la))
   sim.locked = True
-  out += sim.run(post, clutch=False, gear_mt=g_to, gas=post_gas, **({"long_active": True} if long_active is not None else {}))
+  out += sim.run(post, clutch=False, gear_raw=g_to, gas=post_gas, **({"long_active": True} if long_active is not None else {}))
   return out
 
 
@@ -76,7 +95,7 @@ class TestRegistry(OpenpilotTestCase):
         for c in t.conditions:
           self.assertIn(c, CONDITIONS)
         self.assertIn(t.analyzer, A.ANALYZERS)
-        self.assertIn(t.result, A.RESULTS)
+        self.assertIn(t.result, RESULTS)
         for f in t.fields:
           self.assertIn(f, SAMPLE_FIELDS)
         for k in t.toggles:
@@ -117,8 +136,8 @@ class TestRegistry(OpenpilotTestCase):
 class TestConditions(OpenpilotTestCase):
   def test_toggle_checks_and_pitch(self):
     c = ctx(ClutchShiftGate=True)
-    s = Sample(v_ego=10., pitch=float("nan"), gear_mt=-1)
-    res = dict(check_conditions(("flat", "downhill", "raw_can", "rolling"), {"ClutchShiftGate": True, "DisengageOnAccelerator": False}, s, c))
+    s = Sample(v_ego=10., pitch=float("nan"), gear_raw=-1)
+    res = dict(check_conditions(("flat", "downhill", "raw_gear_live", "rolling"), {"ClutchShiftGate": True, "DisengageOnAccelerator": False}, s, c))
     self.assertTrue(res["ClutchShiftGate ON"])
     self.assertTrue(res["DisengageOnAccelerator OFF"])
     self.assertFalse(res["flat road"], "no pitch is never 'flat'")
@@ -133,11 +152,11 @@ class TestConditions(OpenpilotTestCase):
     self.assertEqual(BINS["cmd_band"](Sample(accel_cmd=0.02), c), "zero")
     self.assertEqual(BINS["cmd_band"](Sample(accel_cmd=-0.3), c), "small_neg")
     self.assertIsNone(BINS["cmd_band"](Sample(accel_cmd=-0.1), c))
-    self.assertEqual(BINS["gear_any"](Sample(gear_mt=4), c), 4)
-    self.assertIsNone(BINS["gear_any"](Sample(gear_mt=0), c))
-    sim = Sim(gear_mt=-1)
+    self.assertEqual(BINS["gear_any"](Sample(gear_raw=4), c), 4)
+    self.assertIsNone(BINS["gear_any"](Sample(gear_raw=0), c))
+    sim = Sim(gear_raw=-1)
     from openpilot.sunnypilot.selfdrive.controls.lib.engine_brake_model import measured_ratio
-    s = Sample(gear_mt=-1, ratio=measured_ratio(engine_rpm_at(2, 10.) * 1.12, 10.))
+    s = Sample(gear_raw=-1, ratio=measured_ratio(engine_rpm_at(2, 10.) * 1.12, 10.))
     self.assertEqual(BINS["gear_any"](s, c), 2, "no tap: nearest seed gear within 20% (12% off still bins)")
     del sim
 
@@ -203,7 +222,7 @@ class TestSegments(OpenpilotTestCase):
   def test_coast_bins_per_gear(self):
     spec = TESTS_BY_ID["E0b"]
     a = make_analyzer(spec, ctx())
-    sim = Sim(gear_mt=3, a_ego=-0.4, a_coast=-0.35)
+    sim = Sim(gear_raw=3, a_ego=-0.4, a_coast=-0.35)
     feed(a, sim.run(6.), ok=True)
     feed(a, sim.run(0.5), ok=False)          # gas press etc. breaks the segment
     feed(a, sim.run(0.6), ok=True)           # < min_segment: discarded
@@ -217,7 +236,7 @@ class TestSegments(OpenpilotTestCase):
     self.assertEqual(status, CAPTURED)
     self.assertIn("g3 a -0.40", detail)
     for g in (1, 2, 4, 5, 6):
-      sim.apply(gear_mt=g, v_ego=8. if g < 3 else 20.)
+      sim.apply(gear_raw=g, v_ego=8. if g < 3 else 20.)
       feed(a, sim.run(10.5), ok=True)
     self.assertTrue(a.complete)
 
@@ -251,7 +270,7 @@ class TestSegments(OpenpilotTestCase):
   def test_rpm_noise(self):
     spec = TESTS_BY_ID["S3"]
     a = make_analyzer(spec, ctx())
-    sim = Sim(gear_mt=4, v_ego=20.)
+    sim = Sim(gear_raw=4, v_ego=20.)
     feed(a, sim.run(61.), ok=True)
     self.assertEqual(a.result()[0], PASS)
     feed(a, sim.run(2., rpm_rate=2500.), ok=True)
@@ -262,7 +281,7 @@ class TestSegments(OpenpilotTestCase):
     a = make_analyzer(spec, ctx())
     sim = Sim()
     for g in range(1, 7):
-      sim.apply(gear_mt=g, v_ego=5. + 3 * g)
+      sim.apply(gear_raw=g, v_ego=5. + 3 * g)
       feed(a, sim.run(3.5), ok=True)
     self.assertEqual(a.result()[0], PASS)
     b = make_analyzer(spec, ctx())   # a final drive 5% off the seed shows up as FAIL
@@ -270,7 +289,7 @@ class TestSegments(OpenpilotTestCase):
     sim.locked = False
     for g in range(1, 7):
       v = 5. + 3 * g
-      sim.apply(gear_mt=g, v_ego=v)
+      sim.apply(gear_raw=g, v_ego=v)
       feed(b, sim.run(3.5, rpm=engine_rpm_at(g, v) * 1.05), ok=True)
     status, detail = b.result()
     self.assertEqual(status, FAIL, detail)
@@ -305,7 +324,7 @@ class TestShifts(OpenpilotTestCase):
   def test_bite_lag(self):
     for lag, want in ((0.3, PASS), (0.8, FAIL)):
       a = make_analyzer(TESTS_BY_ID["S2"], ctx())
-      sim = Sim(gear_mt=2, v_ego=10.)
+      sim = Sim(gear_raw=2, v_ego=10.)
       feed(a, sim.run(1.))
       for i in range(10):
         feed(a, shift(sim, 2 + i % 2, 3 - i % 2, bite_lag=lag))
@@ -317,7 +336,7 @@ class TestShifts(OpenpilotTestCase):
 
   def test_lift_to_clutch(self):
     a = make_analyzer(TESTS_BY_ID["S4"], ctx())
-    sim = Sim(gear_mt=2, v_ego=10.)
+    sim = Sim(gear_raw=2, v_ego=10.)
     for i in range(10):
       feed(a, shift(sim, 2 + i % 2, 3 - i % 2, lift_dt=0.3))
     status, detail = a.result()
@@ -327,7 +346,7 @@ class TestShifts(OpenpilotTestCase):
 
   def test_blip_flicker(self):
     a = make_analyzer(TESTS_BY_ID["S5"], ctx())
-    sim = Sim(gear_mt=4, v_ego=15.)
+    sim = Sim(gear_raw=4, v_ego=15.)
     feed(a, shift(sim, 4, 3, blip=False))                  # no blip: filtered out
     self.assertEqual(len(a.episodes), 0)
     for _ in range(5):
@@ -343,7 +362,7 @@ class TestShifts(OpenpilotTestCase):
   def test_gate_accept(self):
     spec = TESTS_BY_ID["G1"]
     a = make_analyzer(spec, ctx(ClutchShiftGate=True))
-    sim = Sim(gear_mt=3, v_ego=12., enabled=True, long_active=True)
+    sim = Sim(gear_raw=3, v_ego=12., enabled=True, long_active=True)
     for _ in range(5):
       feed(a, shift(sim, 3, 3, open_s=1.5, enabled=True, long_active=False))
     self.assertTrue(a.complete)
@@ -362,17 +381,17 @@ class TestShifts(OpenpilotTestCase):
 
   def test_gate_shifts_need_up_and_down_and_false_flares(self):
     a = make_analyzer(TESTS_BY_ID["G2"], ctx(ClutchShiftGate=True))
-    sim = Sim(gear_mt=2, v_ego=12., enabled=True, long_active=True)
+    sim = Sim(gear_raw=2, v_ego=12., enabled=True, long_active=True)
     for _ in range(6):
       feed(a, shift(sim, 2, 3, enabled=True, long_active=False))
-      sim.apply(gear_mt=2)
+      sim.apply(gear_raw=2)
     text, frac = a.progress()
     self.assertIn("up 6/3", text)
     self.assertIn("down 0/3", text)
     self.assertLess(frac, 1.)
     for _ in range(3):
       feed(a, shift(sim, 3, 2, enabled=True, long_active=False))
-      sim.apply(gear_mt=3)
+      sim.apply(gear_raw=3)
     self.assertTrue(a.complete)
     self.assertEqual(a.result()[0], PASS, a.result())
     feed(a, sim.run(0.05, gate="shifting"))   # gate starts a pause with no clutch: RPM backstop false flare
@@ -406,7 +425,7 @@ class TestOtherEpisodes(OpenpilotTestCase):
 
   def test_stop_hold_rollback(self):
     a = make_analyzer(TESTS_BY_ID["H2"], ctx())
-    sim = Sim(gear_mt=-1, v_ego=5.)
+    sim = Sim(gear_raw=-1, v_ego=5.)
     feed(a, sim.run(1.))
     feed(a, sim.run(0.5, v_ego=0., brake=True, clutch=True, pitch=0.05))
     feed(a, sim.run(2., brake=False))                       # held
@@ -422,12 +441,12 @@ class TestOtherEpisodes(OpenpilotTestCase):
 
   def test_neutral_coast(self):
     a = make_analyzer(TESTS_BY_ID["H3"], ctx())
-    sim = Sim(gear_mt=4, v_ego=12., enabled=True, long_active=True)
+    sim = Sim(gear_raw=4, v_ego=12., enabled=True, long_active=True)
     feed(a, sim.run(1.))
     sim.locked = False
-    feed(a, sim.run(7., gear_mt=0, clutch=True, rpm=800., long_active=False, gate="shifting"))
+    feed(a, sim.run(7., gear_raw=0, clutch=True, rpm=800., long_active=False, gate="shifting"))
     sim.locked = True
-    feed(a, sim.run(1., gear_mt=4, clutch=False, gate="idle", long_active=True))
+    feed(a, sim.run(1., gear_raw=4, clutch=False, gate="idle", long_active=True))
     self.assertEqual(len(a.episodes), 1)
     status, detail = a.result()
     self.assertEqual(status, CAPTURED)
@@ -565,18 +584,18 @@ class TestOtherEpisodes(OpenpilotTestCase):
 class TestCustom(OpenpilotTestCase):
   def test_gear_mt_map(self):
     a = make_analyzer(TESTS_BY_ID["S1"], ctx())
-    sim = Sim(v_ego=0., gear_mt=0, clutch=True)
+    sim = Sim(v_ego=0., gear_raw=0, clutch=True)
     feed(a, sim.run(6.), ok=True)                                    # parked, clutch down / neutral
-    feed(a, sim.run(0.5, reverse=True, gear_mt=14, clutch=False), ok=True)
+    feed(a, sim.run(0.5, reverse=True, gear_raw=14, clutch=False), ok=True)
     for g in range(1, 7):
-      sim.apply(reverse=False, gear_mt=g, clutch=False, v_ego=4. + 3 * g)
+      sim.apply(reverse=False, gear_raw=g, clutch=False, v_ego=4. + 3 * g)
       feed(a, sim.run(2.5), ok=True)
     self.assertTrue(a.complete, a.progress())
     status, detail = a.result()
     self.assertEqual(status, PASS, detail)
     self.assertIn("R=[14]", detail)
     b = make_analyzer(TESTS_BY_ID["S1"], ctx())                      # GEAR_MT 5 actually behaves like 6th
-    sim = Sim(v_ego=25., gear_mt=5)
+    sim = Sim(v_ego=25., gear_raw=5)
     sim.locked = False
     feed(b, sim.run(3., rpm=engine_rpm_at(6, 25.)), ok=True)
     status, detail = b.result()
@@ -585,18 +604,18 @@ class TestCustom(OpenpilotTestCase):
 
   def test_bit_hunt(self):
     a = make_analyzer(TESTS_BY_ID["S6"], ctx())
-    sim = Sim(v_ego=0., gear_mt=3)
+    sim = Sim(v_ego=0., gear_raw=3)
     raw = 0
     counter_bit = 1 << 4          # a counter-like bit toggling every frame
     clutch_bit = 1 << (63 - 35)   # payload bit: byte 3, bit-in-byte 3 -> DBC bit 27 (big-endian int)
     for _press in range(9):
       for _ in range(50):
         raw ^= counter_bit
-        a.feed(sim.step(raw_17c=raw, gear_mt=3), True)
+        a.feed(sim.step(raw_payload=raw, gear_raw=3), True)
       raw |= clutch_bit
       for _ in range(50):
         raw ^= counter_bit
-        a.feed(sim.step(raw_17c=raw, gear_mt=0 if _ >= 5 else 3), True)  # GEAR_MT lags the switch by 50 ms
+        a.feed(sim.step(raw_payload=raw, gear_raw=0 if _ >= 5 else 3), True)  # GEAR_MT lags the switch by 50 ms
       raw &= ~clutch_bit
     self.assertTrue(a.complete)
     cands = a.candidates()
@@ -624,7 +643,7 @@ class TestConsoleFlow(OpenpilotTestCase):
       return [json.loads(line) for line in f]
 
   def test_default_inert(self):
-    sim = Sim(gear_mt=3, v_ego=10.)
+    sim = Sim(gear_raw=3, v_ego=10.)
     for s in sim.run(5.):
       self.console.update(s, button=True)   # button presses with nothing armed do nothing
     self.console.shutdown()
@@ -638,14 +657,14 @@ class TestConsoleFlow(OpenpilotTestCase):
   def test_arm_start_complete(self):
     self.console.set_control("E0b", True, False)
     self.assertEqual(self.console.state, "armed")
-    sim = Sim(gear_mt=3, v_ego=15., a_ego=-0.3, pitch=0.)
+    sim = Sim(gear_raw=3, v_ego=15., a_ego=-0.3, pitch=0.)
     self.console.update(sim.step(), False)
     self.assertTrue(self.console.qualifying, "conditions are live while armed (the driver sees what's missing)...")
     self.assertEqual(os.listdir(os.path.join(self.root, "captures")), [], "...but nothing is captured until the button")
     self.console.update(sim.step(), True)
     self.assertEqual(self.console.state, "capturing")
     for g in range(1, 7):
-      sim.apply(gear_mt=g, v_ego=6. + 3 * g)
+      sim.apply(gear_raw=g, v_ego=6. + 3 * g)
       for s in sim.run(10.5):
         self.console.update(s, False)
     self.assertEqual(self.console.state, "complete")
@@ -665,7 +684,7 @@ class TestConsoleFlow(OpenpilotTestCase):
     with open(os.path.join(self.root, "captures", caps[0])) as f:
       lines = f.read().splitlines()
     header = json.loads(lines[0])
-    self.assertEqual(header["fields"], list(TESTS_BY_ID["E0b"].fields))
+    self.assertEqual(header["fields"], [CIVIC.column(f) for f in TESTS_BY_ID["E0b"].fields])  # the Civic keeps its column names
     self.assertGreater(len(lines), 6 * 10 * 20 * 0.9, "rows at ~20 Hz")
     self.assertEqual(len(json.loads(lines[1])), len(header["fields"]))
     # a press after complete starts a fresh run
@@ -675,7 +694,7 @@ class TestConsoleFlow(OpenpilotTestCase):
 
   def test_stop_resume_and_abort(self):
     self.console.set_control("E0b", True, False)
-    sim = Sim(gear_mt=3, v_ego=15.)
+    sim = Sim(gear_raw=3, v_ego=15.)
     self.console.update(sim.step(), True)
     for s in sim.run(4.):
       self.console.update(s, False)
@@ -694,9 +713,9 @@ class TestConsoleFlow(OpenpilotTestCase):
 
   def test_background_telemetry(self):
     self.console.set_control("", False, True)
-    sim = Sim(gear_mt=3, v_ego=15.)
+    sim = Sim(gear_raw=3, v_ego=15.)
     for g in range(1, 7):
-      sim.apply(gear_mt=g, v_ego=6. + 3 * g)
+      sim.apply(gear_raw=g, v_ego=6. + 3 * g)
       for s in sim.run(10.5):
         self.console.update(s, False)
     res = read_json(os.path.join(self.root, RESULTS_FILE))
@@ -727,7 +746,7 @@ class TestSignals(OpenpilotTestCase):
     self.assertAlmostEqual(s.pitch, -0.03, places=5)
     self.assertTrue(s.has_lead and s.lead_d == 33.)
     self.assertEqual(s.alert, "manualLowSpeedHandback")
-    self.assertEqual(s.gear_mt, -1)
+    self.assertEqual(s.gear_raw, -1)
     self.assertTrue(math.isfinite(s.a_coast))
     cs.vCruise = 255.
     self.assertTrue(math.isnan(SampleBuilder().build(1.0, cs, cc, co, plan, True, radar, ss, 3, None, LogEventTap(), ()).v_cruise))
@@ -769,7 +788,8 @@ class TestNonActuating(OpenpilotTestCase):
         yield name, node
 
   def test_daemon_writes_nothing_but_files(self):
-    for path in PKG.glob("*.py"):
+    self.assertTrue(any("profiles" in p.parts for p in CONSOLE_SRCS))
+    for path in CONSOLE_SRCS:
       for name, _ in self._calls(path):
         self.assertNotIn(name, self.FORBIDDEN_CALLS, f"{path.name} calls {name}()")
       text = path.read_text()
@@ -792,7 +812,7 @@ class TestNonActuating(OpenpilotTestCase):
 
   def test_imported_control_modules_untouched(self):
     # the console imports constants/pure functions from the feature modules; it must never assign into them
-    for path in PKG.glob("*.py"):
+    for path in CONSOLE_SRCS:
       tree = ast.parse(path.read_text())
       for node in ast.walk(tree):
         if isinstance(node, (ast.Assign, ast.AugAssign)):
@@ -832,7 +852,7 @@ class TestUiHelpers(OpenpilotTestCase):
     # the UI only loads ASCII + EXTRA_FONT_CHARS (+ translations); anything else renders as '?'
     from openpilot.system.ui.lib.application import EXTRA_FONT_CHARS
     allowed = set(map(chr, range(32, 127))) | set(EXTRA_FONT_CHARS) | {"\n"}
-    srcs = list(PKG.glob("*.py")) + [PKG.parents[2] / "selfdrive/ui/sunnypilot/mici/layouts/dev_test.py",
+    srcs = list(CONSOLE_SRCS) + [PKG.parents[2] / "selfdrive/ui/sunnypilot/mici/layouts/dev_test.py",
                                      PKG.parents[2] / "selfdrive/ui/sunnypilot/mici/layouts/dev_test_sessions.py",
                                      PKG.parents[2] / "selfdrive/ui/sunnypilot/mici/onroad/test_console_chip.py"]
     for path in srcs:

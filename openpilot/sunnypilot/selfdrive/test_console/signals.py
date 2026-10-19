@@ -4,25 +4,24 @@ Copyright (c) 2021-, Haibin Wen, sunnypilot, and a number of other contributors.
 This file is part of sunnypilot and is licensed under the MIT License.
 See the LICENSE.md file in the root directory for more details.
 
-Test console signal layer: one flat Sample per carState frame (100 Hz), built from the published messages, an
-optional raw CAN tap (Honda Bosch radarless only) and the feature modules' cloudlog events. Read-only.
+Test console signal layer (vehicle-agnostic): one flat Sample per carState frame (100 Hz), built from the published
+messages, the vehicle profile's signal map + raw-CAN tap (profile.py: the named roles) and the feature modules' cloudlog
+events. Read-only.
 """
 import json
 import math
 from dataclasses import dataclass, field, fields
 
-from opendbc.car import Bus, structs
+from opendbc.car import structs
 from openpilot.common.constants import CV
 from openpilot.common.filter_simple import FirstOrderFilter
 from openpilot.common.realtime import DT_CTRL
-from openpilot.common.swaglog import cloudlog
-from openpilot.sunnypilot.selfdrive.controls.lib.clutch_shift_gate import RPM_FILTER_RC
-from openpilot.sunnypilot.selfdrive.controls.lib.engine_brake_model import estimate_coast_decel, infer_gear, measured_ratio
 
 NAN = float("nan")
+RPM_FILTER_RC = 0.05          # s: rpm_rate is filtered like the fork's clutch-gate flare detector (pinned by a test)
 V_CRUISE_UNSET_KPH = 250.     # carState.vCruise is km/h; 255 = unset
 
-# cloudlog events the console follows (emitted by the feature modules; see CLAUDE.md)
+# cloudlog events the console follows (emitted by the fork's feature modules; see CLAUDE.md)
 WATCHED_EVENTS = ("clutch_shift_gate", "engine_brake_preferred", "no_service_brake_backstop", "no_service_brake_pulse",
                   "manual_low_speed_handback", "engine_brake_coast")
 EBP_CAPACITY_WARNING = "engine_brake_preferred: car not slowing"
@@ -41,12 +40,12 @@ class Sample:
   v_cruise: float = NAN          # m/s, NaN when unset
   gas: bool = False
   brake: bool = False
-  clutch: bool = False           # carState clutchPressed (Honda: GEAR_MT == 0)
+  clutch: bool = False           # clutch open (profile signal map; role clutch_coupled inverted)
   rpm: float = 0.
   rpm_rate: float = 0.           # rpm/s, filtered like the clutch gate's flare detector
-  gear_mt: int = -1              # raw GEARBOX_ALT_2.GEAR_MT, -1 when the tap isn't available
-  gear: int = 0                  # gear inferred from rpm / wheel speed (engine_brake_model.infer_gear), 0 = none
-  ratio: float = 0.              # measured engine/wheel ratio x wheel radius (engine_brake_model.measured_ratio)
+  gear_raw: int = -1             # the car's own manual-gear signal (profile raw tap), -1 when unavailable
+  gear: int = 0                  # gear inferred from rpm / wheel speed (profile powertrain), 0 = none
+  ratio: float = 0.              # measured engine/wheel speed ratio (profile powertrain)
   pitch: float = NAN             # rad, + = uphill (carControl.orientationNED[1])
   reverse: bool = False
   standstill: bool = False
@@ -54,8 +53,8 @@ class Sample:
   long_active: bool = False
   accel_cmd: float = 0.          # carControl.actuators.accel
   accel_out: float = 0.          # carOutput.actuatorsOutput.accel (after the car controller)
-  accel_sent: float = NAN        # ACC_CONTROL.ACCEL_COMMAND as sent (sendcan tap), NaN when unavailable
-  brake_assist: int = -1         # ACC_CONTROL.COMPUTER_BRAKE_ASSIST as sent (PR #2050 bit), -1 when unavailable
+  accel_sent: float = NAN        # the longitudinal command as sent on the bus (profile raw tap), NaN when unavailable
+  brake_assist: int = -1         # the brake-request bit as sent (profile raw tap), -1 when unavailable
   a_target: float = 0.
   allow_brake: bool = True
   plan_valid: bool = False
@@ -68,9 +67,9 @@ class Sample:
   stock_aeb: bool = False
   stock_fcw: bool = False
   brake_hold: bool = False
-  pedal_gas: float = NAN         # raw POWERTRAIN_DATA.PEDAL_GAS (tap)
-  raw_17c: int = -1              # raw POWERTRAIN_DATA payload as an int (tap; S6 bit hunt)
-  a_coast: float = NAN           # engine_brake_model coast estimate for this gear/rpm/speed/pitch (UNCALIBRATED seed)
+  gas_raw: float = NAN           # raw gas pedal position (profile raw tap)
+  raw_payload: int = -1          # one raw CAN payload as an int (profile raw tap; the bit hunt)
+  a_coast: float = NAN           # the profile's coast model for this gear/rpm/speed/pitch (may be an uncalibrated seed)
   excess: float = NAN            # a_ego - a_coast: well below 0 => something besides coasting is slowing the car
   gate: str = ""                 # last clutch_shift_gate state seen in cloudlog
   ebp: bool = False              # EngineBrakePreferred suppressing (last cloudlog state)
@@ -130,71 +129,24 @@ class LogEventTap:
     return tuple(out)
 
 
-class RawCanTap:
-  """
-  Honda Bosch radarless only: raw GEAR_MT (carState only carries GEAR_MT == 0), PEDAL_GAS, the POWERTRAIN_DATA
-  payload (S6), and ACC_CONTROL as actually sent on sendcan. Never sends anything. Fails soft: any problem -> the raw
-  fields stay unavailable (-1 / NaN) and the tests that need them show 'GEAR_MT tap live' as not met.
-  """
-
-  def __init__(self, CP: structs.CarParams):
-    self.available = False
-    self.gear_mt = -1
-    self.pedal_gas = NAN
-    self.raw_17c = -1
-    self.accel_sent = NAN
-    self.brake_assist = -1
-    try:
-      from opendbc.can import CANParser
-      from opendbc.car.honda.hondacan import CanBus
-      from opendbc.car.honda.values import DBC, HondaFlags
-      if CP.brand != "honda" or not (CP.flags & HondaFlags.BOSCH_RADARLESS):
-        return
-      dbc = DBC[CP.carFingerprint][Bus.pt]
-      self.bus = CanBus(CP).pt
-      self.cp = CANParser(dbc, [("GEARBOX_ALT_2", float("nan")), ("POWERTRAIN_DATA", float("nan"))], self.bus)
-      self.cp_send = CANParser(dbc, [("ACC_CONTROL", float("nan"))], self.bus)
-      self.available = True
-    except Exception:
-      cloudlog.exception("test_console: raw CAN tap unavailable")
-
-  def update(self, can_list, sendcan_list) -> None:
-    if not self.available:
-      return
-    if can_list:
-      updated = self.cp.update(can_list)
-      if updated:
-        vl = self.cp.vl
-        if self.cp.ts_nanos["GEARBOX_ALT_2"]["GEAR_MT"]:
-          self.gear_mt = int(vl["GEARBOX_ALT_2"]["GEAR_MT"])
-        if self.cp.ts_nanos["POWERTRAIN_DATA"]["PEDAL_GAS"]:
-          self.pedal_gas = float(vl["POWERTRAIN_DATA"]["PEDAL_GAS"])
-      for _, frames in can_list:
-        for address, dat, src in frames:
-          if address == 0x17C and src == self.bus:
-            self.raw_17c = int.from_bytes(dat, "big")
-    if sendcan_list:
-      self.cp_send.update(sendcan_list, sendcan=True)
-      if self.cp_send.ts_nanos["ACC_CONTROL"]["ACCEL_COMMAND"]:
-        self.accel_sent = float(self.cp_send.vl["ACC_CONTROL"]["ACCEL_COMMAND"])
-        self.brake_assist = int(self.cp_send.vl["ACC_CONTROL"]["COMPUTER_BRAKE_ASSIST"])
-
-
 @dataclass
 class SampleBuilder:
-  """Builds a Sample from the latest messages. Holds the little state some derived signals need."""
+  """Builds a Sample from the latest messages through the vehicle profile. Holds the little state some derived signals
+  need."""
+  profile: object                                      # profile.VehicleProfile
   rpm_filter: FirstOrderFilter = field(default_factory=lambda: FirstOrderFilter(0., RPM_FILTER_RC, DT_CTRL))
   rpm_prev: float = 0.
   rpm_seeded: bool = False
 
-  def build(self, t: float, CS, CC, CO, plan, plan_valid: bool, radar, ss, tx_blocked: int, tap: RawCanTap | None,
+  def build(self, t: float, CS, CC, CO, plan, plan_valid: bool, radar, ss, tx_blocked: int, tap,
             log: LogEventTap, events: tuple) -> Sample:
+    sig, pt = self.profile.signals, self.profile.powertrain
     s = Sample(t=t)
     s.v_ego, s.a_ego = float(CS.vEgo), float(CS.aEgo)
     s.v_cruise = float(CS.vCruise) * CV.KPH_TO_MS if 0. < CS.vCruise < V_CRUISE_UNSET_KPH else NAN
     s.gas, s.brake = bool(CS.gasPressed), bool(CS.brakePressed)
-    s.clutch = bool(CS.deprecated.clutchPressed)
-    s.rpm = float(CS.deprecated.engineRpm)
+    s.clutch = bool(sig.clutch(CS))
+    s.rpm = float(sig.engine_rpm(CS))
     s.reverse = CS.gearShifter == structs.CarState.GearShifter.reverse
     s.standstill = bool(CS.standstill) or s.v_ego < 0.1
     s.acc_faulted, s.cruise_on = bool(CS.accFaulted), bool(CS.cruiseState.enabled)
@@ -207,8 +159,8 @@ class SampleBuilder:
     s.rpm_rate = (rpm_f - self.rpm_prev) / DT_CTRL
     self.rpm_prev = rpm_f
 
-    s.gear = infer_gear(s.rpm, s.v_ego, s.clutch)
-    s.ratio = measured_ratio(s.rpm, s.v_ego)
+    s.gear = pt.infer_gear(s.rpm, s.v_ego, s.clutch)
+    s.ratio = pt.measured_ratio(s.rpm, s.v_ego)
     orientation = CC.orientationNED
     s.pitch = float(orientation[1]) if len(orientation) == 3 else NAN
     s.enabled, s.long_active = bool(CC.enabled), bool(CC.longActive)
@@ -225,11 +177,10 @@ class SampleBuilder:
     s.tx_blocked = int(tx_blocked)
 
     if tap is not None and tap.available:
-      s.gear_mt, s.pedal_gas, s.raw_17c = tap.gear_mt, tap.pedal_gas, tap.raw_17c
-      s.accel_sent, s.brake_assist = tap.accel_sent, tap.brake_assist
+      tap.fill(s)
 
     grade = s.pitch if math.isfinite(s.pitch) else 0.
-    s.a_coast = estimate_coast_decel(s.gear, s.rpm, s.v_ego, grade) if math.isfinite(s.pitch) else NAN
+    s.a_coast = pt.coast_decel(s.gear, s.rpm, s.v_ego, grade) if math.isfinite(s.pitch) else NAN
     s.excess = s.a_ego - s.a_coast
     s.gate, s.ebp, s.events = log.gate, log.ebp, events
     return s

@@ -4,26 +4,21 @@ Copyright (c) 2021-, Haibin Wen, sunnypilot, and a number of other contributors.
 This file is part of sunnypilot and is licensed under the MIT License.
 See the LICENSE.md file in the root directory for more details.
 
-Steering-wheel start/stop button for the test console. Reads carState.buttonEvents only — it never suppresses or
-replaces the button's native function (on a sunnypilot Honda with openpilot long: a gap/distance press steps the
-following-distance personality on release; a >= 0.5 s hold toggles Experimental mode).
+Steering-wheel start/stop button for the test console (vehicle-agnostic gestures). Reads carState.buttonEvents only —
+it never suppresses or replaces the button's native function (the vehicle profile's ButtonMap.note says what that is).
 
-Params (dev-test build): TestConsoleStartButton = a CarState.ButtonEvent.Type name (default "gapAdjustCruise"),
-TestConsoleStartPress = "short" (default) | "long" | "triple".
-  short   fire on release of a press shorter than LONG_PRESS. Side effect: one personality step per press (only
-          matters with lead following, i.e. adaptive mode — non-adaptive ignores the lead MPC).
-  triple  three short presses within TRIPLE_WINDOW. Three personality steps = back where it started, so following
-          distance is net-unchanged (use this for adaptive-mode tests such as E2).
-  long    fire once a hold reaches LONG_PRESS. On this car with openpilot long that hold ALSO toggles Experimental
-          mode (sunnypilot's distance-button long press) — not recommended.
-TODO(on-car): confirm in cabana that SCM_BUTTONS.CRUISE_SETTING == 3 (DISTANCE) decodes on this car, i.e. the
- console shows "button seen" after a press.
+Params (dev-test build): TestConsoleStartButton = a CarState.ButtonEvent.Type name ("" = the profile's default; a name
+the profile doesn't allow -> its default), TestConsoleStartPress = "short" (default) | "long" | "triple".
+  short   fire on release of a press shorter than LONG_PRESS.
+  triple  three short presses within TRIPLE_WINDOW (a button whose press steps a setting comes back where it started
+          after three steps — e.g. a three-way following-distance button).
+  long    fire once a hold reaches LONG_PRESS (on some cars a long hold has its own native function — check the note).
 """
 from opendbc.car import structs
+from openpilot.sunnypilot.selfdrive.test_console.profile import ButtonMap
 
 ButtonType = structs.CarState.ButtonEvent.Type
 
-DEFAULT_BUTTON = "gapAdjustCruise"
 PRESS_MODES = ("short", "triple", "long")
 LONG_PRESS = 0.5       # s, matches sunnypilot's DISTANCE_LONG_PRESS (50 frames at 100 Hz)
 TRIPLE_WINDOW = 1.5    # s, first press to third release
@@ -33,21 +28,22 @@ def _raw(enum_value) -> int:
   return int(getattr(enum_value, "raw", enum_value))  # capnp enums carry the int in .raw
 
 
-def button_type(name: str | None) -> int:
+def button_type(name: str | None, buttons: ButtonMap) -> int:
   try:
-    return _raw(getattr(ButtonType, name or DEFAULT_BUTTON))
+    return _raw(getattr(ButtonType, buttons.resolve(name)))
   except (AttributeError, TypeError):
-    return _raw(getattr(ButtonType, DEFAULT_BUTTON))
+    return _raw(getattr(ButtonType, buttons.default))
 
 
 class StartButton:
-  def __init__(self, name: str | None = None, mode: str | None = None):
+  def __init__(self, name: str | None = None, mode: str | None = None, *, buttons: ButtonMap):
+    self.buttons = buttons
     self.configure(name, mode)
     self.seen = 0          # press events seen this drive (on-car decode check)
 
   def configure(self, name: str | None, mode: str | None) -> None:
-    self.name = name if name else DEFAULT_BUTTON
-    self.type = button_type(self.name)
+    self.name = name if name else self.buttons.default
+    self.type = button_type(self.name, self.buttons)
     self.mode = mode if mode in PRESS_MODES else "short"
     self.pressed = False
     self.t_down = 0.

@@ -8,6 +8,10 @@ See the LICENSE.md file in the root directory for more details.
 test_consoled — on-car test console daemon (DEV-TEST BUILD ONLY). Telemetry only: subscribes, labels, logs and
 writes a status file. It publishes no cereal message, sends no CAN, and writes no Param except reading its own
 TestConsole* controls. Subscribing can't slow a publisher (msgq is a ring buffer; a slow reader just drops).
+
+Vehicle-agnostic: the console runs the plan of the vehicle profile selected for this car (profile.select_profile). No
+profile for the platform -> inactive: it subscribes to nothing and writes nothing (the UI shows "no test-console profile
+for this platform"); a CarParams change is re-checked every second either way.
 """
 import time
 
@@ -19,8 +23,9 @@ from openpilot.selfdrive.pandad import can_capnp_to_list
 from openpilot.sunnypilot.selfdrive.controls.lib.no_service_brake import read_overspeed_mode, read_pulse_params
 from openpilot.sunnypilot.selfdrive.test_console.button import StartButton
 from openpilot.sunnypilot.selfdrive.test_console.capture import Console, Store
-from openpilot.sunnypilot.selfdrive.test_console.conditions import WATCHED_TOGGLES, Context
-from openpilot.sunnypilot.selfdrive.test_console.signals import LogEventTap, RawCanTap, SampleBuilder
+from openpilot.sunnypilot.selfdrive.test_console.conditions import Context
+from openpilot.sunnypilot.selfdrive.test_console.profile import inactive_reason, select_profile
+from openpilot.sunnypilot.selfdrive.test_console.signals import LogEventTap, SampleBuilder
 from openpilot.sunnypilot.selfdrive.test_console.status_io import P_ARMED, P_BACKGROUND, P_BUTTON, P_PRESS, P_SELECTED, console_dir
 
 PARAMS_PERIOD = 1.0      # s
@@ -30,7 +35,7 @@ SERVICES = ["carState", "carControl", "carOutput", "longitudinalPlan", "radarSta
 
 def read_context(params: Params, ctx: Context) -> None:
   # return_default: Params.get_bool() ignores registered defaults (NoServiceBrakeOverspeedBackstop defaults ON)
-  for key in WATCHED_TOGGLES:
+  for key in ctx.watched_toggles:
     ctx.toggles[key] = bool(params.get(key, return_default=True))
   ctx.nsb_floor = float(params.get("NoServiceBrakeDecelFloor", return_default=True))
   ctx.nsb_margin = float(params.get("NoServiceBrakeOverspeedMargin", return_default=True))
@@ -42,23 +47,22 @@ def read_context(params: Params, ctx: Context) -> None:
   ctx.ebp_coast_target = float(params.get("EngineBrakeCoastTarget", return_default=True))
 
 
-def main() -> None:
-  # default (non-realtime) priority on purpose: never competes with controlsd/plannerd for CPU
-  params = Params()
-  cloudlog.info("test_consoled is waiting for CarParams")
-  CP = messaging.log_from_bytes(params.get("CarParams", block=True), car.CarParams)
-  ctx = Context(manual=CP.transmissionType == car.CarParams.TransmissionType.manual, op_long=CP.openpilotLongitudinalControl)
-
+def run_console(params: Params, CP, CP_bytes: bytes, profile) -> None:
+  """The active console for one profile, until the process exits or CarParams change (then returns)."""
+  ctx = Context(profile=profile, manual=CP.transmissionType == car.CarParams.TransmissionType.manual,
+                op_long=CP.openpilotLongitudinalControl)
   store = Store(console_dir())
   console = Console(store, ctx)
-  tap = RawCanTap(CP)
-  builder, log_tap = SampleBuilder(), LogEventTap()
-  button = StartButton(params.get(P_BUTTON, return_default=True), params.get(P_PRESS, return_default=True))
+  tap = profile.signals.raw_tap(CP)
+  tap = tap if tap is not None and tap.available else None
+  builder, log_tap = SampleBuilder(profile), LogEventTap()
+  button = StartButton(params.get(P_BUTTON, return_default=True), params.get(P_PRESS, return_default=True),
+                       buttons=profile.buttons)
 
   sm = messaging.SubMaster(SERVICES, poll="carState")
   log_sock = messaging.sub_sock("logMessage", conflate=False)
-  can_sock = messaging.sub_sock("can", conflate=False) if tap.available else None
-  sendcan_sock = messaging.sub_sock("sendcan", conflate=False) if tap.available else None
+  can_sock = messaging.sub_sock("can", conflate=False) if tap is not None else None
+  sendcan_sock = messaging.sub_sock("sendcan", conflate=False) if tap is not None else None
 
   t_params = t_status = 0.
   s = None
@@ -68,6 +72,9 @@ def main() -> None:
       now = time.monotonic()
       if now - t_params > PARAMS_PERIOD:
         t_params = now
+        if params.get("CarParams") != CP_bytes:
+          cloudlog.event("test_console_carparams_changed")
+          return
         read_context(params, ctx)
         name, mode = params.get(P_BUTTON, return_default=True), params.get(P_PRESS, return_default=True)
         if (name or "") != button.name or (mode or "") != button.mode:
@@ -75,7 +82,7 @@ def main() -> None:
         console.set_control(params.get(P_SELECTED) or "", params.get_bool(P_ARMED), params.get_bool(P_BACKGROUND))
 
       events = log_tap.update([m.logMessage for m in messaging.drain_sock(log_sock)])
-      if tap.available:
+      if tap is not None:
         can_raw, sendcan_raw = messaging.drain_sock_raw(can_sock), messaging.drain_sock_raw(sendcan_sock)
         if console.selected or console.background:  # only pay for parsing when something can use it
           tap.update(can_capnp_to_list(can_raw), can_capnp_to_list(sendcan_raw, "sendcan"))
@@ -95,6 +102,24 @@ def main() -> None:
     console.shutdown()
     if s is not None:
       store.save_state({**console.status(s, {"name": button.name, "mode": button.mode, "seen": button.seen}), "exited": True})
+
+
+def main() -> None:
+  # default (non-realtime) priority on purpose: never competes with controlsd/plannerd for CPU
+  params = Params()
+  cloudlog.info("test_consoled is waiting for CarParams")
+  while True:
+    CP_bytes = params.get("CarParams", block=True)
+    CP = messaging.log_from_bytes(CP_bytes, car.CarParams)
+    profile = select_profile(CP)
+    if profile is not None:
+      cloudlog.info(f"test_consoled: profile {profile.name} for {CP.carFingerprint}")
+      run_console(params, CP, CP_bytes, profile)
+      continue
+    # inactive: nothing subscribed, nothing written; only watch for a CarParams change
+    cloudlog.warning(f"test_consoled: {inactive_reason(CP)} - console inactive")
+    while params.get("CarParams") == CP_bytes:
+      time.sleep(PARAMS_PERIOD)
 
 
 if __name__ == "__main__":

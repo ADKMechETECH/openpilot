@@ -4,27 +4,26 @@ Copyright (c) 2021-, Haibin Wen, sunnypilot, and a number of other contributors.
 This file is part of sunnypilot and is licensed under the MIT License.
 See the LICENSE.md file in the root directory for more details.
 
-Session view state (DEV-TEST BUILD ONLY): pure functions from the registry's SESSIONS, the daemon's state.json /
-results.json and the current Param values to what the session UI shows — tile status (done / current / locked),
-the ready check (required toggles vs current -> ready / set N), test pills, the calibration card, the status chip.
-No I/O and no writes here; the UI's only write path is selfdrive/ui/sunnypilot/mici/layouts/dev_test_params.py,
-limited to UI_WRITABLE below.
+Session view state (vehicle-agnostic): pure functions from a plan's sessions (registry.Registry), the daemon's
+state.json / results.json and the current Param values to what the session UI shows — tile status (done / current /
+locked), the ready check (required toggles vs current -> ready / set N), test pills, the calibration card, the status
+chip. No I/O and no writes here; the UI's only write path is selfdrive/ui/sunnypilot/mici/layouts/dev_test_params.py,
+limited to ui_writable(profile) below.
 """
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from openpilot.sunnypilot.selfdrive.test_console.registry import CAL, OP_LONG_PARAM, SESSIONS, SESSIONS_BY_ID, TESTS_BY_ID, Session
+from openpilot.sunnypilot.selfdrive.test_console.registry import OP_LONG_PARAM, Registry, Session
 from openpilot.sunnypilot.selfdrive.test_console.status_io import CONSOLE_PARAMS
 
-# The only Params the session UI may write (Task 9 Part C: a deliberate, bounded widening of the UI's write scope).
-# Feature toggles the separately-validated, default-OFF, gated features read, plus the console's own keys. Notably NOT
-# AlphaLongitudinalEnabled (openpilot longitudinal: disables stock AEB on this car) — that stays in the Developer panel.
-# Task 11 added NoServiceBrakeOverspeedMode (maintain / pulse: the NSB2 A/B in session 8).
-UI_WRITABLE_TOGGLES = ("NonAdaptiveLongitudinal", "NoServiceBrakeHold", "NoServiceBrakeDecelFloor",
-                       "NoServiceBrakeOverspeedBackstop", "NoServiceBrakeOverspeedMargin", "NoServiceBrakeOverspeedMode",
-                       "ClutchShiftGate", "ClutchShiftGateGasReleaseHint", "ClutchReengageSmart", "EngineBrakePreferred",
-                       "GearAwareAccel", "DisengageOnAccelerator")
-UI_WRITABLE = frozenset(UI_WRITABLE_TOGGLES) | frozenset(CONSOLE_PARAMS)
+
+def ui_writable(profile) -> frozenset[str]:
+  """The only Params the session UI may write: the profile's allowlist (feature Params its sessions need) plus the
+  console's own keys. Never AlphaLongitudinalEnabled (openpilot longitudinal: may disable stock AEB) — even if a profile
+  listed it. No profile (console inactive) -> only the console's own keys."""
+  allow = frozenset(profile.allowlist) if profile is not None else frozenset()
+  return (allow | frozenset(CONSOLE_PARAMS)) - {OP_LONG_PARAM}
+
 
 SHORT = {OP_LONG_PARAM: "op long", "NonAdaptiveLongitudinal": "non-adaptive", "NoServiceBrakeHold": "NSB",
          "NoServiceBrakeDecelFloor": "floor", "NoServiceBrakeOverspeedBackstop": "backstop",
@@ -61,7 +60,7 @@ class ToggleState:
   want: object          # required value (None for an optional toggle)
   have: object
   ok: bool              # matches the requirement (always True for optional ones)
-  settable: bool        # in UI_WRITABLE
+  settable: bool        # in ui_writable(profile)
   required: bool
   choices: tuple = ()
 
@@ -70,17 +69,17 @@ class ToggleState:
     return f"{SHORT.get(self.param, self.param)} {fmt_value(self.have)}"
 
 
-def toggle_states(session: Session, read: Callable[[str], object]) -> list[ToggleState]:
-  """read(param) -> current value (Params.get(..., return_default=True))."""
+def toggle_states(session: Session, read: Callable[[str], object], writable: frozenset[str]) -> list[ToggleState]:
+  """read(param) -> current value (Params.get(..., return_default=True)); writable = ui_writable(profile)."""
   out = []
   for param, want in session.required_toggles:
     have = read(param)
     have = bool(have) if isinstance(want, bool) else have
-    out.append(ToggleState(param, want, have, same_value(want, have), param in UI_WRITABLE, True))
+    out.append(ToggleState(param, want, have, same_value(want, have), param in writable, True))
   for param, choices in session.optional_toggles:
     have = read(param)
     have = bool(have) if isinstance(choices[0], bool) else have
-    out.append(ToggleState(param, None, have, True, param in UI_WRITABLE, False, tuple(choices)))
+    out.append(ToggleState(param, None, have, True, param in writable, False, tuple(choices)))
   return out
 
 
@@ -111,8 +110,8 @@ def test_done(results: dict, test_id: str) -> bool:
   return bool(r.get("complete")) and r.get("status") != "FAIL"
 
 
-def required_tests(session: Session) -> list[str]:
-  return [t for t in session.test_ids if not TESTS_BY_ID[t].optional]
+def required_tests(reg: Registry, session: Session) -> list[str]:
+  return [t for t in session.test_ids if not reg.tests_by_id[t].optional]
 
 
 @dataclass(frozen=True)
@@ -124,23 +123,23 @@ class SessionStatus:
   failed: tuple[str, ...]
 
 
-def session_done(session: Session, results: dict) -> bool:
-  return all(test_done(results, t) for t in required_tests(session))
+def session_done(reg: Registry, session: Session, results: dict) -> bool:
+  return all(test_done(results, t) for t in required_tests(reg, session))
 
 
-def session_status(session: Session, results: dict) -> SessionStatus:
-  req = required_tests(session)
+def session_status(reg: Registry, session: Session, results: dict) -> SessionStatus:
+  req = required_tests(reg, session)
   done = sum(test_done(results, t) for t in req)
   failed = tuple(t for t in session.test_ids if results.get(t, {}).get("status") == "FAIL")
   if done == len(req):
     return SessionStatus("done", done, len(req), (), failed)
-  gating = tuple(p for p in session.prereqs if not session_done(SESSIONS_BY_ID[p], results))
+  gating = tuple(p for p in session.prereqs if not session_done(reg, reg.sessions_by_id[p], results))
   return SessionStatus("locked" if gating else "current", done, len(req), gating, failed)
 
 
-def next_session(results: dict) -> str | None:
+def next_session(reg: Registry, results: dict) -> str | None:
   """The recommended next drive: the first non-card session that is current."""
-  return next((s.id for s in SESSIONS if not s.card and session_status(s, results).state == "current"), None)
+  return next((s.id for s in reg.sessions if not s.card and session_status(reg, s, results).state == "current"), None)
 
 
 def tile_line(session: Session, st: SessionStatus, calib: tuple[float, str] | None = None) -> str:
@@ -153,9 +152,11 @@ def tile_line(session: Session, st: SessionStatus, calib: tuple[float, str] | No
   return f"{st.done}/{st.total} tests" + (f" • {len(st.failed)} FAIL" if st.failed else "")
 
 
-def calibration_progress(results: dict, state: dict) -> tuple[float, str]:
-  """The Cal card: mean completion of its tests (results.json, or the live background progress text)."""
-  cal = SESSIONS_BY_ID[CAL]
+def calibration_progress(reg: Registry, results: dict, state: dict) -> tuple[float, str]:
+  """The calibration card: mean completion of its tests (results.json, or the live background progress text)."""
+  cal = reg.card
+  if cal is None or not cal.test_ids:
+    return 0., "no calibration card"
   fracs = []
   for t in cal.test_ids:
     r = results.get(t, {})

@@ -9,15 +9,41 @@ from openpilot.common.test import OpenpilotTestCase
 from openpilot.sunnypilot.selfdrive.test_console import analyzers as A
 from openpilot.sunnypilot.selfdrive.test_console.analyzers import CAPTURED, make_analyzer
 from openpilot.sunnypilot.selfdrive.test_console.capture import Console, Store
-from openpilot.sunnypilot.selfdrive.test_console.conditions import WATCHED_TOGGLES
-from openpilot.sunnypilot.selfdrive.test_console.registry import CAL, OP_LONG_PARAM, SESSIONS, SESSIONS_BY_ID, TESTS, \
-  TESTS_BY_ID, Kind, tests_in_session as session_tests
-from openpilot.sunnypilot.selfdrive.test_console.sessions import UI_WRITABLE, UI_WRITABLE_TOGGLES, ToggleState, \
-  calibration_progress, chip_text, default_test, next_session, next_value, pill_state, ready_check, ready_text, \
-  session_status, tile_line, toggle_states
+from openpilot.sunnypilot.selfdrive.test_console.profiles.civic_6mt import PROFILE as CIVIC, WATCHED_TOGGLES
+from openpilot.sunnypilot.selfdrive.test_console.profiles.civic_6mt.registry import REGISTRY, SESSIONS, SESSIONS_BY_ID, TESTS, \
+  TESTS_BY_ID
+from openpilot.sunnypilot.selfdrive.test_console.registry import CAL, OP_LONG_PARAM, Kind
+from openpilot.sunnypilot.selfdrive.test_console.sessions import ToggleState, chip_text, default_test, next_value, pill_state, \
+  ready_check, ready_text, tile_line, ui_writable
+from openpilot.sunnypilot.selfdrive.test_console import sessions as _sessions
 from openpilot.sunnypilot.selfdrive.test_console.status_io import CONSOLE_PARAMS
 from openpilot.sunnypilot.selfdrive.test_console.tests.sim import Sim
 from openpilot.sunnypilot.selfdrive.test_console.tests.test_test_console import ctx
+
+# Task 10: the session engine takes the plan (registry) and the profile's allowlist explicitly; bound to the Civic here
+UI_WRITABLE, UI_WRITABLE_TOGGLES = ui_writable(CIVIC), CIVIC.allowlist
+session_tests = REGISTRY.tests_in_session
+
+
+def session_status(*a):
+  return _sessions.session_status(REGISTRY, *a)
+
+
+def next_session(*a):
+  return _sessions.next_session(REGISTRY, *a)
+
+
+def calibration_progress(*a):
+  return _sessions.calibration_progress(REGISTRY, *a)
+
+
+def toggle_states(*a):
+  return _sessions.toggle_states(*a, UI_WRITABLE)
+
+
+def write_param(*a, **kw):
+  from openpilot.selfdrive.ui.sunnypilot.mici.layouts.dev_test_params import write_param as _write
+  return _write(*a, profile=CIVIC, **kw)
 
 # the brief's table (Task 9 Part A)
 MAPPING = {"1": ("S1", "S6", "S7"), "2": ("S2", "S3", "S4", "S5"), "3": ("D1",), "4": ("C1", "C2"), "5": ("G1", "G2"),
@@ -209,7 +235,7 @@ class FakeParams:
 
 class TestUiWritePath(OpenpilotTestCase):
   def test_rejects_non_allowlisted_keys(self):
-    from openpilot.selfdrive.ui.sunnypilot.mici.layouts.dev_test_params import ParamNotAllowed, write_param
+    from openpilot.selfdrive.ui.sunnypilot.mici.layouts.dev_test_params import ParamNotAllowed
     p = FakeParams()
     for key in (OP_LONG_PARAM, "OpenpilotEnabledToggle", "ExperimentalMode", "LongitudinalPersonality", "CarParams",
                 "EngineBrakeHardFloor", "ManualLowSpeedHandbackSpeed", "ClutchShiftGateMaxCoast", "IsLdwEnabled", "",
@@ -219,7 +245,6 @@ class TestUiWritePath(OpenpilotTestCase):
     self.assertEqual(p.writes, [], "a refused key writes nothing")
 
   def test_allowlisted_keys_write_with_type(self):
-    from openpilot.selfdrive.ui.sunnypilot.mici.layouts.dev_test_params import write_param
     p = FakeParams()
     write_param(p, "ClutchShiftGate", True)
     write_param(p, "NoServiceBrakeDecelFloor", 0.0)
@@ -239,16 +264,16 @@ class TestUiWritePath(OpenpilotTestCase):
 
 
 class TestSignatureHunts(OpenpilotTestCase):
-  def signature(self, a, n: int, bit: int, quick=0.4, slow=2.0, pause=5.0, gear_mt=0):
+  def signature(self, a, n: int, bit: int, quick=0.4, slow=2.0, pause=5.0, gear_raw=0):
     """Parked in neutral (GEAR_MT 0 throughout): the 7b rhythm on one raw bit, plus a counter bit chattering."""
-    sim, raw = Sim(v_ego=0., gear_mt=gear_mt, clutch=True), 0
+    sim, raw = Sim(v_ego=0., gear_raw=gear_raw, clutch=True), 0
     counter = 1 << 2
 
     def hold(seconds):
       nonlocal raw
       for _ in range(round(seconds / 0.01)):
         raw ^= counter
-        a.feed(sim.step(raw_17c=raw), True)
+        a.feed(sim.step(raw_payload=raw), True)
 
     hold(pause)
     for gap in (quick, slow, quick):
@@ -304,7 +329,7 @@ class TestSignatureHunts(OpenpilotTestCase):
     with tempfile.TemporaryDirectory() as root:
       console = Console(Store(root), ctx())
       console.set_control("", False, True)
-      sim = Sim(v_ego=0., gear_mt=0, clutch=True)
+      sim = Sim(v_ego=0., gear_raw=0, clutch=True)
       for s in sim.run(2.):
         console.update(s, False)
       self.assertNotIn("S6", console.bg_runs)

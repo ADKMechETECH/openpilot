@@ -5,7 +5,8 @@ This file is part of sunnypilot and is licensed under the MIT License.
 See the LICENSE.md file in the root directory for more details.
 
 "dev test" phase view (DEV-TEST BUILD ONLY): the on-car test console's ordered validation plan, grouped by phase —
-the secondary view; the session view (dev_test_sessions.py) is the default entry. Select a test, arm it; the
+the secondary view; the session view (dev_test_sessions.py) is the default entry. The plan is the active vehicle
+profile's (rebuilt when the car changes; no profile -> a "no test-console profile" card). Select a test, arm it; the
 steering-wheel button starts/stops its capture. This view writes only the console's own TestConsole* Params, through
 dev_test_params.write_param (the session view may also set its sessions' allowlisted feature toggles there).
 Arming is never blocked: the prereq line is a recommendation, the driver decides.
@@ -15,11 +16,11 @@ import time
 import pyray as rl
 
 from openpilot.selfdrive.ui.mici.widgets.button import BigButton, BigMultiToggle, BigToggle, GreyBigButton
-from openpilot.selfdrive.ui.sunnypilot.mici.layouts.dev_test_params import write_param
+from openpilot.selfdrive.ui.sunnypilot.mici.layouts.dev_test_params import profile_cache, ui_profile, write_param
 from openpilot.selfdrive.ui.ui_state import ui_state
 from openpilot.sunnypilot.selfdrive.test_console.button import PRESS_MODES
-from openpilot.sunnypilot.selfdrive.test_console.conditions import CONDITIONS, toggle_label
-from openpilot.sunnypilot.selfdrive.test_console.registry import PHASES, TESTS, TestSpec, tests_in_phase
+from openpilot.sunnypilot.selfdrive.test_console.conditions import Context, condition_label, toggle_label
+from openpilot.sunnypilot.selfdrive.test_console.registry import TestSpec
 from openpilot.sunnypilot.selfdrive.test_console.status_io import (P_ARMED, P_BACKGROUND, P_PRESS, P_SELECTED, StatusPoller,
                                                                      prereq_hint, result_line)
 from openpilot.system.ui.lib.application import gui_app
@@ -79,11 +80,15 @@ def condition_lines(conditions: list, max_lines: int = 5) -> str:
   return "\n".join(bad + (good if len(good) <= room else good[:max(room - 1, 0)] + [f"✓ +{len(good) - max(room - 1, 0)} more"]))
 
 
+def condition_text(profile, name: str) -> str:
+  return condition_label(name, Context(profile=profile))
+
+
 class TestDetailPage(NavScroller):
-  def __init__(self, spec: TestSpec):
+  def __init__(self, spec: TestSpec, profile):
     super().__init__()
-    self.spec = spec
-    phase = PHASES[spec.phase]
+    self.spec, self.profile = spec, profile
+    phase = profile.registry.phases[spec.phase]
     self._arm = BigToggle("armed", initial_state=self._is_armed(), toggle_callback=self._on_arm)
     self._status = InfoCard(f"{spec.id} {spec.label}", "")
     self._result = InfoCard("result", "", font_size=24)
@@ -127,7 +132,7 @@ class TestDetailPage(NavScroller):
       title = f"{spec.id}: {result_line(res)}"
       text = res.get("progress", "") if res else "arm it, then drive"
       result = f"{res.get('status')}: {res.get('detail', '')}" if res.get("status") else "no result yet"
-      needs = [toggle_label(k, v) for k, v in spec.toggles.items()] + [CONDITIONS[c][0] for c in spec.conditions]
+      needs = [toggle_label(k, v) for k, v in spec.toggles.items()] + [condition_text(self.profile, c) for c in spec.conditions]
       conds = "conditions: " + ", ".join(needs)
       button = "live once armed and onroad (shows whether the wheel button decodes)"
     self._status.update_text(title, text)
@@ -138,11 +143,11 @@ class TestDetailPage(NavScroller):
 
 
 class TestButton(BigButton):
-  def __init__(self, spec: TestSpec):
+  def __init__(self, spec: TestSpec, profile):
     super().__init__(f"{spec.id} {spec.label}", "not run", font_size=40)
     self.spec = spec
     self._sub_label.set_font_size(30)
-    self._page = TestDetailPage(spec)
+    self._page = TestDetailPage(spec, profile)
     self.set_click_callback(lambda: gui_app.push_widget(self._page))
 
   def _update_state(self):
@@ -167,24 +172,35 @@ class DevTestLayoutMici(NavScroller):
   def __init__(self):
     super().__init__()
     self._live = InfoCard("dev test • phases", "")
-    background = BigToggle("background telemetry", initial_state=ui_state.params.get_bool(P_BACKGROUND),
-                           toggle_callback=lambda v: write_param(ui_state.params, P_BACKGROUND, v))
+    self._background = BigToggle("background telemetry", initial_state=ui_state.params.get_bool(P_BACKGROUND),
+                                 toggle_callback=lambda v: write_param(ui_state.params, P_BACKGROUND, v))
     current = ui_state.params.get(P_PRESS, return_default=True)
     self._press = BigMultiToggle("start press", list(PRESS_MODES), select_callback=self._on_press)
     self._press.set_value(current if current in PRESS_MODES else PRESS_MODES[0])
+    self._profile = object()
+    self._build(ui_profile())
+
+  def _build(self, profile) -> None:
+    """The plan of the active vehicle profile (or the no-profile card)."""
+    self._profile = profile
+    self._scroller._items.clear()
+    if profile is None:
+      self._scroller.add_widgets([self._live, InfoCard("no test-console profile", profile_cache.reason +
+                                                       ". The console stays inactive on this car (writes nothing).")])
+      return
+    reg = profile.registry
     items = [
       self._live,
       InfoCard("phase view", "Sets no feature toggles here (the session view can), no driving authority. Arm a test, " +
                              "then press the wheel button to start/stop. Select/arm stopped or via a passenger."),
-      InfoCard("first run on the C4", "Run phases 0, 1, 2 and the phase 7 calibration (E0c, E0a, E0b) first: they turn " +
-                                     "the car from unknown to known."),
-      background, self._press,
+      InfoCard("first run on the C4", reg.first_run_note),
+      self._background, self._press,
     ]
-    for num, phase in PHASES.items():
+    for num, phase in reg.phases.items():
       items.append(InfoCard(f"phase {num}: {phase.title.lower()}", phase.setup + (f" • gates {phase.gates}" if phase.gates else "")))
-      items += [TestButton(spec) for spec in tests_in_phase(num)]
+      items += [TestButton(spec, profile) for spec in reg.tests_in_phase(num)]
     self._scroller.add_widgets(items)
-    assert sum(isinstance(i, TestButton) for i in items) == len(TESTS)
+    assert sum(isinstance(i, TestButton) for i in items) == len(reg.tests)
 
   def _on_press(self, value: str) -> None:
     write_param(ui_state.params, P_PRESS, value)
@@ -192,6 +208,8 @@ class DevTestLayoutMici(NavScroller):
   def _update_state(self):
     super()._update_state()
     _refresh()
+    if ui_profile() is not self._profile:
+      self._build(ui_profile())
     st = poller.state
     if poller.live(time.monotonic()):
       sel = st.get("selected") or "-"

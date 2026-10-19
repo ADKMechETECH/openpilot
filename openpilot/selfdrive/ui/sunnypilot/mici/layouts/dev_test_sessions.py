@@ -4,15 +4,16 @@ Copyright (c) 2021-, Haibin Wen, sunnypilot, and a number of other contributors.
 This file is part of sunnypilot and is licensed under the MIT License.
 See the LICENSE.md file in the root directory for more details.
 
-Session view (DEV-TEST BUILD ONLY) — the default "dev test" entry. The test plan re-cut into ~30-minute drive sessions
-(test_console.registry.SESSIONS):
+Session view (DEV-TEST BUILD ONLY) — the default "dev test" entry. The active vehicle profile's test plan re-cut into
+~30-minute drive sessions (its registry's sessions; no profile for this car -> a "no test-console profile" screen):
   - home: a grid of sessions, each done ✓ / current / locked (with the gating session), plus the calibration card
     (background progress) and a link to the phase view (dev_test.py, kept as the secondary view);
   - session page (swipe left/right, ◀ ▶ edge taps, dot indicators): header + objective, the session's toggles as live
     switches with a ready ✓ / set N indicator, its tests as pills, the selected test's progress / conditions / ARM,
     and the start-button status chip (STOP • ● REC while capturing). "how ▶" opens the per-test detail page.
-Switch taps write through dev_test_params.write_param (allowlist only). openpilot longitudinal itself is shown but can't
-be set here (Developer panel). Features latch toggles only while longitudinal is inactive: the page says so.
+Switch taps write through dev_test_params.write_param (the profile's allowlist only). openpilot longitudinal itself is
+shown but can't be set here (Developer panel). Features latch toggles only while longitudinal is inactive: the page says
+so.
 """
 import time
 
@@ -20,12 +21,12 @@ import pyray as rl
 
 from openpilot.selfdrive.ui.sunnypilot.mici.layouts.dev_test import (DevTestLayoutMici, TestDetailPage, is_armed, poller,
                                                                     set_armed, _refresh)
-from openpilot.selfdrive.ui.sunnypilot.mici.layouts.dev_test_params import write_param
+from openpilot.selfdrive.ui.sunnypilot.mici.layouts.dev_test_params import profile_cache, ui_profile, write_param
 from openpilot.selfdrive.ui.ui_state import ui_state
-from openpilot.sunnypilot.selfdrive.test_console.registry import SESSIONS, TESTS_BY_ID
 from openpilot.sunnypilot.selfdrive.test_console.sessions import (PILL_MARK, calibration_progress, chip_text, default_test,
                                                                   next_session, next_value, pill_state, ready_check,
-                                                                  ready_text, session_status, tile_line, toggle_states)
+                                                                  ready_text, session_status, tile_line, toggle_states,
+                                                                  ui_writable)
 from openpilot.sunnypilot.selfdrive.test_console.status_io import P_BUTTON, P_PRESS, result_line
 from openpilot.system.ui.lib.application import FontWeight, MousePos, gui_app
 from openpilot.system.ui.lib.text_measure import measure_text_cached
@@ -47,7 +48,6 @@ PILL = {"rec": RED, "armed": rl.Color(70, 90, 120, 255), "PASS": GREEN, "CAPTURE
         "partial": rl.Color(120, 100, 30, 255), "not run": rl.Color(55, 55, 55, 255)}
 CHIP = {"idle": rl.Color(50, 50, 50, 255), "armed": rl.Color(70, 70, 70, 255), "capturing": RED,
         "stopped": rl.Color(200, 140, 20, 255), "PASS": GREEN, "CAPTURED": BLUE, "FAIL": ORANGE}
-BUTTON_SHORT = {"gapAdjustCruise": "gap"}
 
 
 def _font(bold: bool):
@@ -135,17 +135,22 @@ class SessionPager(NavWidget):
     super().__init__()
     self.idx = 0
     self._selected: dict[str, str] = {}
-    self._details: dict[str, TestDetailPage] = {}
+    self._details: dict[tuple[str, str], TestDetailPage] = {}
     self._hits = _Hits()
     self._press: MousePos | None = None
     self._hint = ("", 0.)
 
+  @property
+  def sessions(self):
+    profile = ui_profile()
+    return profile.registry.sessions if profile is not None else ()
+
   def open(self, idx: int) -> None:
-    self.idx = idx % len(SESSIONS)
+    self.idx = idx % max(len(self.sessions), 1)
 
   @property
   def session(self):
-    return SESSIONS[self.idx]
+    return self.sessions[self.idx % len(self.sessions)]
 
   def selected_test(self) -> str:
     s = self.session
@@ -167,7 +172,7 @@ class SessionPager(NavWidget):
     super()._handle_mouse_release(mouse_pos)
     press, self._press = self._press, None
     if press is not None and abs(mouse_pos.x - press.x) > SWIPE_PX and abs(mouse_pos.x - press.x) > abs(mouse_pos.y - press.y):
-      self.idx = (self.idx + (1 if mouse_pos.x < press.x else -1)) % len(SESSIONS)
+      self.idx = (self.idx + (1 if mouse_pos.x < press.x else -1)) % max(len(self.sessions), 1)
       return
     action = self._hits.find(mouse_pos)
     if action is not None:
@@ -186,9 +191,11 @@ class SessionPager(NavWidget):
     set_armed(test_id, not is_armed(test_id))
 
   def _tap_detail(self, test_id: str) -> None:
-    if test_id not in self._details:
-      self._details[test_id] = TestDetailPage(TESTS_BY_ID[test_id])
-    gui_app.push_widget(self._details[test_id])
+    profile = ui_profile()
+    key = (profile.name, test_id)
+    if key not in self._details:
+      self._details[key] = TestDetailPage(profile.registry.tests_by_id[test_id], profile)
+    gui_app.push_widget(self._details[key])
 
   # -- draw ---------------------------------------------------------------------------------------------------------
   def _update_state(self):
@@ -197,14 +204,19 @@ class SessionPager(NavWidget):
 
   def _render(self, rect: rl.Rectangle):
     self._hits.clear()
+    profile = ui_profile()
+    if profile is None:
+      draw_no_profile(rect)
+      return
+    reg = profile.registry
     s = self.session
     x0, w, y0 = rect.x + MARGIN, rect.width - 2 * MARGIN, rect.y
     results, state, live = poller.results, poller.state, _live()
-    states = toggle_states(s, params_cache.read)
+    states = toggle_states(s, params_cache.read, ui_writable(profile))
 
     # header: id • name, ready indicator
     if s.card:
-      frac, cal_text = calibration_progress(results, state)
+      frac, cal_text = calibration_progress(reg, results, state)
       right, right_c = f"{frac:.0%}", BLUE
     elif states:
       ready, _ = ready_check(states)
@@ -249,14 +261,14 @@ class SessionPager(NavWidget):
     x, y = x0, y0 + 134
     for tid in s.test_ids:
       st = pill_state(tid, results, state, live)
-      label = f"{tid}{'?' if TESTS_BY_ID[tid].optional else ''} {PILL_MARK[st]}".strip()
+      label = f"{tid}{'?' if reg.tests_by_id[tid].optional else ''} {PILL_MARK[st]}".strip()
       pw = text_w(label, 20, True) + 24
       r = rl.Rectangle(x, y, pw, 30)
       draw_pill(r, PILL[st], WHITE if tid == sel else None)
       draw_text(label, x + 12, y + 4, 20, WHITE, True)
       self._hits.add(r, lambda tid=tid: self._selected.__setitem__(s.id, tid))
       x += pw + 8
-    spec = TESTS_BY_ID[sel]
+    spec = reg.tests_by_id[sel]
 
     # selected test: progress + conditions on the left, ARM + how on the right
     y = y0 + 170
@@ -288,15 +300,15 @@ class SessionPager(NavWidget):
     if hint and time.monotonic() < until:
       text, key = hint, "stopped"
     else:
-      button = BUTTON_SHORT.get(params_cache.read(P_BUTTON) or "", params_cache.read(P_BUTTON) or "?")
+      button = profile.buttons.label(params_cache.read(P_BUTTON))
       text, key = chip_text(state, live, sel, button, params_cache.read(P_PRESS) or "short")
-    dots_w = len(SESSIONS) * 10
+    dots_w = len(reg.sessions) * 10
     cw = min(text_w(text, 18, True) + 24, w - dots_w - 12)
     rc = rl.Rectangle(x0, y0 + 214, cw, 24)
     draw_pill(rc, CHIP.get(key, CHIP["idle"]))
     draw_text(text, x0 + 12, y0 + 216, 18, WHITE, True, cw - 20)
     dx = x0 + w - dots_w + 5
-    for i in range(len(SESSIONS)):
+    for i in range(len(reg.sessions)):
       rl.draw_circle(int(dx + i * 10), int(y0 + 226), 4 if i == self.idx else 2.5, WHITE if i == self.idx else DIM)
 
     # edge arrows
@@ -315,7 +327,6 @@ class SessionHomeLayoutMici(NavWidget):
     self._pager = SessionPager()
     self._phases = DevTestLayoutMici()
     self._hits = _Hits()
-    assert len(SESSIONS) <= self.COLS * self.ROWS
 
   def _update_state(self):
     super()._update_state()
@@ -333,9 +344,15 @@ class SessionHomeLayoutMici(NavWidget):
 
   def _render(self, rect: rl.Rectangle):
     self._hits.clear()
+    profile = ui_profile()
+    if profile is None:
+      draw_no_profile(rect)
+      return
+    reg = profile.registry
+    assert len(reg.sessions) <= self.COLS * self.ROWS
     results, state, live = poller.results, poller.state, _live()
     x0, y0 = rect.x + 8, rect.y
-    nxt = next_session(results)
+    nxt = next_session(reg, results)
     if live and state.get("armed"):
       status = f"{state.get('selected')} " + {"capturing": "● REC", "complete": state.get("status") or "done"}.get(
         state.get("state"), state.get("state", ""))
@@ -353,11 +370,11 @@ class SessionHomeLayoutMici(NavWidget):
     gap, top = 6, y0 + 46
     tw = (rect.width - 16 - gap * (self.COLS - 1)) / self.COLS
     th = (rect.height - 46 - 4 - gap * (self.ROWS - 1)) / self.ROWS
-    calib = calibration_progress(results, state)
-    for i, s in enumerate(SESSIONS):
+    calib = calibration_progress(reg, results, state)
+    for i, s in enumerate(reg.sessions):
       c, r = i % self.COLS, i // self.COLS
       tile = rl.Rectangle(x0 + c * (tw + gap), top + r * (th + gap), tw, th)
-      st = session_status(s, results)
+      st = session_status(reg, s, results)
       key = "current" if s.card and st.state != "done" else st.state
       draw_pill(tile, TILE[key], WHITE if s.id == nxt else None)
       line = tile_line(s, st, calib if s.card else None)
@@ -375,6 +392,16 @@ class SessionHomeLayoutMici(NavWidget):
         color = GREEN if st.state == "done" else GREY if st.state == "locked" else WHITE
         draw_text(line, tile.x + 7, tile.y + th - 19, 14, color, max_w=tw - 14)
       self._hits.add(tile, lambda i=i: self._open(i))
+
+
+def draw_no_profile(rect: rl.Rectangle) -> None:
+  """Safe default: the car has no test-console profile — the console is inactive (the daemon subscribes to and writes
+  nothing) and nothing here can be armed or set."""
+  x0, w = rect.x + MARGIN, rect.width - 2 * MARGIN
+  draw_text("dev test • inactive", x0, rect.y + 16, 26, WHITE, True, w)
+  for k, line in enumerate(wrap(profile_cache.reason + ". Nothing is armed, captured or written on this car; add a " +
+                                "vehicle profile to use the console here.", 20, w, 5, bold=False)):
+    draw_text(line, x0, rect.y + 60 + 26 * k, 20, GREY, max_w=w)
 
 
 def dev_test_home() -> SessionHomeLayoutMici:

@@ -4,7 +4,9 @@ Copyright (c) 2021-, Haibin Wen, sunnypilot, and a number of other contributors.
 This file is part of sunnypilot and is licensed under the MIT License.
 See the LICENSE.md file in the root directory for more details.
 
-Test console capture state machine + storage. Pure logic over Samples (the daemon feeds it; tests drive it directly).
+Test console capture state machine + storage (vehicle-agnostic). Pure logic over Samples (the daemon feeds it; tests
+drive it directly). The plan comes from the Context's vehicle profile; capture files and markers name each Sample field
+by the profile's column name (a car's logs keep their spelling).
 
   idle --arm--> armed --button--> capturing --goal met--> complete --button--> capturing (fresh run)
                                       |  ^
@@ -24,7 +26,7 @@ from logging.handlers import RotatingFileHandler
 from openpilot.common.swaglog import cloudlog
 from openpilot.sunnypilot.selfdrive.test_console.analyzers import CAPTURED, FAIL, PASS, Analyzer, make_analyzer
 from openpilot.sunnypilot.selfdrive.test_console.conditions import Context, check_conditions
-from openpilot.sunnypilot.selfdrive.test_console.registry import TESTS, TESTS_BY_ID, Kind, TestSpec
+from openpilot.sunnypilot.selfdrive.test_console.registry import Kind, TestSpec
 from openpilot.sunnypilot.selfdrive.test_console.signals import Sample, sample_row
 from openpilot.sunnypilot.selfdrive.test_console.status_io import MARKERS_FILE, RESULTS_FILE, STATE_FILE, read_json, write_json_atomic
 
@@ -33,7 +35,7 @@ MARKER_BACKUPS = 5
 CAPTURE_FILE_MAX = 20 * 1024 * 1024   # bytes per capture file; rows past it are dropped (marker says so)
 CAPTURE_DIR_MAX = 300 * 1024 * 1024   # oldest capture files are pruned past this
 RESULTS_SAVE_PERIOD = 5.0             # s, progress survives a crash/offroad mid-capture
-KEY_SIGNALS = ("v_ego", "a_ego", "gear_mt", "gear", "rpm", "enabled", "long_active", "accel_cmd", "v_cruise", "pitch")
+KEY_SIGNALS = ("v_ego", "a_ego", "gear_raw", "gear", "rpm", "enabled", "long_active", "accel_cmd", "v_cruise", "pitch")
 
 
 class Store:
@@ -107,7 +109,7 @@ class Store:
 class CaptureFile:
   """Qualifying samples of one capture window: a header line, then one JSON row per sample at the test's rate."""
 
-  def __init__(self, store: Store, spec: TestSpec, run: int, window: int, background: bool):
+  def __init__(self, store: Store, spec: TestSpec, run: int, window: int, background: bool, ctx: Context):
     self.spec = spec
     self.period = 1. / spec.sample_hz
     self.t_last = -math.inf
@@ -123,7 +125,7 @@ class CaptureFile:
     try:
       self.f = open(self.path, "w")
       self._write({"test": spec.id, "phase": spec.phase, "run": run, "window": window, "background": background,
-                   "fields": list(spec.fields), "sample_hz": spec.sample_hz, "wall": time.time(), "mono": time.monotonic()})  # noqa: TID251  (human-readable wall clock in the files)
+                   "fields": [ctx.column(f) for f in spec.fields], "sample_hz": spec.sample_hz, "wall": time.time(), "mono": time.monotonic()})  # noqa: TID251  (human-readable wall clock in the files)
     except OSError:
       cloudlog.exception("test_console: can't open capture file")
       self.f = None
@@ -170,7 +172,7 @@ class Run:
   def open_window(self, t: float) -> None:
     self.window += 1
     self.t_start = t
-    self.file = CaptureFile(self.store, self.spec, self.run, self.window, self.background)
+    self.file = CaptureFile(self.store, self.spec, self.run, self.window, self.background, self.ctx)
 
   def close_window(self) -> list[str]:
     notes = self.analyzer.finish() if hasattr(self.analyzer, "finish") else []
@@ -195,6 +197,7 @@ class Run:
 class Console:
   def __init__(self, store: Store, ctx: Context):
     self.store, self.ctx = store, ctx
+    self.registry = ctx.profile.registry
     self.selected: str = ""
     self.armed = False
     self.state = "idle"
@@ -209,7 +212,7 @@ class Console:
 
   # -- markers ---------------------------------------------------------------------------------------------------
   def _marker(self, action: str, run: Run | None, s: Sample | None = None, note: str = "") -> None:
-    spec = run.spec if run is not None else TESTS_BY_ID.get(self.selected)
+    spec = run.spec if run is not None else self.registry.tests_by_id.get(self.selected)
     rec = {"test": spec.id if spec else self.selected, "phase": spec.phase if spec else None, "action": action,
            "mono": round(s.t if s is not None else self._last_t, 3), "wall": round(time.time(), 3)}  # noqa: TID251  (human-readable wall clock in the files)
     if run is not None:
@@ -221,7 +224,7 @@ class Console:
     if note:
       rec["note"] = note
     if s is not None:
-      rec["signals"] = dict(zip(KEY_SIGNALS, sample_row(s, KEY_SIGNALS), strict=True))
+      rec["signals"] = dict(zip((self.ctx.column(k) for k in KEY_SIGNALS), sample_row(s, KEY_SIGNALS), strict=True))
     self.store.marker(rec)
 
   def _save(self, run: Run) -> None:
@@ -229,7 +232,8 @@ class Console:
 
   # -- control (from Params, ~1 Hz) ---------------------------------------------------------------------------------
   def set_control(self, selected: str, armed: bool, background: bool) -> None:
-    selected = selected if selected in TESTS_BY_ID else ""
+    tests = self.registry.tests_by_id
+    selected = selected if selected in tests else ""
     armed = armed and bool(selected)
     if (selected != self.selected or not armed) and self.armed:
       self._disarm()
@@ -241,7 +245,7 @@ class Console:
       self.armed = True
       self.state = "armed"
       self.runs += 1
-      self.run = Run(self.store, TESTS_BY_ID[selected], self.ctx, self.runs)
+      self.run = Run(self.store, tests[selected], self.ctx, self.runs)
       self._marker("arm", self.run)
     if background != self.background:
       self.background = background
@@ -276,7 +280,7 @@ class Console:
     self.bg_runs.clear()
 
   def _update_background(self, s: Sample) -> None:
-    for spec in TESTS:
+    for spec in self.registry.tests:
       if spec.kind != Kind.TELEMETRY or not spec.background or (self.armed and spec.id == self.selected):
         continue
       run = self.bg_runs.get(spec.id)
@@ -299,7 +303,7 @@ class Console:
   # -- per frame ----------------------------------------------------------------------------------------------------
   def update(self, s: Sample, button: bool) -> None:
     self._last_t = s.t
-    spec = TESTS_BY_ID.get(self.selected)
+    spec = self.registry.tests_by_id.get(self.selected)
     if spec is not None:
       self.conditions = check_conditions(spec.conditions, spec.toggles, s, self.ctx)
       self.qualifying = all(v for _, v in self.conditions)
@@ -352,7 +356,7 @@ class Console:
       out.update(progress=summary["progress"], frac=summary["frac"], status=summary["status"], detail=summary["detail"],
                  window=self.run.window, elapsed=round(self._last_t - self.run.t_start, 1) if self.state == "capturing" else 0.)
     if s is not None:
-      out["live"] = {"v": round(s.v_ego, 2), "rpm": round(s.rpm), "gear_mt": s.gear_mt, "gear": s.gear,
+      out["live"] = {"v": round(s.v_ego, 2), "rpm": round(s.rpm), self.ctx.column("gear_raw"): s.gear_raw, "gear": s.gear,
                      "pitch": round(s.pitch, 4) if math.isfinite(s.pitch) else None, "gate": s.gate,
                      "long_active": s.long_active, "accel_cmd": round(s.accel_cmd, 2)}
     out["bg"] = {k: r.analyzer.progress()[0] for k, r in self.bg_runs.items() if not r.complete}
