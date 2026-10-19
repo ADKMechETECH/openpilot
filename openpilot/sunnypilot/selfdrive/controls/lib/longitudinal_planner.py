@@ -265,6 +265,8 @@ class LongitudinalPlannerSP:
     features.collisionBraking = self.collision_hold > 0.
     features.collisionReason = self.collision_reason
     features.gearAware = bool(self.gear_aware_accel.enabled)
+    if self.gear_aware_accel.enabled:   # only while on: OFF publishes exactly what it did before Task 13
+      features.aTargetStock = float(self.output_a_target_stock)
     features.urgency = self.urgency or ""
 
     pm.send('longitudinalPlanSP', plan_sp_send)

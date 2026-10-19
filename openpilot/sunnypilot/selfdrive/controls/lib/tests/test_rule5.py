@@ -246,6 +246,51 @@ class TestRule5Matrix(OpenpilotTestCase):
     self.assertEqual(sim.planner.gear_aware_accel.scales, STOCK)
     self.assertTrue(sim.plan.allowBrake)
 
+  def _gear_aware_shaping(self):
+    """1st gear, lifting off after a set-speed drop: GearAware's fall scaling holds the plan above the stock plan."""
+    sim = ManualCarSim(speed=10., gear=1, v_set=14., NonAdaptiveLongitudinal=True, GearAwareAccel=True,
+                       ClutchShiftGate=False)
+    sim.run(2.)
+    sim.set(v_set=sim.speed - 0.5)
+    assert frames_until(sim, lambda s: s.plan.aTarget - s.plan_sp.features.aTargetStock > 0.1, 4.)
+    return sim
+
+  def test_gear_aware_steps_aside_in_one_control_frame(self):
+    # Task 13 A3: GearAware shapes only the plannerd set-speed candidate; under any Rule-5 reason controlsd runs the
+    # stock-jerk plan in the SAME control frame (not up to 50 ms later at the next plan)
+    sim = self._gear_aware_shaping()
+    plan, stock = sim.plan.aTarget, sim.plan_sp.features.aTargetStock
+    one_frame(sim, inject(sim, "none"))
+    self.assertEqual(sim.ext.last_a_target, plan, "no urgency: the shaped plan runs")
+    for reason in REASONS:
+      with self.subTest(reason=reason):
+        sim = self._gear_aware_shaping()
+        plan, stock = sim.plan.aTarget, sim.plan_sp.features.aTargetStock
+        csm = inject(sim, reason)
+        one_frame(sim, csm)
+        self.assertIsNotNone(sim.ext.urgency)
+        want = min(csm['longitudinalPlan'].aTarget, stock)   # hard_decel injects a lower plan: that one wins
+        self.assertAlmostEqual(sim.ext.last_a_target, want, places=5, msg="stock plan within the frame")
+        self.assertLess(sim.ext.last_a_target, plan - 0.1)
+
+  def test_gear_aware_planner_steps_down_to_stock(self):
+    # and plannerd's own next frame under urgency: the shaped candidate steps down to the stock one (not just stock rates)
+    sim = self._gear_aware_shaping()
+    sim.force_decel = True
+    sim.run(DT_MDL)
+    self.assertLessEqual(sim.plan.aTarget, sim.plan_sp.features.aTargetStock + 1e-6)
+
+  def test_gear_aware_off_publishes_nothing_new(self):
+    sim = ManualCarSim(speed=10., gear=1, v_set=14., NonAdaptiveLongitudinal=True, GearAwareAccel=False,
+                       ClutchShiftGate=False)
+    sim.run(2.)
+    sim.set(v_set=sim.speed - 0.5)
+    sim.run(1.)
+    self.assertEqual(sim.plan_sp.features.aTargetStock, 0.)
+    self.assertFalse(sim.plan_sp.features.gearAware)
+    one_frame(sim, inject(sim, "fcw"))
+    self.assertEqual(sim.ext.last_a_target, sim.plan.aTarget)
+
   def test_plan_derived_reasons_need_a_live_plan(self):
     # while LongControl is off the planner re-seeds from aEgo, so its aTarget/shouldStop are the car's own decel (a
     # hill, the driver braking): not a braking request. FCW, leads, forceDecel, invalid inputs always count.

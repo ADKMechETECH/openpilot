@@ -46,6 +46,12 @@ Task 12 (both modes):
     the set speed. The maintain mode's brake step at the margin (C-09) stays — pulse mode is the comfort fix — and its
     default floor (0.3) waits for on-car test C2 (C-07).
   - B3: the toggle, the mode and every float param latch together, only while openpilot is disengaged.
+
+Task 13 A3 (documented, not changed): the clamp is released on the BROAD Rule-5 lead reasons (any lead closing >= 1 m/s
+at any distance, TTC < 6 s, ...), wider than the handback's imminent-lead test. Kept on purpose: releasing only gives
+back openpilot's own set-speed braking (in non-adaptive that is the cruise plan, never lead-following, capped at
+-1.2 m/s^2) — the fail-safe direction. Narrowing it would remove braking near traffic on a descent, an authority
+reduction that should wait for on-car data (C1 brake strength, NSB1/NSB2). Cost: less coasting with traffic ahead.
 """
 from dataclasses import dataclass
 

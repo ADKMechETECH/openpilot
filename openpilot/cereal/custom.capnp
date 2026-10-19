@@ -215,6 +215,8 @@ struct LongitudinalPlanSP @0xf35cc4560bbf6ec2 {
     collisionReason @2 :Text;      # what triggered it ("" when not)
     gearAware @3 :Bool;            # latched
     urgency @4 :Text;              # the planner's braking-urgency reason ("" = none)
+    aTargetStock @5 :Float32;      # GearAware on: the plan's aTarget with the stock-jerk set-speed candidate (Task 13
+                                   # A3: controlsd takes min(aTarget, this) in any frame with Rule-5 urgency); 0 when off
   }
 
   struct NoServiceBrake {

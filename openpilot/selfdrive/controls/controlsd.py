@@ -153,7 +153,8 @@ class Controls(ControlsExt):
     pid_accel_limits = self.apply_clutch_takeover(self.sm, CC.longActive, pid_accel_limits, self.LoC.last_output_accel,
                                                   self.calibrated_pose)
     pid_accel_limits = self.low_speed_handback.limit_accel(pid_accel_limits)
-    actuators.accel = float(self.LoC.update(CC.longActive, CS, long_plan.aTarget, long_plan.shouldStop, pid_accel_limits))
+    actuators.accel = float(self.LoC.update(CC.longActive, CS, self.plan_a_target(self.sm), long_plan.shouldStop,
+                                            pid_accel_limits))
     self.post_clutch_takeover(self.LoC)
 
     # Steering PID loop and lateral MPC

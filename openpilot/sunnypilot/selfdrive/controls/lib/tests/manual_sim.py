@@ -136,7 +136,8 @@ def controls_frame(ext, sm, loc, enabled, gas_pressed, last_cmd_hint=None):
   limits = ext.apply_clutch_takeover(sm, long_active, limits, loc.last_output_accel, pose)
   limits = ext.low_speed_handback.limit_accel(limits)
   plan = sm['longitudinalPlan']
-  cmd = float(loc.update(long_active, CS, plan.aTarget, plan.shouldStop, limits))
+  ext.last_a_target = ext.plan_a_target(sm)
+  cmd = float(loc.update(long_active, CS, ext.last_a_target, plan.shouldStop, limits))
   ext.post_clutch_takeover(loc)
   return long_active, limits, cmd
 

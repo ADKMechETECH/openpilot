@@ -13,6 +13,7 @@ GAA = [f"{T}/test_gear_aware_accel.py"]
 B3 = [f"{T}/test_task12_nsb_latch.py"]
 EV = ["openpilot/sunnypilot/selfdrive/car/tests/test_clutch_gate_events.py"]
 ODBC = ["opendbc_repo/opendbc/car/honda/tests/test_manual_carstate.py"]
+CSIG = [f"{T}/test_task13_clutch_signal.py"]
 
 
 def m(mid, finding, file, old, new, tests):
@@ -147,4 +148,14 @@ MUTATIONS = [
     "urgency not in UNCONDITIONAL and ", "", HB),
   m("t13_a2_margin_tied_to_ceiling", "T13 A2 N-2 N3", f"{SP}/lib/no_service_brake.py",
     '               MAX_OVERSPEED_MARGIN, ceiling - PULSE_MIN_BAND)', '               ceiling)', NSB),
+  m("t13_a3_odbc_parser_counter", "T13 A3 review2 N2", "opendbc_repo/opendbc/car/honda/carstate.py",
+    "      parsers[Bus.pt].message_states[GEARBOX_ALT_2_ADDR].ignore_counter = True\n", "      pass\n", ODBC + CSIG),
+  m("t13_a3_odbc_no_counter_check", "T13 A3 review2 N2", "opendbc_repo/opendbc/car/honda/carstate.py",
+    "                                   self.gearbox_alt_2_counter_fail == 0 and \\\n", "", ODBC + CSIG),
+  m("t13_a3_odbc_no_reject_check", "T13 A3 review2 N2", "opendbc_repo/opendbc/car/honda/carstate.py",
+    "(rejected == 0 or (cp.last_nonempty_nanos - rejected) >= GEARBOX_ALT_2_REJECT_HOLD_NS)", "True", ODBC),
+  m("t13_a3_gaa_control_frame", "T13 A3 (GearAware frame timing)", f"{SP}/controlsd_ext.py",
+    "    return min(a_target, features.aTargetStock)\n", "    return a_target\n", R5),
+  m("t13_a3_gaa_planner_step", "T13 A3 (GearAware frame timing)", "openpilot/selfdrive/controls/lib/longitudinal_planner.py",
+    "        self.a_cruise = min(self.a_cruise, self.a_cruise_stock)\n", "        pass\n", R5),
 ]
