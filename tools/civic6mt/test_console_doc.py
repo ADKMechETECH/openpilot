@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# ruff: noqa: ISC002, ISC004  (long markdown paragraphs are built from implicitly concatenated literals)
 """Regenerate the generated part of docs/TEST_CONSOLE.md (the Civic 6MT profile's signal map, the session table and the
 per-phase registry) from the dev-test profile, in place: everything from the "## Civic 6MT profile (generated" heading
 (or, in an older file, "## Sessions (generated") to the end of the file is replaced.

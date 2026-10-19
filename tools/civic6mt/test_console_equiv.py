@@ -188,7 +188,7 @@ class Synth:
 
   def __init__(self, t0: float):
     self.t, self.frames = t0, []
-    self.st = dict(v=0., a=0., gear=0, clutch=False, gas=False, brake=False, rpm=800., coupled=False, enabled=False, long=False,
+    self.st = dict(v=0., a=0.,  # noqa: C408 gear=0, clutch=False, gas=False, brake=False, rpm=800., coupled=False, enabled=False, long=False,
                    cmd=0., a_target=0., v_cruise=0., pitch=0.005, allow=True, fcw=False, lead=None, alert="", raw_gear=0,
                    payload=0, hold=False, reverse=False, cruise=False)
 
@@ -370,7 +370,7 @@ def main() -> None:
     with open(os.path.join(outdir, f"{name}.json"), "w") as f:
       json.dump(out, f, sort_keys=True, indent=1, default=str)
     res = out["results"].get(test_id, {})
-    print(f"{name:12s} {out['frames']} frames, {len(out['markers'])} markers, {len(out['captures'])} captures, "
+    print(f"{name:12s} {out['frames']} frames, {len(out['markers'])} markers, {len(out['captures'])} captures, " +
           f"{res.get('status')} {res.get('progress', '')}")
 
 

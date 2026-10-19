@@ -6,8 +6,8 @@ Writes PNGs: the session home grid, and session pages 1 (telemetry, no toggles),
 card); RENDER_ALL=1 renders every session page (Task 10 used it for the before/after pixel comparison).
 Then drives the real widgets with injected touches (tap a switch, tap the non-settable op-long chip, ARM, swipe) and
 checks the Params. Task 10: the UI's vehicle profile comes from ui_state.CP (a 6MT CIVIC_2022 here); a last shot
-switches to a car with no profile (RAV4) -> no_profile.png, and a feature write is refused. Uses a throwaway Params prefix and console dir, so nothing on the machine is touched. Needs a
-display (WSLg works).
+switches to a car with no profile (RAV4) -> no_profile.png, and a feature write is refused. Uses a throwaway Params
+prefix and console dir, so nothing on the machine is touched. Needs a display (WSLg works).
 
   cd ~/civic-cruise/openpilot && source .venv/bin/activate && export PYTHONPATH="$(pwd)"
   python tools/civic6mt/dev_test_render.py <outdir>
@@ -115,7 +115,7 @@ with OpenpilotPrefix():
         break
 
   # interaction check on the real widgets: injected touches on session 3 (baseline: gate ON is the one unmet switch)
-  from openpilot.system.ui.lib.application import MouseEvent, MousePos  # noqa: E402
+  from openpilot.system.ui.lib.application import MouseEvent, MousePos
   pager = home._pager
   ui_state.CP = civic_cp
   gui_app.push_widget(pager)
