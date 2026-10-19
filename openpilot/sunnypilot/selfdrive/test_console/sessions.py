@@ -17,12 +17,41 @@ from openpilot.sunnypilot.selfdrive.test_console.registry import OP_LONG_PARAM, 
 from openpilot.sunnypilot.selfdrive.test_console.status_io import CONSOLE_PARAMS
 
 
+# Task 12 D1: the core's MAXIMUM allowlist - a profile can narrow it, never widen it. The fork's longitudinal feature
+# Params (plus DisengageOnAccelerator, which the clutch gate needs OFF); nothing that tunes lateral/longitudinal control,
+# switches openpilot or its longitudinal on, or changes the driving model.
+CORE_MAX_ALLOW = frozenset({
+  "NonAdaptiveLongitudinal", "NoServiceBrakeHold", "NoServiceBrakeDecelFloor", "NoServiceBrakeOverspeedBackstop",
+  "NoServiceBrakeOverspeedMargin", "NoServiceBrakeOverspeedMode", "ClutchShiftGate", "ClutchShiftGateGasReleaseHint",
+  "ClutchReengageSmart", "EngineBrakePreferred", "GearAwareAccel", "DisengageOnAccelerator",
+})
+# ...and, explicitly, never these (documentation + belt and braces against an edit of the set above)
+CORE_DENY = frozenset({OP_LONG_PARAM, "ExperimentalMode", "OpenpilotEnabledToggle", "LongitudinalPersonality",
+                       "EnforceTorqueControl", "TorqueControlTune", "NeuralNetworkLateralControl", "Mads",
+                       "IsLdwEnabled", "ShowDebugInfo"})
+# feature Params: written only while openpilot is disengaged AND the car is stopped (or offroad) - D2
+FEATURE_WRITE_RULE = "disengaged + stopped"
+
+
 def ui_writable(profile) -> frozenset[str]:
-  """The only Params the session UI may write: the profile's allowlist (feature Params its sessions need) plus the
-  console's own keys. Never AlphaLongitudinalEnabled (openpilot longitudinal: may disable stock AEB) — even if a profile
-  listed it. No profile (console inactive) -> only the console's own keys."""
-  allow = frozenset(profile.allowlist) if profile is not None else frozenset()
-  return (allow | frozenset(CONSOLE_PARAMS)) - {OP_LONG_PARAM}
+  """The only Params the session UI may write: the profile's allowlist (feature Params its sessions need), capped by
+  CORE_MAX_ALLOW, plus the console's own keys. Never AlphaLongitudinalEnabled (openpilot longitudinal: disables stock
+  AEB) or anything in CORE_DENY — even if a profile listed it. No profile (console inactive) -> only the console's keys."""
+  allow = frozenset(profile.allowlist) & CORE_MAX_ALLOW if profile is not None else frozenset()
+  return (allow | frozenset(CONSOLE_PARAMS)) - CORE_DENY
+
+
+def write_refusal(key: str, onroad: bool, engaged: bool, standstill: bool) -> str | None:
+  """Task 12 D2: why a write must be refused right now, or None. The console's own keys are always writable; a feature
+  Param only while openpilot is disengaged and the car is stopped (or offroad) - the features latch only while
+  disengaged anyway, and this makes "applies when disengaged" literally true."""
+  if key in CONSOLE_PARAMS:
+    return None
+  if engaged:
+    return "disengage first"
+  if onroad and not standstill:
+    return "stop the car first"
+  return None
 
 
 SHORT = {OP_LONG_PARAM: "op long", "NonAdaptiveLongitudinal": "non-adaptive", "NoServiceBrakeHold": "NSB",
@@ -95,13 +124,14 @@ def ready_text(states: list[ToggleState]) -> str:
 
 
 def next_value(t: ToggleState):
-  """What a tap on this switch writes: the requirement if unmet, else the next choice (optional), else a flip."""
-  if t.required and not t.ok:
-    return t.want
+  """What a tap on this switch writes: the requirement if unmet, else the next choice (optional). A satisfied
+  requirement is NOT flipped off by a tap (Task 12 D2): None = write nothing."""
+  if t.required:
+    return None if t.ok else t.want
   if t.choices:
     idx = next((i for i, c in enumerate(t.choices) if same_value(c, t.have)), -1)
     return t.choices[(idx + 1) % len(t.choices)]
-  return not bool(t.have) if isinstance(t.want, bool) else t.want
+  return not bool(t.have)
 
 
 # --- results -> status ------------------------------------------------------------------------------------------------

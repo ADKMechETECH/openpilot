@@ -28,7 +28,8 @@ from openpilot.sunnypilot.selfdrive.test_console.analyzers import CAPTURED, FAIL
 from openpilot.sunnypilot.selfdrive.test_console.conditions import Context, check_conditions
 from openpilot.sunnypilot.selfdrive.test_console.registry import Kind, TestSpec
 from openpilot.sunnypilot.selfdrive.test_console.signals import Sample, sample_row
-from openpilot.sunnypilot.selfdrive.test_console.status_io import MARKERS_FILE, RESULTS_FILE, STATE_FILE, read_json, write_json_atomic
+from openpilot.sunnypilot.selfdrive.test_console.status_io import MARKERS_FILE, RESULTS_FILE, STATE_FILE, read_json, \
+  sanitize_results, write_json_atomic
 
 MARKER_MAX_BYTES = 1024 * 1024
 MARKER_BACKUPS = 5
@@ -36,6 +37,15 @@ CAPTURE_FILE_MAX = 20 * 1024 * 1024   # bytes per capture file; rows past it are
 CAPTURE_DIR_MAX = 300 * 1024 * 1024   # oldest capture files are pruned past this
 RESULTS_SAVE_PERIOD = 5.0             # s, progress survives a crash/offroad mid-capture
 KEY_SIGNALS = ("v_ego", "a_ego", "gear_raw", "gear", "rpm", "enabled", "long_active", "accel_cmd", "v_cruise", "pitch")
+
+
+def _num(x, nd: int):
+  """A finite number rounded for the status file, else None (NaN / inf from a dead signal must not crash status())."""
+  try:
+    x = float(x)
+  except (TypeError, ValueError):
+    return None
+  return round(x, nd) if math.isfinite(x) else None
 
 
 class Store:
@@ -49,7 +59,7 @@ class Store:
     except OSError:
       cloudlog.exception("test_console: can't create its directory")
       self.failed = True
-    self.results: dict = read_json(os.path.join(root, RESULTS_FILE))
+    self.results: dict = sanitize_results(read_json(os.path.join(root, RESULTS_FILE)))
 
   def _marker_logger(self) -> logging.Logger | None:
     if self._markers is None and not self.failed:
@@ -356,9 +366,9 @@ class Console:
       out.update(progress=summary["progress"], frac=summary["frac"], status=summary["status"], detail=summary["detail"],
                  window=self.run.window, elapsed=round(self._last_t - self.run.t_start, 1) if self.state == "capturing" else 0.)
     if s is not None:
-      out["live"] = {"v": round(s.v_ego, 2), "rpm": round(s.rpm), self.ctx.column("gear_raw"): s.gear_raw, "gear": s.gear,
-                     "pitch": round(s.pitch, 4) if math.isfinite(s.pitch) else None, "gate": s.gate,
-                     "long_active": s.long_active, "accel_cmd": round(s.accel_cmd, 2)}
+      out["live"] = {"v": _num(s.v_ego, 2), "rpm": _num(s.rpm, 0), self.ctx.column("gear_raw"): s.gear_raw, "gear": s.gear,
+                     "pitch": _num(s.pitch, 4), "gate": s.gate, "long_active": s.long_active,
+                     "accel_cmd": _num(s.accel_cmd, 2)}
     out["bg"] = {k: r.analyzer.progress()[0] for k, r in self.bg_runs.items() if not r.complete}
     return out
 

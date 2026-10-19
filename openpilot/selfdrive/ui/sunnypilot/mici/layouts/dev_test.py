@@ -17,6 +17,7 @@ import pyray as rl
 
 from openpilot.selfdrive.ui.mici.widgets.button import BigButton, BigMultiToggle, BigToggle, GreyBigButton
 from openpilot.selfdrive.ui.sunnypilot.mici.layouts.dev_test_params import profile_cache, ui_profile, write_param
+from openpilot.sunnypilot.selfdrive.test_console.guard import guarded
 from openpilot.selfdrive.ui.ui_state import ui_state
 from openpilot.sunnypilot.selfdrive.test_console.button import PRESS_MODES
 from openpilot.sunnypilot.selfdrive.test_console.conditions import Context, condition_label, toggle_label
@@ -35,6 +36,7 @@ def _refresh() -> None:
   poller.update(time.monotonic())
 
 
+@guarded
 def set_armed(test_id: str, armed: bool) -> None:
   """Arm test_id (disarming whatever was armed), or disarm it if it is the selected one."""
   if armed:
@@ -108,6 +110,7 @@ class TestDetailPage(NavScroller):
   def _is_armed(self) -> bool:
     return is_armed(self.spec.id)
 
+  @guarded
   def _on_arm(self, state: bool) -> None:
     set_armed(self.spec.id, state)
 
@@ -115,6 +118,7 @@ class TestDetailPage(NavScroller):
     super().show_event()
     self._arm.set_checked(self._is_armed())
 
+  @guarded
   def _update_state(self):
     super()._update_state()
     _refresh()
@@ -150,6 +154,7 @@ class TestButton(BigButton):
     self._page = TestDetailPage(spec, profile)
     self.set_click_callback(lambda: gui_app.push_widget(self._page))
 
+  @guarded
   def _update_state(self):
     super()._update_state()
     spec, st = self.spec, _active(self.spec)
@@ -173,7 +178,7 @@ class DevTestLayoutMici(NavScroller):
     super().__init__()
     self._live = InfoCard("dev test • phases", "")
     self._background = BigToggle("background telemetry", initial_state=ui_state.params.get_bool(P_BACKGROUND),
-                                 toggle_callback=lambda v: write_param(ui_state.params, P_BACKGROUND, v))
+                                 toggle_callback=guarded(lambda v: write_param(ui_state.params, P_BACKGROUND, v)))
     current = ui_state.params.get(P_PRESS, return_default=True)
     self._press = BigMultiToggle("start press", list(PRESS_MODES), select_callback=self._on_press)
     self._press.set_value(current if current in PRESS_MODES else PRESS_MODES[0])
@@ -202,9 +207,11 @@ class DevTestLayoutMici(NavScroller):
     self._scroller.add_widgets(items)
     assert sum(isinstance(i, TestButton) for i in items) == len(reg.tests)
 
+  @guarded
   def _on_press(self, value: str) -> None:
     write_param(ui_state.params, P_PRESS, value)
 
+  @guarded
   def _update_state(self):
     super()._update_state()
     _refresh()

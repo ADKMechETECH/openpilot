@@ -11,9 +11,11 @@ Session view (DEV-TEST BUILD ONLY) — the default "dev test" entry. The active 
   - session page (swipe left/right, ◀ ▶ edge taps, dot indicators): header + objective, the session's toggles as live
     switches with a ready ✓ / set N indicator, its tests as pills, the selected test's progress / conditions / ARM,
     and the start-button status chip (STOP • ● REC while capturing). "how ▶" opens the per-test detail page.
-Switch taps write through dev_test_params.write_param (the profile's allowlist only). openpilot longitudinal itself is
-shown but can't be set here (Developer panel). Features latch toggles only while longitudinal is inactive: the page says
-so.
+Switch taps write through dev_test_params.write_param (the profile's allowlist, capped by the core; feature Params only
+while openpilot is disengaged and the car is stopped - Task 12 D2; a refusal says why). A satisfied requirement is not
+flipped off by a tap. openpilot longitudinal itself is shown but can't be set here (Developer panel). A tap fires only
+when press and release land on the same target with < TAP_SLOP px of movement (D-09). Every render / input path is
+guarded: a console bug logs once and never takes the ui process down (D1).
 """
 import time
 
@@ -21,12 +23,14 @@ import pyray as rl
 
 from openpilot.selfdrive.ui.sunnypilot.mici.layouts.dev_test import (DevTestLayoutMici, TestDetailPage, is_armed, poller,
                                                                     set_armed, _refresh)
-from openpilot.selfdrive.ui.sunnypilot.mici.layouts.dev_test_params import profile_cache, ui_profile, write_param
+from openpilot.selfdrive.ui.sunnypilot.mici.layouts.dev_test_params import ParamNotAllowed, ParamWriteRefused, profile_cache, \
+  ui_profile, write_param
 from openpilot.selfdrive.ui.ui_state import ui_state
 from openpilot.sunnypilot.selfdrive.test_console.sessions import (PILL_MARK, calibration_progress, chip_text, default_test,
                                                                   next_session, next_value, pill_state, ready_check,
                                                                   ready_text, session_status, tile_line, toggle_states,
                                                                   ui_writable)
+from openpilot.sunnypilot.selfdrive.test_console.guard import guarded
 from openpilot.sunnypilot.selfdrive.test_console.status_io import P_BUTTON, P_PRESS, result_line
 from openpilot.system.ui.lib.application import FontWeight, MousePos, gui_app
 from openpilot.system.ui.lib.text_measure import measure_text_cached
@@ -34,6 +38,7 @@ from openpilot.system.ui.widgets.nav_widget import NavWidget
 
 MARGIN = 30            # px each side: room for the ◀ ▶ edge taps
 SWIPE_PX = 50
+TAP_SLOP = 20          # px: more movement than this between press and release is not a tap (D-09)
 PARAMS_PERIOD = 0.5    # s between Param re-reads (file reads; the UI renders at 60 fps)
 
 WHITE = rl.Color(255, 255, 255, 230)
@@ -105,6 +110,19 @@ class _Hits:
   def find(self, pos: MousePos):
     return next((a for r, a in self.items if rl.check_collision_point_rec(rl.Vector2(pos.x, pos.y), r)), None)
 
+  def hit(self, pos: MousePos):
+    """(target rect, action) under pos, or None."""
+    return next(((r, a) for r, a in self.items if rl.check_collision_point_rec(rl.Vector2(pos.x, pos.y), r)), None)
+
+  @staticmethod
+  def tap(press: MousePos | None, press_hit, release: MousePos):
+    """The action for a tap: press and release on the SAME target (the rect hit at press), with < TAP_SLOP px of
+    movement; else None (a swipe that ends on a switch does nothing)."""
+    if press is None or press_hit is None or abs(release.x - press.x) > TAP_SLOP or abs(release.y - press.y) > TAP_SLOP:
+      return None
+    rect, action = press_hit
+    return action if rl.check_collision_point_rec(rl.Vector2(release.x, release.y), rect) else None
+
 
 class _ParamCache:
   def __init__(self):
@@ -138,6 +156,7 @@ class SessionPager(NavWidget):
     self._details: dict[tuple[str, str], TestDetailPage] = {}
     self._hits = _Hits()
     self._press: MousePos | None = None
+    self._press_hit = None
     self._hint = ("", 0.)
 
   @property
@@ -163,18 +182,20 @@ class SessionPager(NavWidget):
     self._hint = (text, time.monotonic() + 2.5)
 
   # -- input --------------------------------------------------------------------------------------------------------
+  @guarded
   def _handle_mouse_event(self, mouse_event) -> None:
     super()._handle_mouse_event(mouse_event)
     if mouse_event.left_pressed:
-      self._press = mouse_event.pos
+      self._press, self._press_hit = mouse_event.pos, self._hits.hit(mouse_event.pos)
 
+  @guarded
   def _handle_mouse_release(self, mouse_pos: MousePos) -> None:
     super()._handle_mouse_release(mouse_pos)
     press, self._press = self._press, None
     if press is not None and abs(mouse_pos.x - press.x) > SWIPE_PX and abs(mouse_pos.x - press.x) > abs(mouse_pos.y - press.y):
       self.idx = (self.idx + (1 if mouse_pos.x < press.x else -1)) % max(len(self.sessions), 1)
       return
-    action = self._hits.find(mouse_pos)
+    action = self._hits.tap(press, self._press_hit, mouse_pos)
     if action is not None:
       action()
 
@@ -182,13 +203,25 @@ class SessionPager(NavWidget):
     if not t.settable:
       self._flash("op long: set it in Developer settings")
       return
-    write_param(ui_state.params, t.param, next_value(t))
+    value = next_value(t)
+    if value is None:
+      self._flash(f"{t.label}: already set")
+      return
+    try:
+      write_param(ui_state.params, t.param, value)
+    except ParamWriteRefused as e:
+      self._flash(f"not set: {e}")
+      return
+    except (ParamNotAllowed, TypeError, ValueError):
+      self._flash(f"not set: {t.param} can't be written here")
+      return
     params_cache.invalidate()
-    if ui_state.engaged:
-      self._flash("set • applies when disengaged")
 
   def _tap_arm(self, test_id: str) -> None:
-    set_armed(test_id, not is_armed(test_id))
+    try:
+      set_armed(test_id, not is_armed(test_id))
+    except (ParamNotAllowed, ParamWriteRefused, TypeError, ValueError) as e:
+      self._flash(f"not armed: {e}")
 
   def _tap_detail(self, test_id: str) -> None:
     profile = ui_profile()
@@ -198,10 +231,12 @@ class SessionPager(NavWidget):
     gui_app.push_widget(self._details[key])
 
   # -- draw ---------------------------------------------------------------------------------------------------------
+  @guarded
   def _update_state(self):
     super()._update_state()
     _refresh()
 
+  @guarded
   def _render(self, rect: rl.Rectangle):
     self._hits.clear()
     profile = ui_profile()
@@ -226,8 +261,8 @@ class SessionPager(NavWidget):
     rw = text_w(right, 24, True)
     draw_text(f"{s.id} • {s.name}", x0, y0 + 12, 28, WHITE, True, w - rw - 12)
     draw_text(right, x0 + w - rw, y0 + 14, 24, right_c, True)
-    # features latch toggles only while longitudinal is inactive: say so wherever a mid-drive change is possible
-    note = "  applies when disengaged" if ui_state.started and any(t.settable for t in states) else ""
+    # feature toggles are written only while disengaged and stopped (they latch at the next engagement): say so onroad
+    note = "  set when disengaged + stopped" if ui_state.started and any(t.settable for t in states) else ""
     nw = text_w(note, 17) if note else 0
     draw_text(s.objective, x0, y0 + 44, 18, GREY, max_w=w - nw)
     if note:
@@ -327,14 +362,25 @@ class SessionHomeLayoutMici(NavWidget):
     self._pager = SessionPager()
     self._phases = DevTestLayoutMici()
     self._hits = _Hits()
+    self._press: MousePos | None = None
+    self._press_hit = None
 
+  @guarded
   def _update_state(self):
     super()._update_state()
     _refresh()
 
+  @guarded
+  def _handle_mouse_event(self, mouse_event) -> None:
+    super()._handle_mouse_event(mouse_event)
+    if mouse_event.left_pressed:
+      self._press, self._press_hit = mouse_event.pos, self._hits.hit(mouse_event.pos)
+
+  @guarded
   def _handle_mouse_release(self, mouse_pos: MousePos) -> None:
     super()._handle_mouse_release(mouse_pos)
-    action = self._hits.find(mouse_pos)
+    press, self._press = self._press, None
+    action = self._hits.tap(press, self._press_hit, mouse_pos)
     if action is not None:
       action()
 
@@ -342,6 +388,7 @@ class SessionHomeLayoutMici(NavWidget):
     self._pager.open(idx)
     gui_app.push_widget(self._pager)
 
+  @guarded
   def _render(self, rect: rl.Rectangle):
     self._hits.clear()
     profile = ui_profile()

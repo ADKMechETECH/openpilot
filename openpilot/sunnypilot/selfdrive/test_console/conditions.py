@@ -108,8 +108,15 @@ def toggle_label(key: str, want: bool) -> str:
   return f"{key} {'ON' if want else 'OFF'}"
 
 
+def toggle_value(key: str, s: Sample, ctx: Context):
+  """Task 12 D2: the value the feature actually latched (published by controlsd / plannerd) where it exists - a Param
+  changed while engaged hasn't applied yet, and a refused gate (DisengageOnAccelerator / no clutch signal) is off -
+  else the Param."""
+  return s.latched[key] if key in s.latched else ctx.toggles.get(key, False)
+
+
 def check_conditions(names: tuple[str, ...], toggles: dict[str, bool], s: Sample, ctx: Context) -> list[tuple[str, bool]]:
-  out = [(toggle_label(k, want), ctx.toggles.get(k, False) == want) for k, want in toggles.items()]
+  out = [(toggle_label(k, want), toggle_value(k, s, ctx) == want) for k, want in toggles.items()]
   conds, labels = ctx.conditions, ctx.label_cache
   for name in names:
     label = labels.get(name)

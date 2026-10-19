@@ -24,13 +24,15 @@ from openpilot.sunnypilot.selfdrive.controls.lib.no_service_brake import read_ov
 from openpilot.sunnypilot.selfdrive.test_console.button import StartButton
 from openpilot.sunnypilot.selfdrive.test_console.capture import Console, Store
 from openpilot.sunnypilot.selfdrive.test_console.conditions import Context
+from openpilot.sunnypilot.selfdrive.test_console.guard import Guard
 from openpilot.sunnypilot.selfdrive.test_console.profile import inactive_reason, select_profile
 from openpilot.sunnypilot.selfdrive.test_console.signals import LogEventTap, SampleBuilder
 from openpilot.sunnypilot.selfdrive.test_console.status_io import P_ARMED, P_BACKGROUND, P_BUTTON, P_PRESS, P_SELECTED, console_dir
 
 PARAMS_PERIOD = 1.0      # s
 STATUS_PERIOD = 0.2      # s
-SERVICES = ["carState", "carControl", "carOutput", "longitudinalPlan", "radarState", "selfdriveState", "pandaStates"]
+SERVICES = ["carState", "carControl", "carOutput", "longitudinalPlan", "radarState", "selfdriveState", "pandaStates",
+            "carControlSP", "longitudinalPlanSP"]   # Task 12: the features' published (latched) state
 
 
 def read_context(params: Params, ctx: Context) -> None:
@@ -65,7 +67,44 @@ def run_console(params: Params, CP, CP_bytes: bytes, profile) -> None:
   sendcan_sock = messaging.sub_sock("sendcan", conflate=False) if tap is not None else None
 
   t_params = t_status = 0.
-  s = None
+  guard = Guard()   # Task 12 D1: a console bug logs once and the daemon keeps running (or goes inert) - never dies
+  frame = {"s": None, "events": ()}
+
+  def read_params() -> bool:
+    if params.get("CarParams") != CP_bytes:
+      cloudlog.event("test_console_carparams_changed")
+      return False
+    read_context(params, ctx)
+    name, mode = params.get(P_BUTTON, return_default=True), params.get(P_PRESS, return_default=True)
+    if (name or "") != button.name or (mode or "") != button.mode:
+      button.configure(name, mode)
+    console.set_control(params.get(P_SELECTED) or "", params.get_bool(P_ARMED), params.get_bool(P_BACKGROUND))
+    return True
+
+  def drain() -> None:
+    frame["events"] = log_tap.update([m.logMessage for m in messaging.drain_sock(log_sock)])
+    if tap is not None:
+      can_raw, sendcan_raw = messaging.drain_sock_raw(can_sock), messaging.drain_sock_raw(sendcan_sock)
+      if console.selected or console.background:  # only pay for parsing when something can use it
+        tap.update(can_capnp_to_list(can_raw), can_capnp_to_list(sendcan_raw, "sendcan"))
+
+  def step() -> None:
+    t = sm.logMonoTime["carState"] / 1e9
+    tx_blocked = sum(ps.safetyTxBlocked for ps in sm["pandaStates"])
+    s = builder.build(t, sm["carState"], sm["carControl"], sm["carOutput"], sm["longitudinalPlan"],
+                      sm.all_checks(["longitudinalPlan"]), sm["radarState"], sm["selfdriveState"], tx_blocked, tap, log_tap,
+                      frame["events"], sm["carControlSP"], sm.all_checks(["carControlSP"]), sm["longitudinalPlanSP"],
+                      sm.all_checks(["longitudinalPlanSP"]))
+    frame["s"] = s
+    console.update(s, button.update(t, sm["carState"].buttonEvents))
+
+  def save(exited: bool = False) -> None:
+    info = {"name": button.name, "mode": button.mode, "seen": button.seen}
+    state = console.status(frame["s"], info)
+    if guard.errors:
+      state["error"] = f"{guard.errors} console errors (see the rlog){' - inert' if guard.inert else ''}"
+    store.save_state({**state, "exited": True} if exited else state)
+
   try:
     while True:
       sm.update()
@@ -75,33 +114,19 @@ def run_console(params: Params, CP, CP_bytes: bytes, profile) -> None:
         if params.get("CarParams") != CP_bytes:
           cloudlog.event("test_console_carparams_changed")
           return
-        read_context(params, ctx)
-        name, mode = params.get(P_BUTTON, return_default=True), params.get(P_PRESS, return_default=True)
-        if (name or "") != button.name or (mode or "") != button.mode:
-          button.configure(name, mode)
-        console.set_control(params.get(P_SELECTED) or "", params.get_bool(P_ARMED), params.get_bool(P_BACKGROUND))
-
-      events = log_tap.update([m.logMessage for m in messaging.drain_sock(log_sock)])
-      if tap is not None:
-        can_raw, sendcan_raw = messaging.drain_sock_raw(can_sock), messaging.drain_sock_raw(sendcan_sock)
-        if console.selected or console.background:  # only pay for parsing when something can use it
-          tap.update(can_capnp_to_list(can_raw), can_capnp_to_list(sendcan_raw, "sendcan"))
-
+        guard.run("params", read_params)
+      guard.run("drain", drain)
       if not sm.updated["carState"]:
         continue
-      t = sm.logMonoTime["carState"] / 1e9
-      tx_blocked = sum(ps.safetyTxBlocked for ps in sm["pandaStates"])
-      s = builder.build(t, sm["carState"], sm["carControl"], sm["carOutput"], sm["longitudinalPlan"], sm.valid["longitudinalPlan"],
-                        sm["radarState"], sm["selfdriveState"], tx_blocked, tap, log_tap, events)
-      console.update(s, button.update(t, sm["carState"].buttonEvents))
-
+      guard.run("frame", step)
       if now - t_status > STATUS_PERIOD:
         t_status = now
-        store.save_state(console.status(s, {"name": button.name, "mode": button.mode, "seen": button.seen}))
+        guard.run("status", save)
   finally:
-    console.shutdown()
-    if s is not None:
-      store.save_state({**console.status(s, {"name": button.name, "mode": button.mode, "seen": button.seen}), "exited": True})
+    guard.inert = False   # the exit status is written even after going inert
+    guard.run("shutdown", console.shutdown)
+    if frame["s"] is not None:
+      guard.run("exit_status", save, True)
 
 
 def main() -> None:

@@ -54,12 +54,51 @@ def read_json(path: str) -> dict:
     return {}
 
 
+# --- nested-type validation (Task 12 D1): a hand-edited / truncated / older file must never crash a consumer -----------
+_STR, _BOOL, _NUM = (str,), (bool,), (int, float)
+STATE_TYPES = {"selected": _STR, "armed": _BOOL, "state": _STR, "qualifying": _BOOL, "background": _BOOL,
+               "progress": _STR, "frac": _NUM, "status": _STR, "detail": _STR, "stamp": _NUM, "mono": _NUM,
+               "exited": _BOOL, "window": _NUM, "elapsed": _NUM, "version": _NUM, "error": _STR}
+RESULT_TYPES = {"status": _STR, "complete": _BOOL, "progress": _STR, "frac": _NUM, "detail": _STR, "runs": _NUM,
+                "window": _NUM, "background": _BOOL}
+
+
+def _typed(d: dict, types: dict) -> dict:
+  out = {}
+  for k, v in d.items():
+    want = types.get(k)
+    if want is None:
+      out[k] = v
+    elif isinstance(v, want) and not (want is _NUM and isinstance(v, bool)):
+      out[k] = v
+  return out
+
+
+def sanitize_state(d) -> dict:
+  if not isinstance(d, dict):
+    return {}
+  out = _typed(d, STATE_TYPES)
+  conds = d.get("conditions")
+  out["conditions"] = [(str(c[0]), bool(c[1])) for c in conds if isinstance(c, (list, tuple)) and len(c) == 2] \
+                      if isinstance(conds, list) else []
+  for k in ("bg", "button", "live"):
+    out[k] = d[k] if isinstance(d.get(k), dict) else {}
+  out["bg"] = {str(k): str(v) for k, v in out["bg"].items()}
+  return out
+
+
+def sanitize_results(d) -> dict:
+  if not isinstance(d, dict):
+    return {}
+  return {k: _typed(v, RESULT_TYPES) for k, v in d.items() if isinstance(k, str) and isinstance(v, dict)}
+
+
 def read_state() -> dict:
-  return read_json(os.path.join(console_dir(), STATE_FILE))
+  return sanitize_state(read_json(os.path.join(console_dir(), STATE_FILE)))
 
 
 def read_results() -> dict:
-  return read_json(os.path.join(console_dir(), RESULTS_FILE))
+  return sanitize_results(read_json(os.path.join(console_dir(), RESULTS_FILE)))
 
 
 class StatusPoller:

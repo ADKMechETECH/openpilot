@@ -5,12 +5,15 @@ This file is part of sunnypilot and is licensed under the MIT License.
 See the LICENSE.md file in the root directory for more details.
 
 Onroad status chip for the test console (DEV-TEST BUILD ONLY): glanceable mid-maneuver. Shown only while a test is
-armed and the daemon is live. Bottom-center, clear of the wheel (left) and model-source (right) icons. Read-only.
+armed and the daemon is live, and hidden while openpilot shows an alert (Task 12 D-08: never over an alert). Guarded:
+a bug here logs once and never takes the ui process down (D1). Bottom-center, clear of the wheel (left) and model-source (right) icons. Read-only.
 """
 import time
 
 import pyray as rl
 
+from openpilot.selfdrive.ui.ui_state import ui_state
+from openpilot.sunnypilot.selfdrive.test_console.guard import guarded
 from openpilot.sunnypilot.selfdrive.test_console.status_io import StatusPoller
 from openpilot.system.ui.lib.application import FontWeight, gui_app
 from openpilot.system.ui.lib.text_measure import measure_text_cached
@@ -45,15 +48,23 @@ def chip_lines(st: dict) -> tuple[list[str], str]:
   return lines, "armed"
 
 
+def alert_showing() -> bool:
+  try:
+    return ui_state.started and ui_state.sm['selfdriveState'].alertSize != 0   # 0 = AlertSize.none
+  except (KeyError, AttributeError):
+    return False
+
+
 class TestConsoleChip:
   def __init__(self):
     self._poller = StatusPoller()
     self._font = gui_app.font(FontWeight.BOLD)
 
+  @guarded
   def render(self, rect: rl.Rectangle) -> None:
     self._poller.update(time.monotonic())
     st = self._poller.state
-    if not st.get("armed") or not self._poller.live(time.monotonic()):
+    if not st.get("armed") or not self._poller.live(time.monotonic()) or alert_showing():
       return
     lines, key = chip_lines(st)
     max_w = rect.width - 2 * SIDE_CLEARANCE - 2 * PAD_X

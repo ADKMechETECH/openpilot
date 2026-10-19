@@ -71,7 +71,12 @@ class Sample:
   raw_payload: int = -1          # one raw CAN payload as an int (profile raw tap; the bit hunt)
   a_coast: float = NAN           # the profile's coast model for this gear/rpm/speed/pitch (may be an uncalibrated seed)
   excess: float = NAN            # a_ego - a_coast: well below 0 => something besides coasting is slowing the car
-  gate: str = ""                 # last clutch_shift_gate state seen in cloudlog
+  gate: str = ""                 # clutch-gate state: controlsd's published one (Task 12), else the last cloudlog one
+  gate_paused: bool = False      # controlsd published: the gate is capping the throttle for a shift (Task 12 A2)
+  urgency: str = ""              # controlsd published: the Rule-5 braking-urgency reason ("" = none)
+  collision: bool = False        # plannerd published: non-adaptive is braking for a collision threat (Task 12 A1)
+  handback_active: bool = False  # controlsd published: the low-speed handback ramp is running
+  latched: dict = field(default_factory=dict)   # Param -> the value the feature actually latched (published, Task 12 B3)
   ebp: bool = False              # EngineBrakePreferred suppressing (last cloudlog state)
   alert: str = ""                # selfdriveState.alertType
   tx_blocked: int = 0            # pandaStates[0].safetyTxBlocked (cumulative)
@@ -139,7 +144,8 @@ class SampleBuilder:
   rpm_seeded: bool = False
 
   def build(self, t: float, CS, CC, CO, plan, plan_valid: bool, radar, ss, tx_blocked: int, tap,
-            log: LogEventTap, events: tuple) -> Sample:
+            log: LogEventTap, events: tuple, cc_sp=None, cc_sp_ok: bool = False, plan_sp=None,
+            plan_sp_ok: bool = False) -> Sample:
     sig, pt = self.profile.signals, self.profile.powertrain
     s = Sample(t=t)
     s.v_ego, s.a_ego = float(CS.vEgo), float(CS.aEgo)
@@ -183,4 +189,24 @@ class SampleBuilder:
     s.a_coast = pt.coast_decel(s.gear, s.rpm, s.v_ego, grade) if math.isfinite(s.pitch) else NAN
     s.excess = s.a_ego - s.a_coast
     s.gate, s.ebp, s.events = log.gate, log.ebp, events
+    published_state(s, cc_sp, cc_sp_ok, plan_sp, plan_sp_ok)
     return s
+
+
+def published_state(s: Sample, cc_sp, cc_sp_ok: bool, plan_sp, plan_sp_ok: bool) -> None:
+  """Task 12 B3/D2: what the features ACTUALLY latched and are doing, as controlsd / plannerd publish it. Only from
+  fresh, valid messages; otherwise the sample keeps the Param / cloudlog view (and conditions fall back to Params)."""
+  if cc_sp is not None and cc_sp_ok:
+    ml = cc_sp.manualLongitudinal
+    s.gate = str(ml.gateState) if ml.gateEnabled else ""
+    s.gate_paused, s.urgency, s.handback_active = bool(ml.gatePaused), str(ml.urgency), bool(ml.handbackActive)
+    s.ebp = bool(ml.ebpSuppressing)
+    s.latched.update({"ClutchShiftGate": bool(ml.gateEnabled), "ClutchReengageSmart": bool(ml.reengageSmart),
+                      "EngineBrakePreferred": bool(ml.ebpEnabled)})
+  if plan_sp is not None and plan_sp_ok:
+    f, nsb = plan_sp.features, plan_sp.noServiceBrake
+    s.collision = bool(f.collisionBraking)
+    s.latched.update({"NonAdaptiveLongitudinal": bool(f.nonAdaptive), "GearAwareAccel": bool(f.gearAware),
+                      "NoServiceBrakeHold": bool(nsb.enabled), "NoServiceBrakeOverspeedBackstop": bool(nsb.backstop),
+                      "NoServiceBrakeOverspeedMode": str(nsb.mode), "NoServiceBrakeDecelFloor": float(nsb.decelFloor),
+                      "NoServiceBrakeOverspeedMargin": float(nsb.margin)})

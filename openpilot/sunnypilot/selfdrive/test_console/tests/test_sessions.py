@@ -111,7 +111,7 @@ class TestSessionTable(OpenpilotTestCase):
     self.assertEqual(req["6"], req["5"])
     self.assertTrue(req["7"]["NonAdaptiveLongitudinal"])
     self.assertTrue(req["8"]["NonAdaptiveLongitudinal"] and req["8"]["NoServiceBrakeHold"])
-    self.assertEqual(req["9"], {OP_LONG_PARAM: True})
+    self.assertEqual(req["9"], req["5"], "Task 12 D-20: H3 (neutral while rolling) needs the gate, and the gate needs DOA OFF")
     self.assertTrue(req["10"]["EngineBrakePreferred"])
     self.assertTrue(req["11"]["GearAwareAccel"])
     self.assertTrue(SESSIONS_BY_ID[CAL].card and all(TESTS_BY_ID[t].kind == Kind.TELEMETRY for t in MAPPING[CAL]))
@@ -159,7 +159,7 @@ class TestReadyCheck(OpenpilotTestCase):
                                                 "NoServiceBrakeHold": True, "NoServiceBrakeOverspeedBackstop": True,
                                                 "NoServiceBrakeDecelFloor": 0.3})}
     self.assertIs(next_value(st["NonAdaptiveLongitudinal"]), True)    # unmet -> the requirement
-    self.assertIs(next_value(st["NoServiceBrakeHold"]), False)        # met -> flip (driver's call)
+    self.assertIsNone(next_value(st["NoServiceBrakeHold"]))           # met -> nothing (Task 12 D2: never flipped off)
     self.assertEqual(next_value(st["NoServiceBrakeDecelFloor"]), 0.0)  # optional float -> next choice
     st = {t.param: t for t in self.states("8", {"NoServiceBrakeDecelFloor": 0.0})}
     self.assertEqual(next_value(st["NoServiceBrakeDecelFloor"]), 0.3)
