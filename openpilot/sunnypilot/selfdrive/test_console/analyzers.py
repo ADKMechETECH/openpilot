@@ -20,7 +20,7 @@ from openpilot.sunnypilot.selfdrive.controls.lib.clutch_shift_gate import FLARE_
 from openpilot.sunnypilot.selfdrive.controls.lib.engine_brake_model import GEAR_MATCH_TOL, GEAR_RATIOS, infer_gear, overall_ratio
 from openpilot.sunnypilot.selfdrive.test_console.conditions import BINS, Context
 from openpilot.sunnypilot.selfdrive.test_console.registry import TestSpec
-from openpilot.sunnypilot.selfdrive.test_console.signals import FAULT_ALERTS, HANDBACK_ALERT, Sample
+from openpilot.sunnypilot.selfdrive.test_console.signals import FAULT_ALERTS, HANDBACK_ALERT, OVERSPEED_ALERT, Sample
 
 PASS, FAIL, CAPTURED = "PASS", "FAIL", "CAPTURED"
 
@@ -32,6 +32,9 @@ RESUME_JERK_MAX = 3.0        # m/s^3, provisional "smooth resume" bound
 HANDBACK_JERK_MAX = 2.5      # m/s^3, provisional "no lurch" bound
 ROLL_SPEED = 0.3             # m/s
 HILL_STOP_PITCH = 0.03       # rad (~3 %)
+PULSE_HOLD_MAX = 20.         # s, provisional: a single overspeed pulse longer than this is a brake hold, not a pulse
+PULSE_MIN_COAST = 1.0        # s, provisional: the coast between two pulses must last at least this
+BAND_TOL = 0.5               # m/s: pulse start / release vs set + trigger / set + release
 
 
 def _pct(values: list[float], q: float) -> float:
@@ -532,15 +535,26 @@ class NeutralCoastDetector:
 
 
 class BackstopDetector:
-  """NSB overspeed backstop: braking re-allowed above set + margin (cloudlog event, or allowBrake rising)."""
+  """
+  NSB overspeed backstop, by NoServiceBrakeOverspeedMode:
+    maintain  braking re-allowed above set + margin (cloudlog event, or allowBrake rising): one 3 s episode.
+    pulse     (Task 11) one episode per brake pulse, from the planner's no_service_brake_pulse phase events (pulsing ..
+              coasting): where it started / released vs the band, the command range while bounded, whether it
+              escalated and how many "Overspeed: Take Over" alerts, and the coast before it (did the brake let go?).
+  """
   WINDOW = 3.0
 
   def __init__(self, ctx: Context):
     self.ctx = ctx
     self.ep: dict | None = None
     self.allow_prev = True
+    self.alert_prev = False
+    self.t_released: float | None = None   # pulse mode: last release (start of the coast)
+    self.coast_cmd_min = math.inf          # min command in that coast once the roll-off is done
 
   def feed(self, s: Sample) -> list[dict]:
+    if self.ctx.nsb_mode == "pulse":
+      return self._feed_pulse(s)
     trigger = next((p for n, p in s.events if n == "no_service_brake_backstop"), None)
     rising = s.plan_valid and s.allow_brake and not self.allow_prev
     self.allow_prev = s.allow_brake if s.plan_valid else self.allow_prev
@@ -560,6 +574,46 @@ class BackstopDetector:
       self.ep = None
       return [ep]
     return []
+
+  def _feed_pulse(self, s: Sample) -> list[dict]:
+    c = self.ctx
+    alert = s.alert == OVERSPEED_ALERT
+    alert_edge = alert and not self.alert_prev
+    self.alert_prev = alert
+    done = []
+    for name, p in s.events:
+      if name != "no_service_brake_pulse":
+        continue
+      phase, over = p.get("phase"), float(p.get("overspeed", math.nan))
+      if phase == "pulsing" and self.ep is None:
+        coast = None if self.t_released is None else s.t - self.t_released
+        self.ep = {"mode": "pulse", "t0": s.t, "v_over": over, "trigger": c.nsb_trigger, "release": c.nsb_release,
+                   "decel": c.nsb_pulse_decel, "floor": c.nsb_floor, "cmd_min": s.accel_cmd, "cmd_max": s.accel_cmd,
+                   "a_min": s.a_ego, "escalated": False, "v_over_esc": None, "alerts": 0, "v_over_end": None, "dur": 0.,
+                   "coast_before": coast, "coast_cmd_min": self.coast_cmd_min if coast is not None else None}
+      elif phase == "escalated" and self.ep is not None:
+        self.ep["escalated"], self.ep["v_over_esc"] = True, over
+      elif phase == "coasting" and self.ep is not None:
+        ep, self.ep = self.ep, None
+        ep["v_over_end"], ep["dur"] = over, s.t - ep["t0"]
+        self.t_released, self.coast_cmd_min = s.t, math.inf
+        done.append(ep)
+    ep = self.ep
+    if ep is not None:
+      if not s.long_active:  # disengaged mid-pulse: the feature resets silently; not a scorable pulse
+        self.ep, self.t_released = None, None
+        return done
+      ep["alerts"] += alert_edge
+      ep["a_min"] = min(ep["a_min"], s.a_ego)
+      if not ep["escalated"]:  # the pulse bound applies until an escalation
+        ep["cmd_min"] = min(ep["cmd_min"], s.accel_cmd)
+        ep["cmd_max"] = max(ep["cmd_max"], s.accel_cmd)
+    elif self.t_released is not None:
+      if not s.long_active:
+        self.t_released = None
+      elif s.t - self.t_released > (abs(c.nsb_pulse_decel) - c.nsb_floor) / c.nsb_pulse_jerk + 0.3:
+        self.coast_cmd_min = min(self.coast_cmd_min, s.accel_cmd)  # after the roll-off: back on the coast clamp?
+    return done
 
 
 class EbpSuppressDetector:
@@ -682,7 +736,8 @@ class EpisodeAnalyzer(Analyzer):
     self.det_name = g["detector"]
     self.detector = DETECTORS[self.det_name](ctx)
     self.filter = FILTERS.get(g.get("filter", ""), lambda e: True)
-    self.count = g["count"]
+    self._count = g["count"]
+    self._count_by = g.get("count_by")   # (Context attribute, {value: count}): e.g. NSB2 needs 2 pulses in pulse mode
     self.need: dict[str, int] = g.get("need", {})
     self.episodes: list[dict] = []
     self.rejected = 0
@@ -709,6 +764,13 @@ class EpisodeAnalyzer(Analyzer):
         self.extra_episodes.append(ep)
         notes.append(f"{EPISODE_NOUN[self.extra_name]} {len(self.extra_episodes)}")
     return notes
+
+  @property
+  def count(self) -> int:
+    if self._count_by is None:
+      return self._count
+    attr, table = self._count_by
+    return table.get(getattr(self.ctx, attr), self._count)
 
   def detector_ep_open(self) -> bool:
     return getattr(self.detector, "ep", None) is not None
@@ -1119,11 +1181,51 @@ def r_nsb_floor(a: SegmentAnalyzer):
 def r_backstop(a: EpisodeAnalyzer):
   if not a.episodes:
     return None, ""
+  pulses = [e for e in a.episodes if e.get("mode") == "pulse"]
+  if pulses:
+    return r_pulse(a, pulses)
   e = a.episodes[-1]
   at_margin = abs(e["v_over"] - e["margin"]) <= 0.5
   braked = e["a_min"] <= -0.3
   detail = f"triggered at set+{e['v_over']:.1f} m/s (margin {e['margin']:.1f}); min a_ego in 3 s {e['a_min']:.2f}, min cmd {e['cmd_min']:.2f}"
   return (PASS if at_margin and braked else FAIL), detail + ("" if braked else " - backstop too weak (see C1)")
+
+
+def pulse_faults(e: dict) -> list[str]:
+  """Why one overspeed pulse (Task 11) is not clean. Escalated pulses are scored on the band + their alert only."""
+  bad = []
+  if abs(e["v_over"] - e["trigger"]) > BAND_TOL:
+    bad.append(f"started at set+{e['v_over']:.1f} (trigger {e['trigger']:.1f})")
+  if e["v_over_end"] is None or abs(e["v_over_end"] - e["release"]) > BAND_TOL:
+    bad.append(f"released at set+{_fmt(e['v_over_end'], 1)} (release {e['release']:.1f})")
+  if e["escalated"]:
+    if e["alerts"] != 1:
+      bad.append(f"escalated with {e['alerts']} alerts (want 1)")
+    return bad
+  if e["cmd_min"] < e["decel"] - 0.05 or e["cmd_max"] > 0.05:
+    bad.append(f"cmd {e['cmd_min']:.2f}..{e['cmd_max']:.2f} outside [{e['decel']:.1f}, 0]")
+  if e["dur"] > PULSE_HOLD_MAX:
+    bad.append(f"{e['dur']:.0f}s pulse (brake hold)")
+  if e["coast_before"] is not None and (e["coast_before"] < PULSE_MIN_COAST or e["coast_cmd_min"] < -e["floor"] - 0.05):
+    bad.append(f"no coast before it ({e['coast_before']:.1f}s, min cmd {_fmt(e['coast_cmd_min'])})")
+  return bad
+
+
+def r_pulse(a: EpisodeAnalyzer, pulses: list[dict]):
+  faults = [(e, pulse_faults(e)) for e in pulses]
+  bad = [f for _, f in faults if f]
+  esc = [e for e in pulses if e["escalated"]]
+  e0 = pulses[-1]
+  detail = (f"pulse: {len(pulses) - len(bad)}/{len(pulses)} clean; started set+{_pct([e['v_over'] for e in pulses], 0.5):.1f} " +
+            f"(trigger {e0['trigger']:.1f}), released set+{_pct([e['v_over_end'] for e in pulses if e['v_over_end'] is not None], 0.5):.1f} " +
+            f"(release {e0['release']:.1f}), cmd >= {min(e['cmd_min'] for e in pulses if not e['escalated']) if len(esc) < len(pulses) else math.nan:.2f} " +
+            f"(bound {e0['decel']:.1f}), longest {max(e['dur'] for e in pulses):.0f}s")
+  if esc:
+    detail += (f"; ESCALATED {len(esc)}x at set+{max(e['v_over_esc'] for e in esc):.1f} (alerts {sum(e['alerts'] for e in esc)}) - " +
+               "the bounded pulse can't hold this grade (see C1)")
+  if bad:
+    detail += "; first fault: " + ", ".join(bad[0])
+  return (FAIL if bad else PASS if a.complete else None), detail
 
 
 def r_handback_feel(a: EpisodeAnalyzer):

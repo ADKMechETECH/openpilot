@@ -19,15 +19,17 @@ from openpilot.sunnypilot.selfdrive.test_console.status_io import CONSOLE_PARAMS
 # The only Params the session UI may write (Task 9 Part C: a deliberate, bounded widening of the UI's write scope).
 # Feature toggles the separately-validated, default-OFF, gated features read, plus the console's own keys. Notably NOT
 # AlphaLongitudinalEnabled (openpilot longitudinal: disables stock AEB on this car) — that stays in the Developer panel.
+# Task 11 added NoServiceBrakeOverspeedMode (maintain / pulse: the NSB2 A/B in session 8).
 UI_WRITABLE_TOGGLES = ("NonAdaptiveLongitudinal", "NoServiceBrakeHold", "NoServiceBrakeDecelFloor",
-                       "NoServiceBrakeOverspeedBackstop", "NoServiceBrakeOverspeedMargin", "ClutchShiftGate",
-                       "ClutchShiftGateGasReleaseHint", "ClutchReengageSmart", "EngineBrakePreferred", "GearAwareAccel",
-                       "DisengageOnAccelerator")
+                       "NoServiceBrakeOverspeedBackstop", "NoServiceBrakeOverspeedMargin", "NoServiceBrakeOverspeedMode",
+                       "ClutchShiftGate", "ClutchShiftGateGasReleaseHint", "ClutchReengageSmart", "EngineBrakePreferred",
+                       "GearAwareAccel", "DisengageOnAccelerator")
 UI_WRITABLE = frozenset(UI_WRITABLE_TOGGLES) | frozenset(CONSOLE_PARAMS)
 
 SHORT = {OP_LONG_PARAM: "op long", "NonAdaptiveLongitudinal": "non-adaptive", "NoServiceBrakeHold": "NSB",
          "NoServiceBrakeDecelFloor": "floor", "NoServiceBrakeOverspeedBackstop": "backstop",
-         "NoServiceBrakeOverspeedMargin": "margin", "ClutchShiftGate": "gate", "ClutchShiftGateGasReleaseHint": "gas hint",
+         "NoServiceBrakeOverspeedMargin": "margin", "NoServiceBrakeOverspeedMode": "mode",
+         "ClutchShiftGate": "gate", "ClutchShiftGateGasReleaseHint": "gas hint",
          "ClutchReengageSmart": "smart", "EngineBrakePreferred": "EBP", "GearAwareAccel": "gear-aware",
          "DisengageOnAccelerator": "DOA"}
 
@@ -35,12 +37,18 @@ SHORT = {OP_LONG_PARAM: "op long", "NonAdaptiveLongitudinal": "non-adaptive", "N
 def fmt_value(v) -> str:
   if isinstance(v, bool):
     return "ON" if v else "OFF"
+  if isinstance(v, str):
+    return v
+  if v is None:
+    return "unset"
   return f"{float(v):.1f}"
 
 
 def same_value(want, have) -> bool:
   if isinstance(want, bool):
     return bool(have) == want
+  if isinstance(want, str):
+    return isinstance(have, str) and have.strip().lower() == want
   try:
     return abs(float(have) - float(want)) < 1e-6
   except (TypeError, ValueError):

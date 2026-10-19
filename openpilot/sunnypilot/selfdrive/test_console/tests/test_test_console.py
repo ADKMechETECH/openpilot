@@ -446,6 +446,74 @@ class TestOtherEpisodes(OpenpilotTestCase):
     feed(b, sim.run(3.5, a_ego=-0.05))
     self.assertEqual(b.result()[0], FAIL, "backstop with no real braking")
 
+  def pulse_drive(self, a, sim, cycles=2, start=3.6, release=0.9, cmd=-1.0, coast_cmd=-0.3, pulse_s=4., coast_s=6.,
+                  escalate=False, alerts=1):
+    """Pulse-mode overspeed cycles as the planner logs them: no_service_brake_pulse phase events + the command."""
+    for _ in range(cycles):
+      feed(a, sim.run(coast_s, accel_cmd=coast_cmd))
+      sim.events = [("no_service_brake_pulse", {"phase": "pulsing", "prev": "coasting", "overspeed": start, "v_set": 13.4})]
+      feed(a, sim.run(pulse_s / 2, accel_cmd=cmd, a_ego=-0.5))
+      if escalate:
+        sim.events = [("no_service_brake_pulse", {"phase": "escalated", "prev": "pulsing", "overspeed": 6.75, "v_set": 13.4})]
+        feed(a, sim.run(0.1, accel_cmd=-1.2))
+        for _ in range(alerts):
+          feed(a, sim.run(0.5, alert="noServiceBrakeOverspeed", accel_cmd=-1.2))
+          feed(a, sim.run(0.5, alert="", accel_cmd=-1.2))
+      feed(a, sim.run(pulse_s / 2, accel_cmd=cmd if not escalate else -1.2, a_ego=-0.5))
+      sim.events = [("no_service_brake_pulse", {"phase": "coasting", "prev": "escalated" if escalate else "pulsing",
+                                                 "overspeed": release, "v_set": 13.4})]
+      feed(a, sim.run(0.5, accel_cmd=cmd * 0.5))  # rolling off
+
+  def test_backstop_pulse_mode(self):
+    c = ctx()
+    c.nsb_mode = "pulse"
+    a = make_analyzer(TESTS_BY_ID["NSB2"], c)
+    self.assertEqual(a.count, 2, "pulse mode needs two pulses (a coast between them)")
+    sim = Sim(v_ego=17.0, v_cruise=13.4, long_active=True, allow_brake=False)
+    self.pulse_drive(a, sim, cycles=1)
+    self.assertEqual(len(a.episodes), 1)
+    self.assertIsNone(a.result()[0], "one clean pulse: not complete yet")
+    self.pulse_drive(a, sim, cycles=1)
+    status, detail = a.result()
+    self.assertEqual(status, PASS, detail)
+    self.assertIn("2/2 clean", detail)
+    self.assertNotIn("ESCALATED", detail)
+    c.nsb_mode = "maintain"
+    self.assertEqual(a.count, 1)
+
+  def test_backstop_pulse_faults(self):
+    for kw, why in (({"start": 5.0}, "started at set+5.0"), ({"release": 2.5}, "released at set+2.5"),
+                    ({"cmd": -1.6}, "outside [-1.0, 0]"), ({"pulse_s": 30.}, "brake hold"),
+                    ({"coast_cmd": -0.8}, "no coast before it"), ({"coast_s": 0.2}, "no coast before it")):
+      c = ctx()
+      c.nsb_mode = "pulse"
+      a = make_analyzer(TESTS_BY_ID["NSB2"], c)
+      self.pulse_drive(a, Sim(v_ego=17.0, v_cruise=13.4, long_active=True), cycles=2, **kw)
+      status, detail = a.result()
+      self.assertEqual(status, FAIL, (kw, detail))
+      self.assertIn(why, detail, kw)
+
+  def test_backstop_pulse_escalation_flagged(self):
+    c = ctx()
+    c.nsb_mode = "pulse"
+    a = make_analyzer(TESTS_BY_ID["NSB2"], c)
+    sim = Sim(v_ego=17.0, v_cruise=13.4, long_active=True)
+    self.pulse_drive(a, sim, cycles=2, escalate=True)
+    status, detail = a.result()
+    self.assertEqual(status, PASS, detail)
+    self.assertIn("ESCALATED 2x", detail)
+    self.assertIn("alerts 2", detail)
+    b = make_analyzer(TESTS_BY_ID["NSB2"], c)
+    self.pulse_drive(b, Sim(v_ego=17.0, v_cruise=13.4, long_active=True), cycles=2, escalate=True, alerts=2)
+    self.assertEqual(b.result()[0], FAIL, "one alert per escalation")
+    # a disengage mid-pulse is not a scorable pulse
+    d = make_analyzer(TESTS_BY_ID["NSB2"], c)
+    sim = Sim(v_ego=17.0, v_cruise=13.4, long_active=True)
+    sim.events = [("no_service_brake_pulse", {"phase": "pulsing", "prev": "coasting", "overspeed": 3.6, "v_set": 13.4})]
+    feed(d, sim.run(1., accel_cmd=-1.))
+    feed(d, sim.run(1., long_active=False))
+    self.assertEqual(len(d.episodes), 0)
+
   def test_ebp_trims(self):
     a = make_analyzer(TESTS_BY_ID["E1"], ctx(EngineBrakePreferred=True))
     sim = Sim(long_active=True, a_coast=-0.4)

@@ -249,10 +249,16 @@ TESTS: tuple[TestSpec, ...] = (
            toggles=NSB_ON, session="8"),
   TestSpec("NSB2", 5, Kind.FEATURE, "Overspeed backstop",
            ("Long descent, engaged, NoServiceBrakeOverspeedBackstop ON: let the car run to set + 8 mph.",
-            "Braking must resume there - only as strong as C1."),
+            "Braking must resume there - only as strong as C1.",
+            "Task 11 pulse mode (NoServiceBrakeOverspeedMode pulse, set while disengaged): let it cycle twice - a brake " +
+            "pulse at set + 8 mph, released at set + 2 mph, coasting in between. Past set + 15 mph it escalates to full " +
+            "braking with one 'Overspeed: Take Over' alert (flagged)."),
            ("op_long", "long_active"), "episodes",
-           {"detector": "backstop", "count": 1},
-           "backstop", "braking resumed within 0.5 m/s of set+margin and reached -0.3 m/s^2 within 3 s",
+           {"detector": "backstop", "count": 1, "count_by": ("nsb_mode", {"pulse": 2})},
+           "backstop", "maintain: braking resumed within 0.5 m/s of set+margin and reached -0.3 m/s^2 within 3 s; " +
+           "pulse: every pulse starts within 0.5 m/s of set+trigger and releases within 0.5 m/s of set+release, command " +
+           "within [pulse decel, 0], coasts >= 1 s between pulses, no pulse > 20 s (provisional); an escalation is " +
+           "flagged and must show exactly one alert",
            BASE_FIELDS + LONG_FIELDS + ("allow_brake", "a_coast", "excess", "pitch"), prereqs=("NSB1", "C1"),
            toggles={**NSB_ON, "NoServiceBrakeOverspeedBackstop": True}, session="8"),
 
@@ -393,7 +399,7 @@ SESSIONS: tuple[Session, ...] = (
   Session("8", "No-service-brake", "Coast over set speed downhill (floors 0.3 and 0.0), then the overspeed backstop",
           OP_LONG + (("NonAdaptiveLongitudinal", True), ("NoServiceBrakeHold", True),
                      ("NoServiceBrakeOverspeedBackstop", True)), ("NSB1", "NSB2"), prereqs=("7",),
-          optional_toggles=(("NoServiceBrakeDecelFloor", (0.3, 0.0)),)),
+          optional_toggles=(("NoServiceBrakeDecelFloor", (0.3, 0.0)), ("NoServiceBrakeOverspeedMode", ("maintain", "pulse")))),
   Session("9", "Low-speed handback", "Handback feel, hold at a stop / hill, neutral while rolling, uphill handback",
           OP_LONG, ("H1", "H2", "H3", "H4"), prereqs=("5", "7")),
   Session("10", "Engine-brake pref.", "Gentle trims on engine braking; downhill; lead hand-off only with a helper car",

@@ -25,6 +25,13 @@ class Context:
   toggles: dict[str, bool] = field(default_factory=dict)
   nsb_floor: float = 0.3
   nsb_margin: float = 3.6
+  # NoServiceBrakeOverspeedMode and the pulse band, as the feature clamps them (no_service_brake.read_pulse_params)
+  nsb_mode: str = "maintain"
+  nsb_trigger: float = 3.6
+  nsb_release: float = 0.9
+  nsb_pulse_decel: float = -1.0
+  nsb_pulse_jerk: float = 1.5
+  nsb_ceiling: float = 6.7
   handback_ramp: float = 0.5
   ebp_coast_target: float = 0.0
 

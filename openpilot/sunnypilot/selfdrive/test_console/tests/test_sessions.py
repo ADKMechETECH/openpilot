@@ -138,6 +138,12 @@ class TestReadyCheck(OpenpilotTestCase):
     st = {t.param: t for t in self.states("8", {"NoServiceBrakeDecelFloor": 0.0})}
     self.assertEqual(next_value(st["NoServiceBrakeDecelFloor"]), 0.3)
     self.assertEqual(st["NoServiceBrakeDecelFloor"].label, "floor 0.0")
+    # Task 11: the overspeed mode is a string choice (maintain <-> pulse)
+    st = {t.param: t for t in self.states("8", {"NoServiceBrakeOverspeedMode": "maintain"})}
+    self.assertEqual(next_value(st["NoServiceBrakeOverspeedMode"]), "pulse")
+    self.assertEqual(st["NoServiceBrakeOverspeedMode"].label, "mode maintain")
+    st = {t.param: t for t in self.states("8", {"NoServiceBrakeOverspeedMode": "pulse"})}
+    self.assertEqual(next_value(st["NoServiceBrakeOverspeedMode"]), "maintain")
 
 
 class TestStatusDerivation(OpenpilotTestCase):
@@ -226,7 +232,8 @@ class TestUiWritePath(OpenpilotTestCase):
     self.assertEqual(set(UI_WRITABLE_TOGGLES), {
       "NonAdaptiveLongitudinal", "NoServiceBrakeHold", "NoServiceBrakeDecelFloor", "NoServiceBrakeOverspeedBackstop",
       "NoServiceBrakeOverspeedMargin", "ClutchShiftGate", "ClutchShiftGateGasReleaseHint", "ClutchReengageSmart",
-      "EngineBrakePreferred", "GearAwareAccel", "DisengageOnAccelerator"})
+      "EngineBrakePreferred", "GearAwareAccel", "DisengageOnAccelerator",
+      "NoServiceBrakeOverspeedMode"})  # + Task 11 (maintain / pulse A/B in session 8)
     self.assertEqual(UI_WRITABLE - set(UI_WRITABLE_TOGGLES), set(CONSOLE_PARAMS))
     self.assertTrue(all(k.startswith("TestConsole") for k in CONSOLE_PARAMS))
 

@@ -23,10 +23,11 @@ NAN = float("nan")
 V_CRUISE_UNSET_KPH = 250.     # carState.vCruise is km/h; 255 = unset
 
 # cloudlog events the console follows (emitted by the feature modules; see CLAUDE.md)
-WATCHED_EVENTS = ("clutch_shift_gate", "engine_brake_preferred", "no_service_brake_backstop",
+WATCHED_EVENTS = ("clutch_shift_gate", "engine_brake_preferred", "no_service_brake_backstop", "no_service_brake_pulse",
                   "manual_low_speed_handback", "engine_brake_coast")
 EBP_CAPACITY_WARNING = "engine_brake_preferred: car not slowing"
 HANDBACK_ALERT = "manualLowSpeedHandback"
+OVERSPEED_ALERT = "noServiceBrakeOverspeed"   # Task 11 pulse-mode escalation ("Overspeed: Take Over")
 # selfdriveState alert types that mean something went wrong with longitudinal/CAN during a capture
 FAULT_ALERTS = ("accFaulted", "controlsMismatch", "canError", "commIssue", "cruiseMismatch", "brakeUnavailable",
                 "steerTempUnavailable", "controlsdLagging", "pandaSafetyMismatch")
