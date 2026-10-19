@@ -16,6 +16,7 @@ from openpilot.selfdrive.controls.lib.longcontrol import LongControl, LongCtrlSt
 from openpilot.selfdrive.controls.lib.longitudinal_planner import LongitudinalPlanner
 from openpilot.selfdrive.controls.radard import _LEAD_ACCEL_TAU
 from openpilot.selfdrive.modeld.constants import ModelConstants
+from openpilot.sunnypilot.selfdrive.controls.lib.braking_urgency import braking_urgency
 from openpilot.sunnypilot.selfdrive.controls.lib.engine_brake_model import G, engine_rpm_at, estimate_coast_decel
 from openpilot.sunnypilot.selfdrive.controls.lib.engine_brake_preferred import EngineBrakePreferred, lead_urgent, \
   CAPACITY_TIME, RELEASE_HOLD, DEFAULT_HARD_FLOOR, HARD_FLOOR_RANGE, LEAD_TTC_RANGE, COAST_TARGET_RANGE
@@ -36,6 +37,18 @@ def setup(ebp=False, non_adaptive=False, nsb=False, **params):
     p.remove(k)
   for k, v in params.items():
     p.put(k, v)
+
+
+def urgency_for(CS, plan, radar, plan_ok=True, radar_ok=True, force_decel=False):
+  """What controlsd's controls_urgency() computes for these messages (Rule 5)."""
+  return braking_urgency(plan_ok=plan_ok, radar_ok=radar_ok, force_decel=force_decel, fcw=plan.fcw,
+                         stock_aeb=CS.stockAeb or CS.stockFcw, should_stop=plan.shouldStop, a_target=plan.aTarget,
+                         v_ego=CS.vEgo, radar=radar)
+
+
+def engaged(ebp, CS, plan, radar):
+  """One engaged controlsd frame, LoC in pid, flat road, urgency from the messages."""
+  return ebp.update(True, True, CS, plan, radar, urgency_for(CS, plan, radar), LongCtrlState.pid, 0.)
 
 
 class ManualSim:
@@ -105,6 +118,7 @@ class ManualSim:
     sm = {'radarState': radar, 'carState': self.car_state(), 'controlsState': control, 'carControl': cc, 'modelV2': model}
     for s in ('selfdriveState', 'vehicleParameters', 'carStateSP', 'liveMapDataSP', 'gpsLocation'):
       sm[s] = getattr(messaging.new_message(s), s)
+    sm['carStateSP'].clutchSignalValid, sm['carStateSP'].gearRaw = True, self.gear   # live GEARBOX_ALT_2
     return sm
 
   def plan_msg(self):
@@ -132,7 +146,8 @@ class ManualSim:
         limits = apply_brake_floor((ACCEL_MIN, ACCEL_MAX), plan.allowBrake, True, self.nsb_enabled, self.nsb_floor)
         suppress = False
         if self.ebp is not None:
-          suppress = self.ebp.update(True, CS, plan, True, radar, True, self.force_decel, self.loc.long_control_state,
+          urgency = urgency_for(CS, plan, radar, force_decel=self.force_decel)
+          suppress = self.ebp.update(True, True, CS, plan, radar, urgency, self.loc.long_control_state,
                                      float(self.grade) if self.pitch else None)
           limits = self.ebp.limit_accel(limits)
         cmd = float(self.loc.update(True, CS, plan.aTarget, plan.shouldStop, limits))
@@ -145,7 +160,8 @@ class ManualSim:
         self.t += DT_CTRL
         self.log.append({"t": self.t, "cmd": cmd, "speed": self.speed, "a_target": plan.aTarget, "suppress": suppress,
                          "gap": self.lead_pos - self.distance if self.lead else None, "fcw": plan.fcw,
-                         "reason": self.ebp.reason if self.ebp else None, "lower": limits[0]})
+                         "reason": self.ebp.reason if self.ebp else None, "lower": limits[0],
+                         "urgency": urgency_for(CS, plan, radar, force_decel=self.force_decel)})
     return self.log
 
 
@@ -199,7 +215,7 @@ class TestEngineBrakePreferred(OpenpilotTestCase):
     self.assertEqual([l["cmd"] for l in on], [l["cmd"] for l in off], "suppression must be disabled entirely")
     self.assertLess(min(l["cmd"] for l in on), -1.0)
     closing = [l for l in on if l["gap"] is not None and l["speed"] - 15. > 1.0]
-    self.assertTrue(closing and all(l["reason"] in ("lead", "hard_floor") for l in closing))
+    self.assertTrue(closing and all(l["reason"] in ("lead", "hard_floor", "urgency") for l in closing))
 
   def test_lead_starts_braking_hands_off_to_brakes(self):
     # coasting behind a comfortable lead, then the lead brakes hard: suppression must end and braking pass through
@@ -219,7 +235,7 @@ class TestEngineBrakePreferred(OpenpilotTestCase):
     CP, _ = make_cp()
     setup(ebp=True)
     ebp = EngineBrakePreferred(CP, Params())
-    ebp.update(False, ManualSim(gear=1).car_state(), None, True, None, True, False, LongCtrlState.pid, 0.)
+    ebp.update(False, False, ManualSim(gear=1).car_state(), None, None, None, LongCtrlState.pid, 0.)
     sim = ManualSim(speed=12., gear=1)
     CS, radar = sim.car_state(), sim.radar()
     plan = messaging.new_message('longitudinalPlan').longitudinalPlan
@@ -227,14 +243,14 @@ class TestEngineBrakePreferred(OpenpilotTestCase):
       ebp.reset()
       plan.aTarget = demand
       plan.accels = [demand] * len(ModelConstants.T_IDXS)
-      self.assertEqual(ebp.update(True, CS, plan, True, radar, True, False, LongCtrlState.pid, 0.), demand == -0.3,
+      self.assertEqual(engaged(ebp, CS, plan, radar), demand == -0.3,
                        f"demand {demand}")
       self.assertEqual(ebp.limit_accel((-3.5, 2.0)), (0.0, 2.0) if demand == -0.3 else (-3.5, 2.0))
     # a hard decel planned within the next second also rules it out, even if aTarget itself is gentle
     ebp.reset()
     plan.aTarget = -0.3
     plan.accels = [-0.3, -0.8, -1.6] + [-2.0] * (len(ModelConstants.T_IDXS) - 3)
-    self.assertFalse(ebp.update(True, CS, plan, True, radar, True, False, LongCtrlState.pid, 0.))
+    self.assertFalse(engaged(ebp, CS, plan, radar))
     self.assertEqual(ebp.reason, "hard_floor")
 
   def test_toggle_off_identical_to_stock(self):
@@ -255,7 +271,7 @@ class TestEngineBrakePreferred(OpenpilotTestCase):
     on = sim.run(16.)
     releases = [l for prev, l in zip(on, on[1:], strict=False) if prev["suppress"] and not l["suppress"]]
     self.assertTrue(releases, "a backstop must end the suppression")
-    self.assertTrue({l["reason"] for l in releases} <= {"lead", "capacity", "demand"}, releases)
+    self.assertTrue({l["reason"] for l in releases} <= {"lead", "urgency", "capacity", "demand"}, releases)
     self.assertTrue(brake_cmds(on), "and real braking then passes")
     first_sup = next(l["t"] for l in on if l["suppress"])
     self.assertLess(releases[0]["t"] - first_sup, 2.0)
@@ -276,7 +292,7 @@ class TestEngineBrakePreferred(OpenpilotTestCase):
     sim = ManualSim(true_eb_scale=0.0, **GENTLE_TRIM)
     sim.run(2.)
     self.assertTrue(sim.ebp.capacity_failed)
-    sim.ebp.update(False, sim.car_state(), sim.plan_msg(), True, sim.radar(), True, False, LongCtrlState.off, 0.)
+    sim.ebp.update(False, False, sim.car_state(), sim.plan_msg(), sim.radar(), None, LongCtrlState.off, 0.)
     self.assertFalse(sim.ebp.capacity_failed, "re-engaging clears it")
 
   def test_downhill_grade_is_counted(self):
@@ -328,7 +344,7 @@ class TestEngineBrakePreferred(OpenpilotTestCase):
     sim.ebp.read_params()
     sim.run(3.)
     self.assertFalse(sim.ebp.enabled, "must not switch on mid-engagement")
-    sim.ebp.update(False, sim.car_state(), sim.plan_msg(), True, sim.radar(), True, False, LongCtrlState.off, 0.)
+    sim.ebp.update(False, False, sim.car_state(), sim.plan_msg(), sim.radar(), None, LongCtrlState.off, 0.)
     self.assertTrue(sim.ebp.enabled)
 
   def test_invalid_inputs_and_stopping_never_suppress(self):
@@ -339,27 +355,30 @@ class TestEngineBrakePreferred(OpenpilotTestCase):
     CS, radar = sim.car_state(), sim.radar()
     plan = messaging.new_message('longitudinalPlan').longitudinalPlan
     plan.aTarget = -0.2
-    ok = {"plan_valid": True, "radar_valid": True, "force_decel": False, "lcs": LongCtrlState.pid, "pitch": 0.}
-    cases = {"plan_invalid": {"plan_valid": False}, "radar_invalid": {"radar_valid": False},
-             "stopping": {"lcs": LongCtrlState.stopping}, "no_pitch": {"pitch": float('nan')}}
-    for reason, bad in cases.items():
-      a = {**ok, **bad}
-      ebp.reset()
-      self.assertFalse(ebp.update(True, CS, plan, a["plan_valid"], radar, a["radar_valid"], a["force_decel"], a["lcs"],
-                                  a["pitch"]), reason)
-      self.assertEqual(ebp.reason, reason)
+    ok = {"plan_valid": True, "radar_valid": True, "force_decel": False, "lcs": LongCtrlState.pid, "pitch": 0.,
+          "clutch_valid": True}
+    cases = {"urgency": [{"plan_valid": False}, {"radar_valid": False}, {"force_decel": True}],
+             "stopping": [{"lcs": LongCtrlState.stopping}], "no_pitch": [{"pitch": float('nan')}, {"pitch": None}],
+             "no_clutch_signal": [{"clutch_valid": False}]}
+    for reason, bads in cases.items():
+      for bad in bads:
+        a = {**ok, **bad}
+        ebp.reset()
+        urgency = urgency_for(CS, plan, radar, a["plan_valid"], a["radar_valid"], a["force_decel"])
+        self.assertFalse(ebp.update(True, True, CS, plan, radar, urgency, a["lcs"], a["pitch"], a["clutch_valid"]), bad)
+        self.assertEqual(ebp.reason, reason, bad)
     for field in ("fcw",):
       ebp.reset()
       setattr(plan, field, True)
-      self.assertFalse(ebp.update(True, CS, plan, True, radar, True, False, LongCtrlState.pid, 0.))
+      self.assertFalse(engaged(ebp, CS, plan, radar))
       setattr(plan, field, False)
     for field in ("stockAeb", "stockFcw"):
       ebp.reset()
       setattr(CS, field, True)
-      self.assertFalse(ebp.update(True, CS, plan, True, radar, True, False, LongCtrlState.pid, 0.))
+      self.assertFalse(engaged(ebp, CS, plan, radar))
       setattr(CS, field, False)
     ebp.reset()
-    self.assertTrue(ebp.update(True, CS, plan, True, radar, True, False, LongCtrlState.pid, 0.), "sanity: valid case")
+    self.assertTrue(engaged(ebp, CS, plan, radar), "sanity: valid case")
     # an upstream upper limit below the coast target (forced decel) is never widened
     self.assertEqual(ebp.limit_accel((-3.5, -0.5)), (-3.5, -0.5))
 
@@ -372,7 +391,7 @@ class TestEngineBrakePreferred(OpenpilotTestCase):
     CS, radar = sim.car_state(), sim.radar()
     plan = messaging.new_message('longitudinalPlan').longitudinalPlan
     plan.aTarget = -1.0
-    self.assertFalse(ebp.update(True, CS, plan, True, radar, True, False, LongCtrlState.pid, 0.))
+    self.assertFalse(engaged(ebp, CS, plan, radar))
     self.assertLess(-1.0, ebp.a_eb_credited * 2, "sanity: demand well past the credited engine braking")
     self.assertEqual(ebp.limit_accel((-3.5, 2.0)), (-3.5, 2.0))
 
@@ -384,13 +403,13 @@ class TestEngineBrakePreferred(OpenpilotTestCase):
     CS, radar = sim.car_state(), sim.radar()
     plan = messaging.new_message('longitudinalPlan').longitudinalPlan
     plan.aTarget = -0.2
-    self.assertTrue(ebp.update(True, CS, plan, True, radar, True, False, LongCtrlState.pid, 0.))
+    self.assertTrue(engaged(ebp, CS, plan, radar))
     plan.aTarget = -1.0  # steeper than engine braking in 6th
-    self.assertFalse(ebp.update(True, CS, plan, True, radar, True, False, LongCtrlState.pid, 0.))
+    self.assertFalse(engaged(ebp, CS, plan, radar))
     self.assertEqual(ebp.reason, "demand")
     plan.aTarget = -0.2
     n = 0
-    while not ebp.update(True, CS, plan, True, radar, True, False, LongCtrlState.pid, 0.):
+    while not engaged(ebp, CS, plan, radar):
       n += 1
     self.assertAlmostEqual(n * DT_CTRL, RELEASE_HOLD, delta=2 * DT_CTRL)
 

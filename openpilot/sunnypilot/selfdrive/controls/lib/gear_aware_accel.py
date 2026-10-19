@@ -12,11 +12,13 @@ the driveline is stiff and a small accel change is a big torque change at the en
   - Falling accel through the power -> coast span (a_cruise still above the engine-brake level, and the target is one
     engine braking can cover): the same gear scale, so the lift-off blends toward the engine-brake decel instead of
     snapping (driveline lash at the torque reversal is harshest in 1st/2nd).
-  - Falling accel when braking is needed (target below the credited engine-brake decel), FCW, or an urgent lead
-    (same test as EngineBrakePreferred): stock rate, never slower braking.
-Scales are <= 1.0 (never looser than stock). OFF, automatic, stock ACC, or gear unknown (clutch in, neutral, no RPM)
--> 1.0 = stock. Only the cruise (set-speed) candidate's rate limit is scaled: the lead MPC (its jerk cost, and so FCW)
-is untouched, so lead-following braking response is exactly stock.
+  - Falling accel when braking is needed (target below the credited engine-brake decel): stock rate.
+  - Any Rule-5 urgency (braking_urgency: FCW, a close/closing lead, forceDecel, a hard/stop request, invalid inputs):
+    stock rate both ways, the same frame (Task 12).
+Scales are <= 1.0 (never looser than stock). OFF, automatic, stock ACC, gear unknown (clutch in, neutral, no RPM), no
+calibrated pitch (Task 12 C-11) or no live clutch signal -> 1.0 = stock. Latches only while openpilot is disengaged.
+Only the cruise (set-speed) candidate's rate limit is scaled: the lead MPC (its jerk cost, and so FCW) is untouched, so
+lead-following braking response is exactly stock.
 """
 import math
 
@@ -24,8 +26,7 @@ from opendbc.car import structs
 from openpilot.common.params import Params
 from openpilot.common.realtime import DT_MDL
 from openpilot.sunnypilot.selfdrive.controls.lib.engine_brake_model import G, estimate_coast_decel, infer_gear
-from openpilot.sunnypilot.selfdrive.controls.lib.engine_brake_preferred import CAPACITY_MARGIN, DEFAULT_LEAD_CLOSING, \
-                                                                               DEFAULT_LEAD_TTC, lead_urgent
+from openpilot.sunnypilot.selfdrive.controls.lib.engine_brake_preferred import CAPACITY_MARGIN
 
 TransmissionType = structs.CarParams.TransmissionType
 
@@ -48,28 +49,26 @@ class GearAwareAccel:
   def jerk_scale(gear: int) -> float:
     return JERK_SCALE_BY_GEAR[gear - 1] if 1 <= gear <= len(JERK_SCALE_BY_GEAR) else 1.0
 
-  def update(self, long_inactive: bool, CS, pitch: float | None, fcw: bool, radar, a_cruise_prev: float,
-             cruise_target: float) -> tuple[float, float]:
-    """Call every planner frame. Returns (rise, fall) scale factors for get_cruise_accel's jerk limit."""
+  def update(self, engaged: bool, CS, pitch: float | None, urgency: str | None, a_cruise_prev: float,
+             cruise_target: float, clutch_valid: bool = True) -> tuple[float, float]:
+    """Call every planner frame. Returns (rise, fall) scale factors for get_cruise_accel's jerk limit.
+    engaged: selfdriveState.enabled (latching); urgency: braking_urgency()."""
     if self._frame % int(1. / DT_MDL) == 0:
       self._enabled_requested = self.available and self.params.get_bool("GearAwareAccel")
     self._frame += 1
-    if long_inactive:  # never switches mid-engagement
+    if not engaged:  # never switches mid-engagement
       self.enabled = self._enabled_requested
 
-    self.gear = infer_gear(CS.deprecated.engineRpm, CS.vEgo, CS.deprecated.clutchPressed) if self.enabled else 0
+    usable = self.enabled and clutch_valid and urgency is None and pitch is not None and math.isfinite(pitch)
+    self.gear = infer_gear(CS.deprecated.engineRpm, CS.vEgo, CS.deprecated.clutchPressed) if usable else 0
     if self.gear == 0:
       self.scales = STOCK
       return self.scales
 
     scale = self.jerk_scale(self.gear)
-    grade = pitch if pitch is not None and math.isfinite(pitch) else 0.
-    a_gravity = -G * math.sin(grade)
-    a_eb = estimate_coast_decel(self.gear, CS.deprecated.engineRpm, CS.vEgo, grade)
+    a_gravity = -G * math.sin(pitch)
+    a_eb = estimate_coast_decel(self.gear, CS.deprecated.engineRpm, CS.vEgo, pitch)
     a_eb_credited = CAPACITY_MARGIN * (a_eb - a_gravity) + a_gravity
-
-    urgent = fcw or lead_urgent(radar.leadOne, CS.vEgo, DEFAULT_LEAD_TTC, DEFAULT_LEAD_CLOSING) or \
-             lead_urgent(radar.leadTwo, CS.vEgo, DEFAULT_LEAD_TTC, DEFAULT_LEAD_CLOSING)
     coast_span = a_cruise_prev > a_eb_credited and cruise_target >= a_eb_credited
-    self.scales = (scale, scale if coast_span and not urgent else 1.0)
+    self.scales = (scale, scale if coast_span else 1.0)
     return self.scales

@@ -25,6 +25,8 @@ import json
 import logging
 import math
 import os
+import queue
+import threading
 import time
 from logging.handlers import RotatingFileHandler
 
@@ -131,6 +133,7 @@ COAST_MAX_EVENT = 30.0           # s, longer coasts are flushed in chunks
 COAST_SAMPLE_PERIOD = 0.1        # s, ~10 Hz is plenty for a decel fit
 COAST_LOG_MAX_BYTES = 1024 * 1024
 COAST_LOG_BACKUPS = 10           # <= ~11 MB on disk
+COAST_QUEUE_MAX = 32             # finished events waiting for the writer thread
 
 
 def coast_log_dir() -> str:
@@ -146,6 +149,8 @@ class CoastEventLogger:
     feedforward would contaminate the coast), no stock AEB/FCW, no openpilot FCW, rolling.
   One JSON line per event (one gear per event) in a rotating log, plus a cloudlog summary event in the rlog.
   Raw rpm/speed ratio is logged too, so the fit can re-bin gears if the seed ratios turn out wrong.
+  File I/O runs on a background writer thread (Task 12 B5): the 20 Hz plannerd loop only enqueues a finished line
+  (a full queue drops the event and logs it, it never blocks).
   TODO(on-car): on-car phase — fit per-gear/rpm decel table from these logs, replace the seed values.
   """
 
@@ -156,6 +161,9 @@ class CoastEventLogger:
     self._logger: logging.Logger | None = None
     self._failed = False
     self.events_written = 0
+    self.events_dropped = 0
+    self._queue: queue.Queue[str] = queue.Queue(maxsize=COAST_QUEUE_MAX)
+    self._writer: threading.Thread | None = None
     self._reset()
 
   def _reset(self) -> None:
@@ -191,14 +199,38 @@ class CoastEventLogger:
                "fields": ["t", "rpm", "v_ego", "ratio", "a_ego", "pitch"], "samples": self.samples}
       cloudlog.event("engine_brake_coast", gear=self.gear, duration=round(self.duration, 2), n=len(self.samples),
                      a_ego_mean=round(float(np.mean(a)), 3), v_start=self.samples[0][2], v_end=self.samples[-1][2])
-      logger = self._file_logger()
-      if logger is not None:
-        try:
-          logger.info(json.dumps(event, separators=(",", ":")))
-          self.events_written += 1
-        except (OSError, ValueError):
-          cloudlog.exception("engine_brake_coast: write failed")
+      self._enqueue(json.dumps(event, separators=(",", ":")))
     self._reset()
+
+  def _enqueue(self, line: str) -> None:
+    if self._writer is None:
+      self._writer = threading.Thread(target=self._write_loop, name="engine_brake_coast_writer", daemon=True)
+      self._writer.start()
+    try:
+      self._queue.put_nowait(line)
+    except queue.Full:
+      self.events_dropped += 1
+      cloudlog.warning("engine_brake_coast: writer behind, event dropped")
+
+  def _write_loop(self) -> None:
+    while True:
+      line = self._queue.get()
+      try:
+        logger = self._file_logger()
+        if logger is not None:
+          logger.info(line)
+          self.events_written += 1
+      except (OSError, ValueError):
+        cloudlog.exception("engine_brake_coast: write failed")
+      finally:
+        self._queue.task_done()
+
+  def drain(self, timeout: float = 2.0) -> bool:
+    """Tests / shutdown: wait until every queued event is on disk."""
+    end = time.monotonic() + timeout
+    while self._queue.unfinished_tasks and time.monotonic() < end:
+      time.sleep(0.005)
+    return not self._queue.unfinished_tasks
 
   @staticmethod
   def is_coasting(CS, long_active: bool, fcw: bool) -> int:
