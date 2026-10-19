@@ -43,9 +43,11 @@ def ctx(**toggles) -> Context:
   return Context(profile=CIVIC, manual=True, op_long=True, toggles={**ALL_ON, **toggles})
 
 
-def calibrated(c: Context) -> Context:
-  """The coast model calibrated (E0b complete): the rules that judge braking against it may PASS (Task 12 D3)."""
-  c.results = {"E0b": {"complete": True, "status": "CAPTURED"}}
+def calibrated(c: Context, bias: float = 0.) -> Context:
+  """The coast model FIT (Task 13 B1): E0b complete with a per-gear correction saved, so the rules that judge braking
+  against the model may PASS. bias = the fit's correction (a_ego - seed) for every gear."""
+  c.results = {"E0b": {"complete": True, "status": "CAPTURED",
+                       "coast_fit": {"version": 1, "gears": {str(g): {"bias": bias, "n": 1000} for g in range(1, 7)}}}}
   return c
 
 
@@ -273,7 +275,7 @@ class TestSegments(OpenpilotTestCase):
   def run_c1(self, c, a_ego, a_coast, cmd=-1.0):
     a = make_analyzer(TESTS_BY_ID["C1"], c)
     for _ in range(5):
-      sim = Sim(v_ego=15., accel_cmd=cmd, a_ego=0., a_coast=a_coast)
+      sim = Sim(v_ego=15., accel_cmd=cmd, accel_sent=cmd, a_ego=0., a_coast=a_coast)
       feed(a, sim.run(0.5, a_ego=0.), ok=True)      # actuator lag: excluded by settle
       feed(a, sim.run(1.5, a_ego=a_ego), ok=True)
       feed(a, sim.run(0.3), ok=False)
@@ -354,11 +356,11 @@ class TestSegments(OpenpilotTestCase):
       with self.subTest(calibrated=cal):
         c = calibrated(ctx()) if cal else ctx()
         a = make_analyzer(spec, c)
-        sim = Sim(v_ego=20., accel_out=-0.3, a_ego=0.1, a_coast=0.05, excess=0.05)
+        sim = Sim(v_ego=20., accel_out=-0.3, accel_sent=-0.3, a_ego=0.1, a_coast=0.05, excess=0.05)
         feed(a, sim.run(31.), ok=True)
         self.assertIsNone(a.result()[0], "one floor done, 0.0 still to go")
         c.nsb_floor = 0.0
-        feed(a, sim.run(31., accel_out=0.0), ok=True)
+        feed(a, sim.run(31., accel_out=0.0, accel_sent=0.0), ok=True)
         self.assertEqual(a.result()[0], PASS if cal else CAPTURED, "provisional until E0b (Task 12 D3)")
         feed(a, sim.run(2., accel_out=-0.2), ok=True)
         self.assertEqual(a.result()[0], FAIL, "command below -floor: no calibration needed")
@@ -590,7 +592,7 @@ class TestOtherEpisodes(OpenpilotTestCase):
   def test_ebp_trims(self):
     b = make_analyzer(TESTS_BY_ID["E1"], ctx(EngineBrakePreferred=True))   # uncalibrated: provisional (Task 12 D3)
     a = make_analyzer(TESTS_BY_ID["E1"], calibrated(ctx(EngineBrakePreferred=True)))
-    sim = Sim(long_active=True, a_coast=-0.4)
+    sim = Sim(long_active=True, a_coast=-0.4, accel_sent=0.0)
     for _ in range(5):
       sim.events = [("engine_brake_preferred", {"active": True, "gear": 4})]
       samples = list(sim.run(2., accel_out=0.0, a_ego=-0.35))

@@ -60,7 +60,7 @@ STATE_TYPES = {"selected": _STR, "armed": _BOOL, "state": _STR, "qualifying": _B
                "progress": _STR, "frac": _NUM, "status": _STR, "detail": _STR, "stamp": _NUM, "mono": _NUM,
                "exited": _BOOL, "window": _NUM, "elapsed": _NUM, "version": _NUM, "error": _STR}
 RESULT_TYPES = {"status": _STR, "complete": _BOOL, "progress": _STR, "frac": _NUM, "detail": _STR, "runs": _NUM,
-                "window": _NUM, "background": _BOOL}
+                "window": _NUM, "background": _BOOL, "coast_fit": (dict,)}
 
 
 def _typed(d: dict, types: dict) -> dict:

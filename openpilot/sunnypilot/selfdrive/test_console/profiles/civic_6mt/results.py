@@ -21,13 +21,45 @@ HANDBACK_JERK_MAX = 2.5      # m/s^3, provisional "no lurch" bound
 PULSE_HOLD_MAX = 20.         # s, provisional: a single overspeed pulse longer than this is a brake hold, not a pulse
 PULSE_MIN_COAST = 1.0        # s, provisional: the coast between two pulses must last at least this
 BAND_TOL = 0.5               # m/s: pulse start / release vs set + trigger / set + release
-COAST_CAL_TEST = "E0b"       # flat coasts per gear: until it is complete the coast model is the uncalibrated seed
+COAST_CAL_TEST = "E0b"       # flat coasts per gear: the coast model is FIT to these (Task 13 B1), else it is the seed
+FIT_MIN_SAMPLES = 300        # stats samples (~3 s) per gear for a usable per-gear fit
+SENT_TOL = 0.25              # m/s^2: the ACCEL_COMMAND seen on the bus must be within this of the command (C1)
 RESUME_BOUND = REENGAGE_DELAY + 1.0   # s: openpilot must resume within this after the clutch closes (G2, Task 12 D3)
 COVERAGE_MIN = 0.8           # S2: share of shifts per gear whose bite was actually measured
 
 
+def coast_fit(ctx) -> dict[int, float] | None:
+  """Task 13 B1 [D-03, D-12]: the per-gear coast-model correction (a_ego - seed, m/s^2) FIT from the completed E0b
+  capture — not merely "E0b complete" (finishing E0b only captures; nothing refit the seed). None until every gear has a
+  usable fit; then the braking rules judge against seed + correction instead of the seed."""
+  entry = ctx.results.get(COAST_CAL_TEST, {})
+  fit = entry.get("coast_fit") if entry.get("complete") else None
+  gears = fit.get("gears") if isinstance(fit, dict) else None
+  if not isinstance(gears, dict):
+    return None
+  out = {}
+  for g in range(1, len(GEAR_RATIOS) + 1):
+    e = gears.get(str(g))
+    if not isinstance(e, dict) or not isinstance(e.get("bias"), (int, float)) or not math.isfinite(e["bias"]) or \
+       not isinstance(e.get("n"), (int, float)) or e["n"] < FIT_MIN_SAMPLES:
+      return None
+    out[g] = float(e["bias"])
+  return out
+
+
 def coast_calibrated(ctx) -> bool:
-  return bool(ctx.results.get(COAST_CAL_TEST, {}).get("complete"))
+  return coast_fit(ctx) is not None
+
+
+def fit_offset(a, key=None) -> float:
+  """The fit's correction averaged over a segment analyzer's samples (by inferred gear); NaN if any sample was in a gear
+  without a fit (gear 0: clutch in / neutral / no rpm) — then the coast estimate for those samples isn't known."""
+  fit = coast_fit(a.ctx)
+  counts = a.gear_counts(key)
+  n = sum(counts.values())
+  if fit is None or not n or any(g not in fit for g in counts):
+    return math.nan
+  return sum(fit[g] * c for g, c in counts.items()) / n
 
 
 def _assist_sent(a) -> str:
@@ -41,18 +73,28 @@ def _assist_sent(a) -> str:
 def r_brake_strength(a: SegmentAnalyzer):
   """Task 12 D3 [D-03]: the share of the requested decel BEYOND coasting that the car delivered,
   (a_ego - a_coast) / (cmd - a_coast) - a raw a_ego / cmd counted engine braking and gravity as braking (a 3 % uphill in
-  3rd "passed" with zero service braking). Only meaningful with a calibrated coast model: CAPTURED until E0b is done."""
+  3rd "passed" with zero service braking).
+  Task 13 B1: a_coast is the coast model FIT to the E0b capture (seed + per-gear correction); with no fit it is the seed
+  and the result is CAPTURED (a 20 % seed error near the coast level read as 80 % "delivered" with zero service braking).
+  The sent ACCEL_COMMAND (raw tap) is part of the verdict: PASS needs the request seen on the bus; a request that isn't
+  there is a FAIL of its own. The brake-assist bit is reported (on this Civic it is the idle-stop-allow bit, not a brake
+  flag - see CLAUDE.md), not scored."""
   if not a.segments:
     return None, ""
-  cmd, acc, coast = a.pooled("accel_cmd"), a.pooled("a_ego"), a.pooled("a_coast")
+  cmd, acc, seed, sent = a.pooled("accel_cmd"), a.pooled("a_ego"), a.pooled("a_coast"), a.pooled("accel_sent")
+  coast = seed + fit_offset(a)
   want = cmd - coast
   ratio = (acc - coast) / want if math.isfinite(coast) and want < -0.05 else math.nan
   detail = (f"delivered {_fmt(ratio * 100, 0)}% of the braking beyond coasting (cmd {cmd:.2f}, a_ego {acc:.2f}, " +
-            f"coast est {_fmt(coast)}); {_assist_sent(a)}")
+            f"coast fit {_fmt(coast)}, seed {_fmt(seed)}); {_assist_sent(a)}")
   if not coast_calibrated(a.ctx):
-    return CAPTURED, detail + f" [provisional: {COAST_CAL_TEST} coast calibration not complete]"
+    return CAPTURED, detail + f" [provisional: coast model not fit ({COAST_CAL_TEST})]"
+  if not math.isfinite(sent):
+    return CAPTURED, detail + " [sent accel not seen: can't confirm the request reached the bus]"
+  if sent > cmd + SENT_TOL:
+    return FAIL, detail + " - the braking request was not on the bus as commanded"
   if not math.isfinite(ratio):
-    return CAPTURED, detail + " [no usable coast estimate / request within coasting]"
+    return CAPTURED, detail + " [no fitted coast estimate for these gears / request within coasting]"
   return (PASS if ratio >= 0.5 else FAIL), detail + ("" if ratio >= 0.5 else " - weak/no braking (PR #2050)")
 
 
@@ -242,24 +284,35 @@ def r_overset_brake(a: SegmentAnalyzer):
 
 
 def r_nsb_floor(a: SegmentAnalyzer):
-  parts, cmd_ok, coast_ok = [], True, True
+  parts, cmd_ok, coast_ok, sent_ok, known = [], True, True, True, True
   for key in a.keys:
     if not a.by_key(key):
       continue
     floor = float(key)
-    out_min, exc = a.extreme("accel_out", min, key), a.pooled("excess", key)
-    good_cmd, good_coast = out_min >= -floor - 0.01, not (exc < -0.3)
+    out_min, sent_min = a.extreme("accel_out", min, key), a.extreme("accel_sent", min, key)
+    exc = a.pooled("excess", key) - fit_offset(a, key)   # Task 13 B1: vs the FIT coast model (NaN without a fit)
+    # the bus carried braking past the floor (raw tap), or the command did: no calibration needed to call either
+    good_cmd = out_min >= -floor - 0.01 and not (sent_min < -floor - 0.01)
+    good_coast = not (exc < -0.3)
     cmd_ok &= good_cmd
     coast_ok &= good_coast
-    parts.append(f"floor {key}: min out {out_min:.2f}, excess {_fmt(exc)} {'✓' if good_cmd and good_coast else '×'}")
+    sent_ok &= math.isfinite(sent_min)
+    known &= math.isfinite(exc)   # a gear without a fit (or no rpm) -> no coast estimate -> unknown, never "clean"
+    parts.append(f"floor {key}: min out {out_min:.2f}, min sent {_fmt(sent_min)}, excess vs fit {_fmt(exc)} " +
+                 f"{'✓' if good_cmd and good_coast else '×'}")
   if not parts:
     return None, ""
   detail = "; ".join(parts) + f"; {_assist_sent(a)}"
-  if not cmd_ok:   # the command itself broke the floor: no calibration needed to call that
+  if not cmd_ok:
     return FAIL, detail
-  # Task 12 D3 [D-11]: "stayed off the brakes" is judged from a_ego vs the coast model - provisional until E0b
+  # Task 12 D3 [D-11] / Task 13 B1: "stayed off the brakes" is judged from a_ego vs the FIT coast model, and needs the
+  # sent accel seen on the bus - provisional (CAPTURED) until both exist
   if not coast_calibrated(a.ctx):
-    return (CAPTURED if a.complete else None), detail + f" [provisional: {COAST_CAL_TEST} not complete]"
+    return (CAPTURED if a.complete else None), detail + f" [provisional: coast model not fit ({COAST_CAL_TEST})]"
+  if not sent_ok:
+    return (CAPTURED if a.complete else None), detail + " [sent accel not seen on the bus]"
+  if coast_ok and not known:
+    return (CAPTURED if a.complete else None), detail + " [no fitted coast estimate for these samples' gears]"
   return (PASS if coast_ok and a.complete else FAIL if not coast_ok else None), detail
 
 
@@ -364,28 +417,51 @@ def r_ratio_check(a: SegmentAnalyzer):
 
 
 def r_coast_fit(a: SegmentAnalyzer):
+  """E0a / E0b characterization. Task 13 B1: when E0b (flat) completes, it FITS the coast model: per gear, the mean of
+  a_ego - seed over its flat-coast samples, saved with the result (coast_fit) - what C1 / NSB1 / E1 then judge against."""
   parts = []
   for g in a.keys:
     if not a.by_key(g):
       continue
     parts.append(f"g{g} a {a.pooled('a_ego', g):.2f} (model {_fmt(a.pooled('a_coast', g))}, pitch {a.pooled('pitch', g):+.3f})")
+  a.data.pop("coast_fit", None)
+  if a.spec.id == COAST_CAL_TEST and a.complete:
+    gears = {}
+    for g in a.keys:
+      n = sum(seg.cnts.get("excess", 0) for seg in a.by_key(g))
+      bias = a.pooled("excess", g)
+      if n >= FIT_MIN_SAMPLES and math.isfinite(bias):
+        gears[str(g)] = {"bias": round(bias, 4), "n": n}
+    a.data["coast_fit"] = {"version": 1, "gears": gears}
+    parts.append("fit " + " ".join(f"g{g} {v['bias']:+.2f}" for g, v in gears.items()))
   return (CAPTURED, "; ".join(parts)) if parts else (None, "")
 
 
 def r_ebp_trims(a: EpisodeAnalyzer):
   if not a.episodes:
     return None, ""
-  hard = [e for e in a.episodes if e["capacity"] or e["out_min"] < a.ctx.ebp_coast_target - 0.01]
-  soft = [e for e in a.episodes if e["excess_min"] < -0.3]   # judged against the coast model
+  fit = coast_fit(a.ctx)
   sent = [e.get("sent_min", math.nan) for e in a.episodes]
+  # Task 13 B1: the sent accel (raw tap) below the coast target is a brake request on the bus - a FAIL of its own
+  hard = [e for e in a.episodes if e["capacity"] or e["out_min"] < a.ctx.ebp_coast_target - 0.01 or
+          e.get("sent_min", math.nan) < a.ctx.ebp_coast_target - 0.01]
+  # judged against the FIT coast model (the episode's gear); a gear without a fit -> unknown (provisional), not clean
+  unknown = [e for e in a.episodes if fit is None or e.get("gear") not in fit]
+  soft = [e for e in a.episodes if e not in unknown and e["excess_min"] - fit[e["gear"]] < -0.3]
   detail = (f"{len(a.episodes) - len(hard) - len(soft)}/{len(a.episodes)} clean; capacity releases " +
             f"{sum(e['capacity'] for e in a.episodes)}; reasons {','.join(str(e['reason']) for e in a.episodes[-3:])}; " +
             f"min sent accel {_fmt(min(sent, default=math.nan))}, brake-assist seen {sum(e.get('assist', 0) for e in a.episodes)}x")
   if hard:
     return FAIL, detail
-  if not coast_calibrated(a.ctx):   # Task 12 D3 [D-11]: provisional until E0b
-    return (CAPTURED if a.complete else None), detail + f" [provisional: {COAST_CAL_TEST} not complete]"
-  return (FAIL if soft else PASS if a.complete else None), detail
+  if fit is None:   # Task 12 D3 [D-11] / Task 13 B1: provisional until the coast model is fit
+    return (CAPTURED if a.complete else None), detail + f" [provisional: coast model not fit ({COAST_CAL_TEST})]"
+  if soft:
+    return FAIL, detail
+  if unknown:
+    return (CAPTURED if a.complete else None), detail + " [no fitted coast estimate for the episode's gear]"
+  if not all(math.isfinite(v) for v in sent):
+    return (CAPTURED if a.complete else None), detail + " [sent accel not seen on the bus]"
+  return (PASS if a.complete else None), detail
 
 
 def r_ebp_handoff(a: EpisodeAnalyzer):

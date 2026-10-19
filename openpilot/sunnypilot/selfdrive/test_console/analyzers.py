@@ -79,6 +79,7 @@ class Analyzer:
     self.tx_blocked_last = 0
     self.fault_alerts: set[str] = set()
     self._prev: Sample | None = None
+    self.data: dict = {}   # extra, JSON-safe fields a result rule saves with the result (e.g. a model fit)
 
   # -- window ---------------------------------------------------------------------------------------------------
   def _window(self, s: Sample) -> float:
@@ -129,7 +130,7 @@ class Analyzer:
 # --- segments ------------------------------------------------------------------------------------------------------
 class Segment:
   __slots__ = ("key", "t0", "t_last", "dur", "n", "sums", "sumsq", "cnts", "mins", "maxs", "flares", "rpm_changes",
-               "jerk_max", "jerk_sum", "assist_on", "assist_n", "_rpm_prev", "_jerk")
+               "jerk_max", "jerk_sum", "assist_on", "assist_n", "gears", "_rpm_prev", "_jerk")
 
   def __init__(self, key, t: float):
     self.key, self.t0, self.t_last, self.dur, self.n = key, t, t, 0., 0
@@ -139,6 +140,7 @@ class Segment:
     self.mins: dict[str, float] = {}
     self.maxs: dict[str, float] = {}
     self.flares = self.rpm_changes = self.assist_on = self.assist_n = 0
+    self.gears: dict[int, int] = defaultdict(int)   # stats samples per inferred gear (a per-gear model correction)
     self.jerk_max = self.jerk_sum = 0.
     self._rpm_prev: float | None = None
     self._jerk = JerkFilter()
@@ -158,6 +160,7 @@ class Segment:
         self.cnts[f] += 1
         self.mins[f] = min(self.mins.get(f, v), v)
         self.maxs[f] = max(self.maxs.get(f, v), v)
+    self.gears[int(s.gear)] += 1
     self.flares += s.rpm_rate > FLARE_RPM_RATE
     self.rpm_changes += self._rpm_prev is not None and s.rpm != self._rpm_prev
     self._rpm_prev = s.rpm
@@ -259,6 +262,13 @@ class SegmentAnalyzer(Analyzer):
       return math.nan
     m = sum(g.sums.get(f, 0.) for g in segs) / n
     return math.sqrt(max(sum(g.sumsq.get(f, 0.) for g in segs) / n - m * m, 0.))
+
+  def gear_counts(self, key=None) -> dict[int, int]:
+    out: dict[int, int] = defaultdict(int)
+    for g in (self.segments if key is None else self.by_key(key)):
+      for gear, n in g.gears.items():
+        out[gear] += n
+    return dict(out)
 
   def extreme(self, f: str, fn=min, key=None) -> float:
     vals = [(g.mins if fn is min else g.maxs).get(f) for g in (self.segments if key is None else self.by_key(key))]

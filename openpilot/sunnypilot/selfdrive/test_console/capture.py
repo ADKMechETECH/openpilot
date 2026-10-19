@@ -201,8 +201,9 @@ class Run:
   def summary(self) -> dict:
     text, frac = self.analyzer.progress()
     status, detail = self.analyzer.result()
-    return {"status": status, "detail": detail, "progress": text, "frac": round(frac, 3), "complete": self.complete,
-            "wall": time.time(), "phase": self.spec.phase, "background": self.background}  # noqa: TID251  (human-readable wall clock in the files)
+    return {**self.analyzer.data, "status": status, "detail": detail, "progress": text, "frac": round(frac, 3),
+            "complete": self.complete, "wall": time.time(), "phase": self.spec.phase,  # noqa: TID251  (human-readable wall clock in the files)
+            "background": self.background}
 
 
 class Console:

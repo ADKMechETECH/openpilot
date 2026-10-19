@@ -15,6 +15,7 @@ R = f"{TC}/profiles/civic_6mt/results.py"
 UI = "openpilot/selfdrive/ui/sunnypilot/mici/layouts"
 T = [f"{TC}/tests/test_test_console.py", f"{TC}/tests/test_task12_console.py", f"{TC}/tests/test_sessions.py"]
 SMOKE = [f"{TC}/tests/test_ui_smoke.py"]
+T13 = [f"{TC}/tests/test_task13_console.py"]
 
 
 def m(mid, finding, file, old, new, tests=T):
@@ -74,6 +75,16 @@ MUTATIONS = [
     "  return read_json(os.path.join(console_dir(), STATE_FILE))", SMOKE),
   m("d3_g1_old_semantics", "D3 / A2", R, 'bad = [e for e in a.episodes if not e.get("paused_open") or e["accel_out_max_open"] > 0.05 or',
     'bad = [e for e in a.episodes if e["accel_out_max_open"] > 0.05 or'),
+  # --- Task 13 Part B ------------------------------------------------------------------------------------------------
+  m("t13_b1_seed_not_fit", "T13 B1 D-03 D-12", R, "  coast = seed + fit_offset(a)\n", "  coast = seed\n", T13),
+  m("t13_b1_sent_not_in_verdict", "T13 B1", R, "  if sent > cmd + SENT_TOL:\n", "  if False:\n", T13),
+  m("t13_b1_sent_unseen_passes", "T13 B1", R,
+    '  if not math.isfinite(sent):\n    return CAPTURED, detail + " [sent accel not seen',
+    '  if False:\n    return CAPTURED, detail + " [sent accel not seen', T13),
+  m("t13_b1_nsb_nan_is_clean", "T13 B1", R, "    known &= math.isfinite(exc)", "    known &= True", T13),
+  m("t13_b1_ebp_sent_ignored", "T13 B1", R,
+    '          e.get("sent_min", math.nan) < a.ctx.ebp_coast_target - 0.01]', '          False]', T13),
+  m("t13_b1_fit_not_saved", "T13 B1", R, '    a.data["coast_fit"] = {"version": 1, "gears": gears}\n', "", T13),
 ]
 
 
