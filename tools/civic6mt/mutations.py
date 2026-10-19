@@ -87,7 +87,7 @@ MUTATIONS = [
   m("b1_lower_target_capped", "B1 C-01", f"{SP}/lib/no_service_brake.py",
     "    target_low = v_target is not None and v_target < v_set - 0.1", "    target_low = False", NSB),
   m("b2_margin_unclamped", "B2 C-04", f"{SP}/lib/no_service_brake.py",
-    'DEFAULT_OVERSPEED_MARGIN, 0.5, 15.), ceiling)', 'DEFAULT_OVERSPEED_MARGIN, 0.5, 15.), 99.)', NSB),
+    '               MAX_OVERSPEED_MARGIN, ceiling - PULSE_MIN_BAND)', '               99.)', NSB),
   m("b2_alert_no_repeat", "B2 C-06", f"{SP}/lib/no_service_brake.py",
     "(rising or not self._alerted)", "(not self._alerted)", NSB),
   m("b2_no_set_drop_grace", "B2 A-F-L5", f"{SP}/lib/no_service_brake.py",
@@ -145,4 +145,6 @@ MUTATIONS = [
     "      self.lead_latched = True\n", "      pass\n", HB),
   m("t13_a1_fcw_resolved", "T13 A1", f"{SP}/lib/manual_low_speed_handback.py",
     "urgency not in UNCONDITIONAL and ", "", HB),
+  m("t13_a2_margin_tied_to_ceiling", "T13 A2 N-2 N3", f"{SP}/lib/no_service_brake.py",
+    '               MAX_OVERSPEED_MARGIN, ceiling - PULSE_MIN_BAND)', '               ceiling)', NSB),
 ]

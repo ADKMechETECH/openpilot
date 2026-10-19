@@ -10,7 +10,7 @@ from openpilot.common.params import Params
 from openpilot.common.realtime import DT_MDL
 from openpilot.common.test import OpenpilotTestCase
 from openpilot.sunnypilot.selfdrive.controls.lib.no_service_brake import ALERT_REPEAT, DEFAULT_HARD_CEILING, \
-  SET_DROP_GRACE, NoServiceBrake, read_nsb_params
+  HARD_CEILING_RANGE, MAX_OVERSPEED_MARGIN, PULSE_MIN_BAND, SET_DROP_GRACE, NoServiceBrake, read_nsb_params
 from openpilot.sunnypilot.selfdrive.controls.lib.tests.manual_sim import ManualCarSim, set_params
 from openpilot.sunnypilot.selfdrive.controls.lib.tests.test_no_service_brake_pulse import FakeCP
 
@@ -67,6 +67,34 @@ class TestB2Bounds(OpenpilotTestCase):
     for mode in ("maintain", "pulse"):
       p = set_params(NoServiceBrakeOverspeedMargin=12., NoServiceBrakeOverspeedMode=mode)
       self.assertLessEqual(read_nsb_params(p, True).margin, DEFAULT_HARD_CEILING)
+      # Task 13 A2 [N-2, N3]: the ceiling raised to its max must not raise the margin past the fixed 6.7 m/s
+      p = set_params(NoServiceBrakeOverspeedMargin=15., NoServiceBrakeOverspeedHardCeiling=HARD_CEILING_RANGE[1],
+                     NoServiceBrakeOverspeedMode=mode)
+      nsb = read_nsb_params(p, True)
+      self.assertEqual(nsb.pulse.ceiling, HARD_CEILING_RANGE[1], "precondition: ceiling at its max")
+      self.assertLessEqual(nsb.margin, MAX_OVERSPEED_MARGIN)
+      self.assertTrue(0. <= nsb.pulse.release < nsb.pulse.trigger < nsb.pulse.ceiling)
+      self.assertLessEqual(nsb.pulse.trigger, MAX_OVERSPEED_MARGIN)
+      # and the low end: the margin stays under a low ceiling (braking starts before the alert point)
+      p = set_params(NoServiceBrakeOverspeedMargin=15., NoServiceBrakeOverspeedHardCeiling=HARD_CEILING_RANGE[0],
+                     NoServiceBrakeOverspeedMode=mode)
+      self.assertLessEqual(read_nsb_params(p, True).margin, HARD_CEILING_RANGE[0] - PULSE_MIN_BAND + 1e-9)
+
+  def test_braking_begins_by_the_fixed_margin_with_the_ceiling_raised(self):
+    # Task 13 A2, closed loop: a steep descent, margin and ceiling both set to their max. Braking (maintain: the plan
+    # allows it; pulse: the floor drops below the coast clamp) must begin by set + 6.7 m/s, not near set + 11.
+    for mode in ("maintain", "pulse"):
+      with self.subTest(mode=mode):
+        sim = ManualCarSim(speed=V_SET + 1., gear=6, v_set=V_SET, grade=-0.12, NonAdaptiveLongitudinal=True,
+                           NoServiceBrakeHold=True, NoServiceBrakeOverspeedMode=mode, NoServiceBrakeOverspeedMargin=15.,
+                           NoServiceBrakeOverspeedHardCeiling=HARD_CEILING_RANGE[1], ClutchShiftGate=False)
+        sim.run(1.)
+        self.assertFalse(sim.plan.allowBrake if mode == "maintain" else False, "precondition: coasting over set")
+        sim.run(25.)
+        braking = next((r for r in sim.log if r["limits"][0] < -0.3 - 1e-3), None)
+        self.assertIsNotNone(braking, "braking never began")
+        self.assertLessEqual(braking["v"] - V_SET, MAX_OVERSPEED_MARGIN + 0.1, "braking began past the fixed margin")
+        self.assertLess(max(r["v"] for r in sim.log) - V_SET, HARD_CEILING_RANGE[1], "never reached the raised ceiling")
 
   def _rising_over_ceiling(self, mode, seconds=12.):
     nsb = NoServiceBrake(FakeCP(), set_params(NoServiceBrakeHold=True, NoServiceBrakeOverspeedMode=mode))
