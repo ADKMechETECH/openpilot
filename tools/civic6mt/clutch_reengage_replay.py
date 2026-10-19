@@ -101,8 +101,11 @@ def build(neutral_coast=False):
         b.carState.aEgo = B_EB_ACCEL
       m = b.as_reader()
       sp = messaging.new_message('carStateSP', logMonoTime=m.logMonoTime, valid=True)
-      sp.carStateSP.clutchSignalValid, sp.carStateSP.gearRaw = True, gear
-      sp = sp.as_reader()
+      try:
+        sp.carStateSP.clutchSignalValid, sp.carStateSP.gearRaw = True, gear
+        sp = sp.as_reader()
+      except AttributeError:   # a pre-Task-12 schema (capture at an old commit): no clutch-signal fields to publish
+        sp = None
       i += 1
     msgs.append(m)
     if sp is not None:
@@ -115,6 +118,8 @@ cfg = dataclasses.replace(cfg, pubs=cfg.pubs + ["radarState", "carStateSP"], sub
 
 
 def run(msgs, **params):
+  if params.get("ClutchShiftGate"):
+    params.setdefault("DisengageOnAccelerator", False)   # the gate refuses to enable with it ON (Task 12 A2.8)
   return replay_process(cfg, msgs, custom_params=params or None, disable_progress=True)
 
 
