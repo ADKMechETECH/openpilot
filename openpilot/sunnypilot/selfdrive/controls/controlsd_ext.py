@@ -19,7 +19,8 @@ from openpilot.sunnypilot import PARAMS_UPDATE_PERIOD
 from openpilot.sunnypilot.livedelay.helpers import get_lat_delay
 from openpilot.sunnypilot.modeld_v2.modeld_base import ModelStateBase
 from openpilot.sunnypilot.selfdrive.controls.lib.blinker_pause_lateral import BlinkerPauseLateral
-from openpilot.sunnypilot.selfdrive.controls.lib.clutch_reengage import TakeoverRamp, takeover_urgent
+from openpilot.sunnypilot.selfdrive.controls.lib.braking_urgency import controls_urgency, force_decel_from
+from openpilot.sunnypilot.selfdrive.controls.lib.clutch_reengage import TakeoverRamp, takeover_seed
 from openpilot.sunnypilot.selfdrive.controls.lib.clutch_shift_gate import ClutchShiftGate
 from openpilot.sunnypilot.selfdrive.controls.lib.engine_brake_preferred import EngineBrakePreferred
 from openpilot.sunnypilot.selfdrive.controls.lib.manual_low_speed_handback import LowSpeedHandback
@@ -37,9 +38,12 @@ class ControlsExt(ModelStateBase):
     self.clutch_shift_gate = ClutchShiftGate(CP, params)
     self.clutch_takeover = TakeoverRamp()
     self.low_speed_handback = LowSpeedHandback(CP, params, process="controlsd")
-    self.no_service_brake_enabled = params.get_bool("NoServiceBrakeHold")
-    self.no_service_brake_floor = read_decel_floor(params)
+    # latched while disengaged (Task 12 B3): (enabled, floor)
+    self._nsb_requested = (params.get_bool("NoServiceBrakeHold"), read_decel_floor(params))
+    self.no_service_brake_enabled, self.no_service_brake_floor = self._nsb_requested
     self.no_service_brake_pulse = PulseFloor()
+    self.urgency: str | None = None    # Rule 5: braking_urgency() for this control frame
+    self.clutch_valid = False
     self.engine_brake_preferred = EngineBrakePreferred(CP, params)
 
     self.lane_centering = LaneCenteringController()
@@ -49,7 +53,7 @@ class ControlsExt(ModelStateBase):
     self.CP_SP = messaging.log_from_bytes(params.get("CarParamsSP", block=True), custom.CarParamsSP)
     cloudlog.info("controlsd_ext got CarParamsSP")
 
-    self.sm_services_ext = ['radarState', 'selfdriveStateSP', 'longitudinalPlanSP']
+    self.sm_services_ext = ['radarState', 'selfdriveStateSP', 'longitudinalPlanSP', 'carStateSP']
     self.pm_services_ext = ['carControlSP']
 
   def initialize_lateral_control(self, lac, CI, dt):
@@ -76,8 +80,7 @@ class ControlsExt(ModelStateBase):
       self.blinker_pause_lateral.get_params()
       self.clutch_shift_gate.get_params()
       self.low_speed_handback.read_params()
-      self.no_service_brake_enabled = self.params.get_bool("NoServiceBrakeHold")
-      self.no_service_brake_floor = read_decel_floor(self.params)
+      self._nsb_requested = (self.params.get_bool("NoServiceBrakeHold"), read_decel_floor(self.params))
       self.engine_brake_preferred.read_params()
       self.update_lane_centering_params()
 
@@ -86,13 +89,31 @@ class ControlsExt(ModelStateBase):
 
       self._param_update_time = time.monotonic()
 
+  def update_sp_state(self, sm: messaging.SubMaster, enabled: bool, plan_live: bool = True) -> None:
+    """Once per control frame, before longActive and the accel limits: Rule-5 urgency, latching while disengaged
+    (Task 12 B3) and the clutch gate (it caps throttle during a shift; it never drops longitudinal - Task 12 A2).
+    plan_live: LongControl was not off last frame (else the plan is the planner's aEgo re-seed, not a request)."""
+    self.urgency = controls_urgency(sm, plan_live)
+    if not enabled:
+      self.no_service_brake_enabled, self.no_service_brake_floor = self._nsb_requested
+    CS_SP = sm['carStateSP']
+    self.clutch_valid = bool(CS_SP.clutchSignalValid) and sm.all_checks(['carStateSP'])
+    # Must run every frame (not short-circuited) so the gate sees every gas/clutch/RPM edge.
+    # TODO(on-car): verify the Honda radarless VSA/PCM accept ACC_CONTROL with CONTROL_ON set and a coast command for the
+    #  length of a shift with the clutch in (no CRUISE_FAULT, no cruise cancel).
+    self.clutch_shift_gate.update(sm['carState'], enabled, CS_SP.gearRaw if self.clutch_valid else -1, self.clutch_valid)
+
   def apply_no_service_brake(self, sm: messaging.SubMaster, accel_limits: tuple[float, float], long_active: bool,
                              last_accel: float) -> tuple[float, float]:
-    # plannerd decides (longitudinalPlan.allowBrake); an invalid plan never clamps (fails toward allowing braking).
+    # Rule 5: urgency releases the floor in this control frame, whatever the (up to 50 ms old) plan said.
+    if self.urgency is not None:
+      self.no_service_brake_pulse.floor = None
+      return accel_limits
+    # plannerd decides (longitudinalPlan.allowBrake); an invalid or stale plan never clamps (all_checks: braking allowed).
     # Overspeed pulse mode: plannerd's longitudinalPlanSP.noServiceBrake says coasting/pulsing and the target floor,
     # PulseFloor moves the limit at the pulse jerk. Anything else (maintain mode, escalated/urgent, invalid) -> legacy.
-    plan_valid = sm.valid['longitudinalPlan']
-    pulse = self.no_service_brake_pulse.apply(accel_limits, long_active, plan_valid and sm.valid['longitudinalPlanSP'],
+    plan_valid = sm.all_checks(['longitudinalPlan'])
+    pulse = self.no_service_brake_pulse.apply(accel_limits, long_active, plan_valid and sm.all_checks(['longitudinalPlanSP']),
                                               self.no_service_brake_enabled, sm['longitudinalPlanSP'].noServiceBrake,
                                               last_accel, DT_CTRL)
     if pulse is not None:
@@ -100,48 +121,51 @@ class ControlsExt(ModelStateBase):
     return apply_brake_floor(accel_limits, sm['longitudinalPlan'].allowBrake, plan_valid,
                              self.no_service_brake_enabled, self.no_service_brake_floor)
 
-  def apply_engine_brake_preferred(self, sm: messaging.SubMaster, long_active: bool, accel_limits: tuple[float, float],
-                                   long_control_state, calibrated_pose) -> tuple[float, float]:
-    # Must run every frame (latching, hold/capacity timers). Invalid plan/radar or no pose -> never suppresses.
-    force_decel = bool(sm['driverMonitoringState'].noResponseForceDecel or
-                       sm['selfdriveState'].state == log.SelfdriveState.OpenpilotState.softDisabling)
+  def apply_engine_brake_preferred(self, sm: messaging.SubMaster, enabled: bool, long_active: bool,
+                                   accel_limits: tuple[float, float], long_control_state, calibrated_pose) -> tuple[float, float]:
+    # Must run every frame (latching, hold/capacity timers). Rule-5 urgency or no pose -> never suppresses.
     pitch = float(calibrated_pose.orientation.xyz[1]) if calibrated_pose is not None else None
-    self.engine_brake_preferred.update(long_active, sm['carState'], sm['longitudinalPlan'], sm.valid['longitudinalPlan'],
-                                       sm['radarState'], sm.valid['radarState'], force_decel, long_control_state, pitch)
+    self.engine_brake_preferred.update(enabled, long_active, sm['carState'], sm['longitudinalPlan'], sm['radarState'],
+                                       self.urgency, long_control_state, pitch, self.clutch_valid)
     return self.engine_brake_preferred.limit_accel(accel_limits)
 
-  def get_long_paused(self, sm: messaging.SubMaster) -> bool:
-    # Must run every frame (not short-circuited) so the gate sees every gas/clutch/RPM edge.
-    # TODO(on-car): verify the Honda radarless VSA/PCM accept ACC_CONTROL with CONTROL_ON set but no gas/brake and
-    #  no driver pedal input for the length of a shift (no CRUISE_FAULT, no cruise cancel). Fleet gas overrides only
-    #  exercise this frame with the pedal pressed.
-    return self.clutch_shift_gate.update(sm['carState'])
-
-  def apply_clutch_takeover(self, sm: messaging.SubMaster, long_active: bool,
-                            accel_limits: tuple[float, float]) -> tuple[float, float]:
-    """Clutch gate: throttle cap after a coast timeout; smart re-engagement seed + ramp (bridge from the shift back to
-    the plan). Call after the NSB/EBP floors (the seed and ramp stay inside them) and before the low-speed handback."""
+  def apply_clutch_takeover(self, sm: messaging.SubMaster, long_active: bool, accel_limits: tuple[float, float],
+                            last_accel: float = 0., calibrated_pose=None) -> tuple[float, float]:
+    """Clutch gate: the throttle cap during a shift / after a coast timeout, then the takeover ramp back to the plan.
+    Call after the NSB/EBP floors (the seed and ramp stay inside them) and before the low-speed handback."""
     gate = self.clutch_shift_gate
-    accel_limits = gate.limit_accel(accel_limits)
+    accel_limits = gate.limit_accel(accel_limits, self.urgency)
     CS, plan = sm['carState'], sm['longitudinalPlan']
-    if gate.resumed and gate.reengage.smart and long_active:
-      self.clutch_takeover.start(CS.aEgo, plan.aTarget, accel_limits, gate.ratio_lock.gear, gate.reengage.max_ramp)
+    if gate.resumed and long_active:
+      if gate.reengage.smart:
+        pitch = float(calibrated_pose.orientation.xyz[1]) if calibrated_pose is not None else None
+        seed = takeover_seed(gate.reengage.seed, CS, gate.ratio_lock.gear, pitch)
+      else:
+        seed = last_accel  # the command kept running (capped) through the shift: lift the cap from there
+      self.clutch_takeover.start(seed, plan.aTarget, accel_limits, gate.ratio_lock.gear, gate.reengage.max_ramp)
     if not self.clutch_takeover.active:
       return accel_limits
-    force_decel = bool(sm['driverMonitoringState'].noResponseForceDecel or
-                       sm['selfdriveState'].state == log.SelfdriveState.OpenpilotState.softDisabling)
-    urgent = takeover_urgent(CS, plan, sm.valid['longitudinalPlan'], sm['radarState'], sm.valid['radarState'], force_decel)
-    return self.clutch_takeover.limit_accel(long_active, CS.vEgo, urgent, accel_limits)
+    return self.clutch_takeover.limit_accel(long_active, CS.vEgo, self.urgency, plan.aTarget, accel_limits)
 
   def post_clutch_takeover(self, LoC) -> None:
     pid = LoC.pid
     self.clutch_takeover.post_update(LoC.last_output_accel, pid.p + pid.i + pid.d + pid.f,
                                      LoC.long_control_state == LongCtrlState.pid)
 
-  def update_low_speed_handback(self, enabled: bool, v_ego: float, last_accel: float) -> bool:
-    """Manual transmission: returns True once the low-speed handback ramp is done (longitudinal must stop)."""
-    self.low_speed_handback.update(enabled, v_ego, last_accel)
+  def update_low_speed_handback(self, enabled: bool, v_ego: float, last_accel: float, sm: messaging.SubMaster) -> bool:
+    """Manual transmission: returns True once the low-speed handback ramp is done (longitudinal must stop). Rule 5: it
+    never completes while braking is urgent; forceDecel blocks / aborts it."""
+    self.low_speed_handback.update(enabled, v_ego, last_accel, self.urgency, force_decel_from(sm))
     return self.low_speed_handback.ramp_done
+
+  def lead_visible(self, sm: messaging.SubMaster) -> bool:
+    """Task 12 A1: in non-adaptive mode the cluster shows no ACC-follow lead unless openpilot is braking for a collision
+    threat. longitudinalPlan.hasLead stays in the logs unchanged."""
+    has_lead = bool(sm['longitudinalPlan'].hasLead)
+    if not sm.all_checks(['longitudinalPlanSP']):
+      return has_lead
+    features = sm['longitudinalPlanSP'].features
+    return has_lead and (not features.nonAdaptive or features.collisionBraking)
 
   def get_lat_active(self, sm: messaging.SubMaster) -> bool:
     if self.blinker_pause_lateral.update(sm['carState']):
@@ -172,6 +196,18 @@ class ControlsExt(ModelStateBase):
     _lead.radar = src.radar
     _lead.radarTrackId = src.radarTrackId
 
+  def fill_manual_longitudinal(self, ml) -> None:
+    """carControlSP.manualLongitudinal (Task 12): the state controlsd owns, as selfdrived / the console / the HUD see it."""
+    gate, hb, ebp = self.clutch_shift_gate, self.low_speed_handback, self.engine_brake_preferred
+    ml.urgency = self.urgency or ""
+    ml.gateEnabled, ml.gateState, ml.gatePaused, ml.gateBlocked = gate.enabled, gate.state.name, gate.paused, gate.blocked
+    ml.reengageSmart = bool(gate.enabled and gate.reengage.smart)
+    ml.ebpEnabled, ml.ebpSuppressing, ml.ebpLockedOut = ebp.enabled, ebp.suppress, ebp.capacity_failed
+    ml.handbackAvailable, ml.handbackActive = hb.available, hb.active
+    ml.handbackRampDone, ml.handbackDisengage = hb.ramp_done, hb.disengage_due
+    ml.handbackSpeed, ml.handbackRamp = float(hb.speed), float(hb.ramp_time)
+    ml.nsbEnabled, ml.nsbDecelFloor = bool(self.no_service_brake_enabled), float(self.no_service_brake_floor)
+
   def state_control_ext(self, sm: messaging.SubMaster) -> custom.CarControlSP:
     CC_SP = custom.CarControlSP.new_message()
 
@@ -185,8 +221,12 @@ class ControlsExt(ModelStateBase):
     CC_SP.mads.active = mads_src.active
     CC_SP.mads.available = mads_src.available
 
+    # Task 12: the manual-longitudinal state controlsd owns (selfdrived, the console and the HUD read it)
+    self.fill_manual_longitudinal(CC_SP.manualLongitudinal)
+
     # ICBM state
     icbm_src = sm['selfdriveStateSP'].intelligentCruiseButtonManagement
+
     CC_SP.intelligentCruiseButtonManagement.state = icbm_src.state
     CC_SP.intelligentCruiseButtonManagement.sendButton = icbm_src.sendButton
     CC_SP.intelligentCruiseButtonManagement.vTarget = icbm_src.vTarget

@@ -54,7 +54,11 @@ def convert_carControlSP(struct: capnp.lib.capnp._DynamicStructReader) -> struct
     return {k: v for k, v in s.items() if not k.endswith('DEPRECATED')}
 
   struct_dict = struct.to_dict()
-  struct_dataclass = structs.CarControlSP(**remove_deprecated({k: v for k, v in struct_dict.items() if not isinstance(k, dict)}))
+  # only what the car interface knows: openpilot-internal carControlSP fields (e.g. the fork's manualLongitudinal state
+  # for selfdrived/UI) never reach opendbc
+  known = set(getattr(structs.CarControlSP, _FIELDS))
+  struct_dataclass = structs.CarControlSP(**remove_deprecated({k: v for k, v in struct_dict.items()
+                                                               if not isinstance(k, dict) and k in known}))
 
   struct_dataclass.mads = structs.ModularAssistiveDrivingSystem(**remove_deprecated(struct_dict.get('mads', {})))
   # struct_dataclass.params = [structs.CarControlSP.Param(**remove_deprecated(p)) for p in struct_dict.get('params', [])]

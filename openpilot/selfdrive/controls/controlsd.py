@@ -18,7 +18,7 @@ from openpilot.selfdrive.controls.lib.latcontrol_pid import LatControlPID
 from openpilot.selfdrive.controls.lib.latcontrol_angle import LatControlAngle, STEER_ANGLE_SATURATION_THRESHOLD
 from openpilot.selfdrive.controls.lib.latcontrol_curvature import LatControlCurvature
 from openpilot.selfdrive.controls.lib.latcontrol_torque import LatControlTorque
-from openpilot.selfdrive.controls.lib.longcontrol import LongControl
+from openpilot.selfdrive.controls.lib.longcontrol import LongControl, LongCtrlState
 from openpilot.selfdrive.modeld.modeld import LAT_SMOOTH_SECONDS
 from openpilot.selfdrive.locationd.helpers import PoseCalibrator, Pose
 
@@ -117,13 +117,13 @@ class Controls(ControlsExt):
 
     CC.latActive = _lat_active and not CS.steerFaultTemporary and not CS.steerFaultPermanent and \
                    (not standstill or self.CP.steerAtStandstill)
-    # Manual-transmission clutch/shift gate: coast (no gas, no brake) while shifting, without disengaging
-    long_paused = self.get_long_paused(self.sm)
+    # Rule-5 braking urgency, feature latching, and the manual clutch/shift gate (Task 12: a shift caps throttle only,
+    # longitudinal stays active so braking always passes)
+    self.update_sp_state(self.sm, CC.enabled, self.LoC.long_control_state != LongCtrlState.off)
     # Manual transmission low-speed handback: ramp to 0, then no longitudinal until selfdrived disengages
-    handback_done = self.update_low_speed_handback(CC.enabled, CS.vEgo, self.LoC.last_output_accel)
+    handback_done = self.update_low_speed_handback(CC.enabled, CS.vEgo, self.LoC.last_output_accel, self.sm)
     CC.longActive = CC.enabled and not any(e.overrideLongitudinal for e in self.sm['onroadEvents']) and \
-                    (self.CP.openpilotLongitudinalControl or not self.CP_SP.pcmCruiseSpeed) and not long_paused and \
-                    not handback_done
+                    (self.CP.openpilotLongitudinalControl or not self.CP_SP.pcmCruiseSpeed) and not handback_done
 
     actuators = CC.actuators
     actuators.longControlState = self.LoC.long_control_state
@@ -144,12 +144,14 @@ class Controls(ControlsExt):
     # Brake-range clamps compose by only ever RAISING the lower limit (max of the floors), so their order doesn't
     # matter and they can't fight: no-service-brake (-floor when holding set speed; in overspeed pulse mode a floor that
     # moves at the pulse jerk between that and the bounded pulse decel) and engine-brake-preferred (coast
-    # target for gentle, non-urgent decel). The clutch gate's takeover ramp (manual, smart re-engagement) then slews
-    # inside that range, and the low-speed handback shrinks whatever range is left (tighter wins).
+    # target for gentle, non-urgent decel). The clutch gate caps the THROTTLE side during a shift and its takeover ramp
+    # slews inside that range; the low-speed handback shrinks whatever range is left (tighter wins). Rule 5: with a
+    # braking_urgency() reason every one of them leaves the lower limit alone (this frame).
     pid_accel_limits = self.apply_no_service_brake(self.sm, pid_accel_limits, CC.longActive, self.LoC.last_output_accel)
-    pid_accel_limits = self.apply_engine_brake_preferred(self.sm, CC.longActive, pid_accel_limits, self.LoC.long_control_state,
-                                                         self.calibrated_pose)
-    pid_accel_limits = self.apply_clutch_takeover(self.sm, CC.longActive, pid_accel_limits)
+    pid_accel_limits = self.apply_engine_brake_preferred(self.sm, CC.enabled, CC.longActive, pid_accel_limits,
+                                                         self.LoC.long_control_state, self.calibrated_pose)
+    pid_accel_limits = self.apply_clutch_takeover(self.sm, CC.longActive, pid_accel_limits, self.LoC.last_output_accel,
+                                                  self.calibrated_pose)
     pid_accel_limits = self.low_speed_handback.limit_accel(pid_accel_limits)
     actuators.accel = float(self.LoC.update(CC.longActive, CS, long_plan.aTarget, long_plan.shouldStop, pid_accel_limits))
     self.post_clutch_takeover(self.LoC)
@@ -213,7 +215,7 @@ class Controls(ControlsExt):
     hudControl.setSpeed = float(CS.vCruiseCluster * CV.KPH_TO_MS)
     hudControl.speedVisible = CC.enabled
     hudControl.lanesVisible = CC.enabled
-    hudControl.leadVisible = self.sm['longitudinalPlan'].hasLead
+    hudControl.leadVisible = self.lead_visible(self.sm)
     hudControl.leadDistanceBars = self.sm['selfdriveState'].personality.raw + 1
     hudControl.visualAlert = self.sm['selfdriveState'].alertHudVisual
 
