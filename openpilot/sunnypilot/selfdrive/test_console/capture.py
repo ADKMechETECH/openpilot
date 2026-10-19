@@ -207,6 +207,7 @@ class Run:
 class Console:
   def __init__(self, store: Store, ctx: Context):
     self.store, self.ctx = store, ctx
+    ctx.results = store.results   # the same dict: rules see calibration results as soon as they are saved (D3)
     self.registry = ctx.profile.registry
     self.selected: str = ""
     self.armed = False

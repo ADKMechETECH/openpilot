@@ -119,7 +119,11 @@ class Analyzer:
 
   def result(self) -> tuple[str | None, str]:
     fn = results_for(self.ctx).get(self.spec.result)
-    return fn(self) if fn is not None else (None, "")
+    if fn is None:
+      return None, ""
+    status, detail = fn(self)
+    # Task 12 D3: no rule may PASS before its test is complete (an early FAIL is fine)
+    return (None if status == PASS and not self.complete else status), detail
 
 
 # --- segments ------------------------------------------------------------------------------------------------------
@@ -281,6 +285,7 @@ class ShiftDetector:
   BITE_HOLD = 0.2            # s of ratio lock that counts as "clutch bit"
   GAS_LOOKBACK = 3.0
   FLARE_CONFIRM = 1.0        # s: a gate 'shifting' with no clutch open within this is a false flare
+  REOPEN_LEAK = 1.0          # s: the clutch role re-opening this soon after a close = a raw-gear leak (Task 12 D3)
 
   def __init__(self, ctx: Context):
     self.ctx = ctx
@@ -309,7 +314,9 @@ class ShiftDetector:
                "long_active_open": False, "accel_out_max_open": -math.inf, "rpm_max_open": s.rpm, "rpm_rate_max_open": 0.,
                "enabled_open": s.enabled, "enabled_min": s.enabled, "acc_fault": s.acc_faulted,
                "bite_lag": None, "resume_dt": None, "resume_jerk_max": 0., "post_cmd_max": -math.inf,
-               "post_gas": False, "post_brake": False, "truncated": False}
+               "post_gas": False, "post_brake": False, "truncated": False,
+               # Task 12: the gate's published state (A2: longitudinal stays active, the throttle is capped)
+               "paused_open": s.gate_paused, "blip_cmd_abs": 0., "reopened": False, "close_gas": False}
     self._decoupled_seen = not coupled
     self._flare_cand = None
     self.state = "open"
@@ -356,7 +363,9 @@ class ShiftDetector:
       ep["post_gas"] |= s.gas
       ep["post_brake"] |= s.brake
       j = self.jerk.update(s.t, s.accel_cmd)
-      if ep["resume_dt"] is None and s.long_active and ep["enabled_open"]:
+      # resume = the gate stops capping the throttle (published, Task 12 A2); without a published gate state that is
+      # simply longitudinal being active again
+      if ep["resume_dt"] is None and s.long_active and not s.gate_paused and ep["enabled_open"]:
         ep["resume_dt"] = s.t - ep["t_close"]
         self.jerk = JerkFilter()
         self.jerk.update(s.t, s.accel_cmd)
@@ -367,6 +376,7 @@ class ShiftDetector:
       if s.t - ep["t_close"] >= self.POST:
         done.append(self._finish())
       elif s.clutch and s.v_ego > self.MIN_V:
+        ep["reopened"] = s.t - ep["t_close"] <= self.REOPEN_LEAK
         done.append(self._finish(truncated=True))
 
     if self.state == "closed":
@@ -388,6 +398,9 @@ class ShiftDetector:
           self.t_close_cand = None
         ep["blip"] |= s.gas
         ep["long_active_open"] |= s.long_active
+        ep["paused_open"] |= s.gate_paused
+        if s.gas:
+          ep["blip_cmd_abs"] = max(ep["blip_cmd_abs"], abs(s.accel_cmd))
         if s.enabled:
           ep["accel_out_max_open"] = max(ep["accel_out_max_open"], s.accel_out)
         ep["rpm_max_open"] = max(ep["rpm_max_open"], s.rpm)
@@ -408,10 +421,12 @@ class ShiftDetector:
         if self.t_close_cand is None:
           self.t_close_cand = s.t
           self._gear_at_close = gear_now(s, pt)
+          self._gas_at_close = s.gas
         if s.t - self.t_close_cand >= self.CLOSE_DEBOUNCE:
           ep["t_close"] = self.t_close_cand
           ep["dur"] = ep["t_close"] - ep["t_open"]
           ep["gear_after"] = self._gear_at_close if s.gear_raw >= 0 else 0
+          ep["close_gas"] = self._gas_at_close
           self.t_close_cand = None
           self.t_match = None
           self.jerk = JerkFilter()
@@ -629,7 +644,7 @@ class EbpSuppressDetector:
     for name, p in s.events:
       if name == "engine_brake_preferred" and p.get("active") and self.ep is None:
         self.ep = {"t0": s.t, "gear": p.get("gear"), "a_eb": p.get("a_eb"), "out_min": s.accel_out, "excess_min": math.inf,
-                   "capacity": False, "reason": None}
+                   "capacity": False, "reason": None, "sent_min": math.inf, "assist": 0}
       elif name == "engine_brake_preferred" and not p.get("active") and self.ep is not None:
         self.ep["reason"] = p.get("reason")
       elif name == "ebp_capacity" and self.ep is not None:
@@ -640,6 +655,9 @@ class EbpSuppressDetector:
     ep["out_min"] = min(ep["out_min"], s.accel_out)
     if math.isfinite(s.excess):
       ep["excess_min"] = min(ep["excess_min"], s.excess)
+    if math.isfinite(s.accel_sent):   # what actually went on the bus, and the brake-request bit (Task 12 D3)
+      ep["sent_min"] = min(ep["sent_min"], s.accel_sent)
+    ep["assist"] += s.brake_assist > 0
     if ep["reason"] is not None or not s.long_active:
       ep["dur"] = s.t - ep["t0"]
       ep["capacity"] |= ep["reason"] == "capacity"

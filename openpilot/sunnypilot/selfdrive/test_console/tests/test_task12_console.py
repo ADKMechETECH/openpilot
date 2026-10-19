@@ -150,7 +150,8 @@ class TestD1NeverCrashes(OpenpilotTestCase):
     # a profile can't widen the core: a hostile allowlist gets nothing outside the cap / past the denylist
     hostile = VehicleProfile("x", "x", lambda cp: False, (), CIVIC.signals, CIVIC.powertrain, ButtonMap("gapAdjustCruise"),
                              CIVIC.registry, allowlist=("ExperimentalMode", "OpenpilotEnabledToggle", "AlphaLongitudinalEnabled",
-                                                        "LongitudinalPersonality", "NonAdaptiveLongitudinal"),
+                                                        "LongitudinalPersonality", "RecordFront", "IsMetric",
+                                                        "NonAdaptiveLongitudinal"),
                              watched_toggles=())
     self.assertEqual(S.ui_writable(hostile) - set(S.CONSOLE_PARAMS), {"NonAdaptiveLongitudinal"})
     self.assertFalse(S.ui_writable(hostile) & S.CORE_DENY)
@@ -200,6 +201,9 @@ class TestD2TruthfulWrites(OpenpilotTestCase):
     self.assertIsNone(hits.tap(MousePos(305, 110), hits.hit(MousePos(305, 110)), on))
     # pressed just outside the switch, released on it within the slop: the press hit no target
     self.assertIsNone(hits.tap(MousePos(95, 110), hits.hit(MousePos(95, 110)), MousePos(105, 110)))
+    # pressed on the switch's edge, released just off it (within the slop): not a tap on anything
+    edge = MousePos(178, 110)
+    self.assertIsNone(hits.tap(edge, hits.hit(edge), MousePos(186, 110)))
     # a real tap
     action = hits.tap(on, hits.hit(on), MousePos(125, 112))
     self.assertIsNotNone(action)

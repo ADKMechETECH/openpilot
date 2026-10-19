@@ -36,6 +36,8 @@ class Context:
   nsb_ceiling: float = 6.7
   handback_ramp: float = 0.5
   ebp_coast_target: float = 0.0
+  # the console's results so far (the Store's dict, kept current): rules that depend on a calibration read it (D3)
+  results: dict = field(default_factory=dict, repr=False, compare=False)
   label_cache: dict[str, str] = field(default_factory=dict, repr=False, compare=False)   # condition name -> its line
 
   @property

@@ -43,6 +43,12 @@ def ctx(**toggles) -> Context:
   return Context(profile=CIVIC, manual=True, op_long=True, toggles={**ALL_ON, **toggles})
 
 
+def calibrated(c: Context) -> Context:
+  """The coast model calibrated (E0b complete): the rules that judge braking against it may PASS (Task 12 D3)."""
+  c.results = {"E0b": {"complete": True, "status": "CAPTURED"}}
+  return c
+
+
 # Task 10: the core runs the Civic through its vehicle profile
 CONDITIONS = ctx().conditions
 RESULTS = A.results_for(ctx())
@@ -61,8 +67,10 @@ def btn(pressed: bool, t=ButtonType.gapAdjustCruise):
 
 
 def shift(sim: Sim, g_from: int, g_to: int, open_s=0.6, bite_lag=0.2, blip=False, lift_dt=0.25, flicker=False, enabled=None,
-          long_active=None, post_gas=False, post=3.5):
-  """A clutch shift: gas in g_from, lift, clutch in (GEAR_MT 0), clutch out (GEAR_MT g_to), clutch bites bite_lag later."""
+          long_active=None, post_gas=False, post=3.5, gate=False, resume_after: float | None = 0.5):
+  """A clutch shift: gas in g_from, lift, clutch in (GEAR_MT 0), clutch out (GEAR_MT g_to), clutch bites bite_lag later.
+  gate=True: controlsd's published gate state as Task 12 runs it - longitudinal stays active, the gate is paused
+  ('shifting') with the clutch in and for resume_after s after it closes (None = it never resumes)."""
   kw = {} if enabled is None else {"enabled": enabled}
   out = list(sim.run(1.0, gas=True, gear_raw=g_from, clutch=False, **kw))
   out += sim.run(lift_dt, gas=False)
@@ -77,13 +85,25 @@ def shift(sim: Sim, g_from: int, g_to: int, open_s=0.6, bite_lag=0.2, blip=False
     clutch = True
     if flicker and 0.45 < frac < 0.47:
       mt, clutch = g_to, False
-    out.append(sim.step(clutch=clutch, gear_raw=mt, gas=blipping, rpm=rpm, **la))
+    g = {"gate_paused": True, "gate": "shifting"} if gate else {}
+    out.append(sim.step(clutch=clutch, gear_raw=mt, gas=blipping, rpm=rpm, **la, **g))
   # clutch out: GEAR_MT reports the new gear immediately, rpm is still 15% off until the clutch bites
   target = engine_rpm_at(g_to, sim.s.v_ego)
+  t_closed = 0.
+
+  def gate_after():
+    if not gate:
+      return {}
+    paused = resume_after is None or t_closed < resume_after
+    return {"gate_paused": paused, "gate": "reengaging" if paused else "idle"}
   for _ in range(int(round(bite_lag / DT))):
-    out.append(sim.step(clutch=False, gear_raw=g_to, rpm=target * 1.15, gas=post_gas, **la))
+    out.append(sim.step(clutch=False, gear_raw=g_to, rpm=target * 1.15, gas=post_gas, **la, **gate_after()))
+    t_closed += DT
   sim.locked = True
-  out += sim.run(post, clutch=False, gear_raw=g_to, gas=post_gas, **({"long_active": True} if long_active is not None else {}))
+  after = {"long_active": True} if long_active is not None else {}
+  for _ in range(int(round(post / DT))):
+    out.append(sim.step(clutch=False, gear_raw=g_to, gas=post_gas, **after, **gate_after()))
+    t_closed += DT
   return out
 
 
@@ -240,20 +260,32 @@ class TestSegments(OpenpilotTestCase):
       feed(a, sim.run(10.5), ok=True)
     self.assertTrue(a.complete)
 
+  def run_c1(self, c, a_ego, a_coast, cmd=-1.0):
+    a = make_analyzer(TESTS_BY_ID["C1"], c)
+    for _ in range(5):
+      sim = Sim(v_ego=15., accel_cmd=cmd, a_ego=0., a_coast=a_coast)
+      feed(a, sim.run(0.5, a_ego=0.), ok=True)      # actuator lag: excluded by settle
+      feed(a, sim.run(1.5, a_ego=a_ego), ok=True)
+      feed(a, sim.run(0.3), ok=False)
+    self.assertTrue(a.complete)
+    return a.result()
+
   def test_brake_strength_pass_fail_and_settle(self):
-    spec = TESTS_BY_ID["C1"]
     for a_ego, want in ((-0.9, PASS), (-0.15, FAIL)):
-      a = make_analyzer(spec, ctx())
-      for _ in range(5):
-        sim = Sim(v_ego=15., accel_cmd=-1.0, a_ego=0.)
-        feed(a, sim.run(0.5, a_ego=0.), ok=True)      # actuator lag: excluded by settle
-        feed(a, sim.run(1.5, a_ego=a_ego), ok=True)
-        feed(a, sim.run(0.3), ok=False)
-      self.assertTrue(a.complete)
-      status, detail = a.result()
+      status, detail = self.run_c1(calibrated(ctx()), a_ego, a_coast=0.)
       self.assertEqual(status, want, detail)
       if want == PASS:
         self.assertIn("90%", detail)
+    # Task 12 D3 [D-03]: CAPTURED (provisional) until the coast model is calibrated
+    self.assertEqual(self.run_c1(ctx(), -0.9, a_coast=0.)[0], CAPTURED)
+
+  def test_brake_strength_uphill_no_service_braking_never_passes(self):
+    # 3 % uphill in 3rd: gravity (-0.29) + engine braking (-0.3) give -0.6 with ZERO service braking. The old a_ego/cmd
+    # score called that 60 % = PASS
+    for c in (calibrated(ctx()), ctx()):
+      status, detail = self.run_c1(c, a_ego=-0.6, a_coast=-0.6)
+      self.assertNotEqual(status, PASS, detail)
+    self.assertEqual(self.run_c1(calibrated(ctx()), a_ego=-0.6, a_coast=-0.6)[0], FAIL)
 
   def test_cmd_semantics(self):
     spec = TESTS_BY_ID["C2"]
@@ -308,16 +340,18 @@ class TestSegments(OpenpilotTestCase):
 
   def test_nsb_floor(self):
     spec = TESTS_BY_ID["NSB1"]
-    c = ctx()
-    a = make_analyzer(spec, c)
-    sim = Sim(v_ego=20., accel_out=-0.3, a_ego=0.1, a_coast=0.05, excess=0.05)
-    feed(a, sim.run(31.), ok=True)
-    self.assertIsNone(a.result()[0], "one floor done, 0.0 still to go")
-    c.nsb_floor = 0.0
-    feed(a, sim.run(31., accel_out=0.0), ok=True)
-    self.assertEqual(a.result()[0], PASS)
-    feed(a, sim.run(2., accel_out=-0.2), ok=True)
-    self.assertEqual(a.result()[0], FAIL, "command below -floor")
+    for cal in (True, False):
+      with self.subTest(calibrated=cal):
+        c = calibrated(ctx()) if cal else ctx()
+        a = make_analyzer(spec, c)
+        sim = Sim(v_ego=20., accel_out=-0.3, a_ego=0.1, a_coast=0.05, excess=0.05)
+        feed(a, sim.run(31.), ok=True)
+        self.assertIsNone(a.result()[0], "one floor done, 0.0 still to go")
+        c.nsb_floor = 0.0
+        feed(a, sim.run(31., accel_out=0.0), ok=True)
+        self.assertEqual(a.result()[0], PASS if cal else CAPTURED, "provisional until E0b (Task 12 D3)")
+        feed(a, sim.run(2., accel_out=-0.2), ok=True)
+        self.assertEqual(a.result()[0], FAIL, "command below -floor: no calibration needed")
 
 
 class TestShifts(OpenpilotTestCase):
@@ -360,37 +394,47 @@ class TestShifts(OpenpilotTestCase):
     self.assertIn("flickers 1", detail)
 
   def test_gate_accept(self):
+    # Task 12 A2: longitudinal stays ACTIVE through the press; the gate publishes 'paused' and caps the throttle
     spec = TESTS_BY_ID["G1"]
     a = make_analyzer(spec, ctx(ClutchShiftGate=True))
     sim = Sim(gear_raw=3, v_ego=12., enabled=True, long_active=True)
     for _ in range(5):
-      feed(a, shift(sim, 3, 3, open_s=1.5, enabled=True, long_active=False))
+      feed(a, shift(sim, 3, 3, open_s=1.5, enabled=True, long_active=True, gate=True))
     self.assertTrue(a.complete)
     self.assertEqual(a.result()[0], PASS, a.result())
     self.assertTrue(all(e["kind"] == "same" for e in a.episodes))
-    b = make_analyzer(spec, ctx(ClutchShiftGate=True))   # longitudinal NOT paused while the clutch is in
+    b = make_analyzer(spec, ctx(ClutchShiftGate=True))   # the gate never paused while the clutch was in
     for _ in range(5):
       feed(b, shift(sim, 3, 3, open_s=1.5, enabled=True, long_active=True))
     self.assertEqual(b.result()[0], FAIL)
+    d = make_analyzer(spec, ctx(ClutchShiftGate=True))   # throttle sent with the clutch in
+    for _ in range(5):
+      feed(d, shift(sim, 3, 3, open_s=1.5, enabled=True, long_active=True, gate=True))
+      feed(d, [])
+    sim.apply(accel_out=0.3)
+    feed(d, shift(sim, 3, 3, open_s=1.5, enabled=True, long_active=True, gate=True))
+    sim.apply(accel_out=0.)
+    self.assertEqual(d.result()[0], FAIL)
     c = make_analyzer(spec, ctx(ClutchShiftGate=True))   # cruise fault during the press
-    feed(c, shift(sim, 3, 3, open_s=1.5, enabled=True, long_active=False))
+    feed(c, shift(sim, 3, 3, open_s=1.5, enabled=True, long_active=True, gate=True))
     feed(c, sim.run(0.1, acc_faulted=True))
     for _ in range(4):
-      feed(c, shift(sim, 3, 3, open_s=1.5, enabled=True, long_active=False))
+      feed(c, shift(sim, 3, 3, open_s=1.5, enabled=True, long_active=True, gate=True))
     self.assertEqual(c.result()[0], FAIL)
 
   def test_gate_shifts_need_up_and_down_and_false_flares(self):
     a = make_analyzer(TESTS_BY_ID["G2"], ctx(ClutchShiftGate=True))
     sim = Sim(gear_raw=2, v_ego=12., enabled=True, long_active=True)
     for _ in range(6):
-      feed(a, shift(sim, 2, 3, enabled=True, long_active=False))
+      feed(a, shift(sim, 2, 3, enabled=True, long_active=True, gate=True))
       sim.apply(gear_raw=2)
     text, frac = a.progress()
     self.assertIn("up 6/3", text)
     self.assertIn("down 0/3", text)
     self.assertLess(frac, 1.)
+    self.assertIsNone(a.result()[0], "no PASS before complete (Task 12 D3)")
     for _ in range(3):
-      feed(a, shift(sim, 3, 2, enabled=True, long_active=False))
+      feed(a, shift(sim, 3, 2, enabled=True, long_active=True, gate=True))
       sim.apply(gear_raw=3)
     self.assertTrue(a.complete)
     self.assertEqual(a.result()[0], PASS, a.result())
@@ -534,15 +578,19 @@ class TestOtherEpisodes(OpenpilotTestCase):
     self.assertEqual(len(d.episodes), 0)
 
   def test_ebp_trims(self):
-    a = make_analyzer(TESTS_BY_ID["E1"], ctx(EngineBrakePreferred=True))
+    b = make_analyzer(TESTS_BY_ID["E1"], ctx(EngineBrakePreferred=True))   # uncalibrated: provisional (Task 12 D3)
+    a = make_analyzer(TESTS_BY_ID["E1"], calibrated(ctx(EngineBrakePreferred=True)))
     sim = Sim(long_active=True, a_coast=-0.4)
     for _ in range(5):
       sim.events = [("engine_brake_preferred", {"active": True, "gear": 4})]
-      feed(a, sim.run(2., accel_out=0.0, a_ego=-0.35))
+      samples = list(sim.run(2., accel_out=0.0, a_ego=-0.35))
       sim.events = [("engine_brake_preferred", {"active": False, "reason": "idle"})]
-      feed(a, sim.run(0.5))
+      samples += sim.run(0.5)
+      feed(a, samples)
+      feed(b, samples)
     self.assertTrue(a.complete)
     self.assertEqual(a.result()[0], PASS, a.result())
+    self.assertEqual(b.result()[0], CAPTURED, b.result())
     sim.events = [("engine_brake_preferred", {"active": True, "gear": 4})]
     feed(a, sim.run(1., accel_out=0.0))
     sim.events = [("ebp_capacity", {}), ("engine_brake_preferred", {"active": False, "reason": "capacity"})]
@@ -863,3 +911,99 @@ class TestUiHelpers(OpenpilotTestCase):
         if isinstance(node, ast.Constant) and isinstance(node.value, str) and id(node) not in docstrings:
           bad = set(node.value) - allowed
           self.assertFalse(bad, f"{path.name}:{node.lineno} uses glyphs the UI font doesn't load: {bad}")
+
+
+class TestTask12Verdicts(OpenpilotTestCase):
+  """Task 12 D3: the reviewers' harness cases - verdicts that used to false-PASS."""
+
+  def test_g2_no_resume_fails(self):
+    for resume_after, want in ((0.5, PASS), (None, FAIL), (2.0, FAIL)):   # 2.0 s > REENGAGE_DELAY + 1 s
+      with self.subTest(resume_after=resume_after):
+        a = make_analyzer(TESTS_BY_ID["G2"], ctx(ClutchShiftGate=True))
+        sim = Sim(gear_raw=2, v_ego=12., enabled=True, long_active=True)
+        for up in (True, False) * 3:
+          g0, g1 = (2, 3) if up else (3, 2)
+          feed(a, shift(sim, g0, g1, enabled=True, long_active=True, gate=True, resume_after=resume_after))
+        self.assertTrue(a.complete)
+        self.assertEqual(a.result()[0], want, a.result())
+
+  def test_g2_needs_shifting_state(self):
+    a = make_analyzer(TESTS_BY_ID["G2"], ctx(ClutchShiftGate=True))
+    sim = Sim(gear_raw=2, v_ego=12., enabled=True, long_active=True)
+    for up in (True, False) * 3:
+      g0, g1 = (2, 3) if up else (3, 2)
+      feed(a, shift(sim, g0, g1, enabled=True, long_active=True))   # gate never says 'shifting'
+    self.assertEqual(a.result()[0], FAIL, a.result())
+
+  def passing_s5(self):
+    a = make_analyzer(TESTS_BY_ID["S5"], ctx())
+    sim = Sim(gear_raw=4, v_ego=15.)
+    for _ in range(5):
+      feed(a, shift(sim, 4, 3, blip=True, open_s=0.8))
+      feed(a, shift(sim, 3, 4))
+    self.assertEqual(a.result()[0], PASS, a.result())
+    feed(a, sim.run(1.0, gas=True, gear_raw=4, clutch=False))
+    feed(a, sim.run(0.25, gas=False))
+    return a, sim
+
+  def test_s5_gear_mt_leaks_fail(self):
+    # GEAR_MT reports a gear for `leak` s in the middle of a blipped downshift (off the gas by then), then 0 again
+    for leak in (0.2, 0.4, 0.6):
+      with self.subTest(leak=leak):
+        a, sim = self.passing_s5()
+        feed(a, sim.run(0.3, clutch=True, gear_raw=0, gas=True))
+        feed(a, sim.run(0.1, clutch=True, gear_raw=0, gas=False))
+        feed(a, sim.run(leak, clutch=False, gear_raw=3, gas=False))
+        feed(a, sim.run(0.4, clutch=True, gear_raw=0, gas=False))
+        feed(a, sim.run(3.5, clutch=False, gear_raw=3, gas=False))
+        status, detail = a.result()
+        self.assertEqual(status, FAIL, detail)
+        self.assertIn("GEAR_MT leaks 1", detail)
+
+  def test_s5_close_with_gas_pressed_is_a_leak(self):
+    a, sim = self.passing_s5()
+    feed(a, sim.run(0.4, clutch=True, gear_raw=0, gas=True))
+    feed(a, sim.run(3.5, clutch=False, gear_raw=3, gas=True))   # GEAR_MT reports the gear while the blip is still on
+    status, detail = a.result()
+    self.assertEqual(status, FAIL, detail)
+
+  def test_s2_one_gear_ratio_off_never_passes(self):
+    # into 3rd the rpm settles 10 % off the 3rd-gear ratio (wrong seed ratio / bad decode): those bites are never
+    # measured, so the gear's coverage is 0 % - must not PASS on the other gears' numbers
+    a = make_analyzer(TESTS_BY_ID["S2"], ctx())
+    sim = Sim(gear_raw=2, v_ego=10.)
+    feed(a, sim.run(1.))
+    for i in range(10):
+      g_from, g_to = (2, 3) if i % 2 == 0 else (3, 2)
+      out = shift(sim, g_from, g_to, bite_lag=0.3)
+      if g_to == 3:
+        target = engine_rpm_at(3, 10.) * 1.10
+        out = [replace_rpm(s, target) if s.gear_raw == 3 and not s.clutch else s for s in out]
+      feed(a, out)
+    self.assertTrue(a.complete)
+    status, detail = a.result()
+    self.assertNotEqual(status, PASS, detail)
+    self.assertIn("measured per gear", detail)
+
+  def test_n1_says_fcw_not_exercised(self):
+    a = make_analyzer(TESTS_BY_ID["N1"], ctx(NonAdaptiveLongitudinal=True))
+    sim = Sim(v_ego=20., v_cruise=20., enabled=True, long_active=True)
+    feed(a, sim.run(130.), ok=True)
+    status, detail = a.result()
+    self.assertIn("FCW not exercised", detail)
+
+  def test_no_rule_passes_before_complete(self):
+    # every rule that can PASS, fed a partial window, returns no PASS
+    for spec in CIVIC.registry.tests:
+      a = make_analyzer(spec, calibrated(ctx(**dict.fromkeys(WATCHED_TOGGLES, True))))
+      feed(a, Sim(gear_raw=3, v_ego=15., enabled=True, long_active=True).run(0.5), ok=True)
+      if not a.complete:
+        self.assertNotEqual(a.result()[0], PASS, spec.id)
+
+
+def replace_rpm(s, rpm):
+  from dataclasses import replace
+  out = replace(s, rpm=rpm)
+  from openpilot.sunnypilot.selfdrive.controls.lib.engine_brake_model import infer_gear, measured_ratio
+  out.gear, out.ratio = infer_gear(rpm, out.v_ego, out.clutch), measured_ratio(rpm, out.v_ego)
+  return out

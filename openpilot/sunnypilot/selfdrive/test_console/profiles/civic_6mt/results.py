@@ -21,17 +21,38 @@ HANDBACK_JERK_MAX = 2.5      # m/s^3, provisional "no lurch" bound
 PULSE_HOLD_MAX = 20.         # s, provisional: a single overspeed pulse longer than this is a brake hold, not a pulse
 PULSE_MIN_COAST = 1.0        # s, provisional: the coast between two pulses must last at least this
 BAND_TOL = 0.5               # m/s: pulse start / release vs set + trigger / set + release
+COAST_CAL_TEST = "E0b"       # flat coasts per gear: until it is complete the coast model is the uncalibrated seed
+RESUME_BOUND = REENGAGE_DELAY + 1.0   # s: openpilot must resume within this after the clutch closes (G2, Task 12 D3)
+COVERAGE_MIN = 0.8           # S2: share of shifts per gear whose bite was actually measured
+
+
+def coast_calibrated(ctx) -> bool:
+  return bool(ctx.results.get(COAST_CAL_TEST, {}).get("complete"))
+
+
+def _assist_sent(a) -> str:
+  segs = a.segments if hasattr(a, "segments") else []
+  n = sum(g.assist_n for g in segs)
+  assist = f"{sum(g.assist_on for g in segs) / n:.0%}" if n else "n/a"
+  sent = a.pooled("accel_sent") if segs else math.nan
+  return f"brake-assist bit {assist}, sent accel {_fmt(sent)}"
 
 
 def r_brake_strength(a: SegmentAnalyzer):
+  """Task 12 D3 [D-03]: the share of the requested decel BEYOND coasting that the car delivered,
+  (a_ego - a_coast) / (cmd - a_coast) - a raw a_ego / cmd counted engine braking and gravity as braking (a 3 % uphill in
+  3rd "passed" with zero service braking). Only meaningful with a calibrated coast model: CAPTURED until E0b is done."""
   if not a.segments:
     return None, ""
-  cmd, acc = a.pooled("accel_cmd"), a.pooled("a_ego")
-  coast = a.pooled("a_coast")
-  ratio = acc / cmd if cmd < -1e-3 else math.nan
-  assist = sum(g.assist_on for g in a.segments) / max(1, sum(g.assist_n for g in a.segments))
-  detail = (f"achieves {ratio:.0%} of request (cmd {cmd:.2f}, a_ego {acc:.2f}, coast est {_fmt(coast)}); " +
-            f"brake-assist bit {assist:.0%}")
+  cmd, acc, coast = a.pooled("accel_cmd"), a.pooled("a_ego"), a.pooled("a_coast")
+  want = cmd - coast
+  ratio = (acc - coast) / want if math.isfinite(coast) and want < -0.05 else math.nan
+  detail = (f"delivered {_fmt(ratio * 100, 0)}% of the braking beyond coasting (cmd {cmd:.2f}, a_ego {acc:.2f}, " +
+            f"coast est {_fmt(coast)}); {_assist_sent(a)}")
+  if not coast_calibrated(a.ctx):
+    return CAPTURED, detail + f" [provisional: {COAST_CAL_TEST} coast calibration not complete]"
+  if not math.isfinite(ratio):
+    return CAPTURED, detail + " [no usable coast estimate / request within coasting]"
   return (PASS if ratio >= 0.5 else FAIL), detail + ("" if ratio >= 0.5 else " - weak/no braking (PR #2050)")
 
 
@@ -93,11 +114,24 @@ def r_gear_mt_map(a: GearRawMapAnalyzer):
 def r_bite_lag(a: EpisodeAnalyzer):
   lags = [e["bite_lag"] for e in a.episodes if e["bite_lag"] is not None]
   dec = [e["decouple_lag"] for e in a.episodes if e["decouple_lag"] is not None]
-  if not lags:
+  if not a.episodes:
     return None, ""
+  # Task 12 D3 [D-13]: report coverage; a gear whose bites mostly weren't measured (e.g. its ratio is off, so the lock
+  # never matched) can't pass on the others' numbers
+  cover = {}
+  for e in a.episodes:
+    g = e["gear_after"]
+    n, m = cover.get(g, (0, 0))
+    cover[g] = (n + 1, m + (e["bite_lag"] is not None))
+  low = sorted(g for g, (n, m) in cover.items() if m / n < COVERAGE_MIN)
+  cov = " ".join(f"{g}:{m}/{n}" for g, (n, m) in sorted(cover.items()))
+  if not lags:
+    return (FAIL if a.complete else None), f"no bite measured in {len(a.episodes)} shifts (coverage {cov})"
   p90 = _pct(lags, 0.9)
   detail = (f"bite lag median {_pct(lags, 0.5):.2f}s p90 {p90:.2f}s (REENGAGE_DELAY {REENGAGE_DELAY}s); " +
-            f"GEAR_MT->0 vs decouple median {_fmt(_pct(dec, 0.5))}s (+ = GEAR_MT lags)")
+            f"GEAR_MT->0 vs decouple median {_fmt(_pct(dec, 0.5))}s (+ = GEAR_MT lags); measured per gear {cov}")
+  if low:
+    return (FAIL if a.complete else None), detail + f"; < {COVERAGE_MIN:.0%} measured in gear(s) {low}"
   return (PASS if p90 <= REENGAGE_DELAY else FAIL), detail
 
 
@@ -114,23 +148,30 @@ def r_blip_trace(a: EpisodeAnalyzer):
   if not a.episodes:
     return None, ""
   flick = sum(e["flickers"] for e in a.episodes)
-  leaks = sum(1 for e in a.episodes if "shifting" in e["gate_states"] and
-              any(st != "shifting" for st in e["gate_states"][e["gate_states"].index("shifting"):]))
+  # Task 12 D3 [D-04]: a GEAR_MT "close" that re-opens within ~1 s, or a close while the gas is still pressed (the blip
+  # leaked into a gear report), is a leak - not just a sub-0.15 s flicker
+  gm_leaks = sum(1 for e in a.episodes if e.get("reopened") or e.get("close_gas"))
+  gate_leaks = sum(1 for e in a.episodes if "shifting" in e["gate_states"] and
+                   any(st != "shifting" for st in e["gate_states"][e["gate_states"].index("shifting"):]))
   gate_seen = any(e["gate_states"] for e in a.episodes)
   rates = [e["rpm_rate_max_open"] for e in a.episodes]
-  detail = (f"{len(a.episodes)} blips: GEAR_MT flickers {flick}, gate leaks {leaks}" +
-            f"{'' if gate_seen else ' (gate off: leak not exercised)'}; blip rpm rate max {max(rates):.0f} rpm/s")
-  return (PASS if flick == 0 and leaks == 0 else FAIL), detail
+  detail = (f"{len(a.episodes)} blips: GEAR_MT flickers {flick}, GEAR_MT leaks {gm_leaks}, gate leaks {gate_leaks}" +
+            f"{'' if gate_seen else ' (gate off: gate leak not exercised)'}; blip rpm rate max {max(rates):.0f} rpm/s")
+  return (PASS if flick == 0 and gm_leaks == 0 and gate_leaks == 0 else FAIL), detail
 
 
 def r_gate_accept(a: EpisodeAnalyzer):
+  """Task 12 A2: longitudinal STAYS active through the press (braking available); the gate caps the throttle. Every
+  press: the gate published 'paused', no throttle sent with the clutch in, stayed engaged, no ACC fault."""
   if not a.episodes:
     return None, ""
-  bad = [e for e in a.episodes if e["long_active_open"] or not e["enabled_min"] or e["acc_fault"]]
-  detail = f"{len(a.episodes) - len(bad)}/{len(a.episodes)} presses paused, stayed engaged, no ACC fault"
+  bad = [e for e in a.episodes if not e.get("paused_open") or e["accel_out_max_open"] > 0.05 or not e["enabled_min"] or
+         e["acc_fault"]]
+  detail = f"{len(a.episodes) - len(bad)}/{len(a.episodes)} presses: throttle capped, stayed engaged, no ACC fault"
   if bad:
     e = bad[0]
-    detail += f"; first bad: long_active={e['long_active_open']} engaged={e['enabled_min']} fault={e['acc_fault']}"
+    detail += (f"; first bad: paused={e.get('paused_open')} max out {_fmt(e['accel_out_max_open'])} " +
+               f"engaged={e['enabled_min']} fault={e['acc_fault']}")
   health = _health(a)
   return (FAIL, detail + "; " + "; ".join(health)) if bad or health else (PASS, detail)
 
@@ -138,20 +179,29 @@ def r_gate_accept(a: EpisodeAnalyzer):
 def r_gate_shifts(a: EpisodeAnalyzer):
   if not a.episodes:
     return None, ""
-  throttle = [e for e in a.episodes if e["long_active_open"] or e["accel_out_max_open"] > 0.05]
+  throttle = [e for e in a.episodes if e["accel_out_max_open"] > 0.05]
   jerky = [e for e in a.episodes if e["resume_jerk_max"] > RESUME_JERK_MAX]
+  # Task 12 D3 [D-06]: every engaged shift must show the gate 'shifting' and openpilot must take back over within
+  # REENGAGE_DELAY + 1 s of the clutch closing (a gate that never resumes is a FAIL, not a quiet pass)
+  no_gate = [e for e in a.episodes if "shifting" not in e["gate_states"]]
+  no_resume = [e for e in a.episodes if e["enabled_open"] and (e["resume_dt"] is None or e["resume_dt"] > RESUME_BOUND)]
   flares = a.detector.false_flares
   aligned = [e["gate_shift_dt"] for e in a.episodes if e["gate_shift_dt"] is not None]
-  detail = (f"{len(a.episodes)} shifts: throttle-with-clutch-in {len(throttle)}, jerky resumes {len(jerky)} " +
-            f"(max {max(e['resume_jerk_max'] for e in a.episodes):.1f} m/s^3), false flares {flares}; " +
-            f"gate 'shifting' after GEAR_MT->0: median {_fmt(_pct(aligned, 0.5))}s")
-  return (PASS if not throttle and not jerky and flares == 0 else FAIL), detail
+  resumes = [e["resume_dt"] for e in a.episodes if e["resume_dt"] is not None]
+  detail = (f"{len(a.episodes)} shifts: throttle-with-clutch-in {len(throttle)}, no 'shifting' {len(no_gate)}, " +
+            f"late/no resume {len(no_resume)} (median {_fmt(_pct(resumes, 0.5))}s, bound {RESUME_BOUND:.1f}s), " +
+            f"jerky resumes {len(jerky)} (max {max(e['resume_jerk_max'] for e in a.episodes):.1f} m/s^3), false flares " +
+            f"{flares}; gate 'shifting' after GEAR_MT->0: median {_fmt(_pct(aligned, 0.5))}s")
+  ok = not throttle and not jerky and not no_gate and not no_resume and flares == 0
+  return (PASS if ok else FAIL), detail
 
 
 def r_gate_revmatch(a: EpisodeAnalyzer):
   if not a.episodes and not a.extra_episodes:
     return None, ""
-  bad = [e for e in a.episodes if not e["enabled_min"] or e["long_active_open"]]
+  # Task 12 A2: through every blip openpilot stays engaged, the gate is paused and the command is exactly 0 (the panda
+  # allows nothing else while the gas is pressed)
+  bad = [e for e in a.episodes if not e["enabled_min"] or not e.get("paused_open") or e.get("blip_cmd_abs", 0.) > 1e-3]
   brakes = [e["disengage_dt"] for e in a.extra_episodes]
   slow = [d for d in brakes if d is None or d > 0.3]
   detail = (f"blips {len(a.episodes) - len(bad)}/{len(a.episodes)} stayed engaged+paused; " +
@@ -175,7 +225,8 @@ def r_non_adaptive(a: NonAdaptiveAnalyzer):
   hold_ok = abs(mean_err) < 0.5 and p95 < 1.5
   lead_ok = a.lead_cmd_min >= -0.1
   detail = (f"hold err mean {_fmt(mean_err)} p95 {_fmt(p95, 1)} m/s; behind slower lead min cmd " +
-            f"{_fmt(a.lead_cmd_min if a.lead_s else math.nan)}; FCW x{a.fcw_edges}")
+            f"{_fmt(a.lead_cmd_min if a.lead_s else math.nan)}; FCW x{a.fcw_edges}" +
+            (" (FCW not exercised)" if a.fcw_edges == 0 else ""))
   if not a.complete:
     return (FAIL if (a.hold_s >= a.hold_need and not hold_ok) or (a.lead_s >= a.lead_need and not lead_ok) else None), detail
   return (PASS if hold_ok and lead_ok else FAIL), detail
@@ -191,18 +242,25 @@ def r_overset_brake(a: SegmentAnalyzer):
 
 
 def r_nsb_floor(a: SegmentAnalyzer):
-  parts, ok = [], True
+  parts, cmd_ok, coast_ok = [], True, True
   for key in a.keys:
     if not a.by_key(key):
       continue
     floor = float(key)
     out_min, exc = a.extreme("accel_out", min, key), a.pooled("excess", key)
-    good = out_min >= -floor - 0.01 and not (exc < -0.3)
-    ok &= good
-    parts.append(f"floor {key}: min out {out_min:.2f}, excess {_fmt(exc)} {'✓' if good else '×'}")
+    good_cmd, good_coast = out_min >= -floor - 0.01, not (exc < -0.3)
+    cmd_ok &= good_cmd
+    coast_ok &= good_coast
+    parts.append(f"floor {key}: min out {out_min:.2f}, excess {_fmt(exc)} {'✓' if good_cmd and good_coast else '×'}")
   if not parts:
     return None, ""
-  return (PASS if ok and a.complete else FAIL if not ok else None), "; ".join(parts)
+  detail = "; ".join(parts) + f"; {_assist_sent(a)}"
+  if not cmd_ok:   # the command itself broke the floor: no calibration needed to call that
+    return FAIL, detail
+  # Task 12 D3 [D-11]: "stayed off the brakes" is judged from a_ego vs the coast model - provisional until E0b
+  if not coast_calibrated(a.ctx):
+    return (CAPTURED if a.complete else None), detail + f" [provisional: {COAST_CAL_TEST} not complete]"
+  return (PASS if coast_ok and a.complete else FAIL if not coast_ok else None), detail
 
 
 def r_backstop(a: EpisodeAnalyzer):
@@ -317,10 +375,17 @@ def r_coast_fit(a: SegmentAnalyzer):
 def r_ebp_trims(a: EpisodeAnalyzer):
   if not a.episodes:
     return None, ""
-  bad = [e for e in a.episodes if e["capacity"] or e["out_min"] < a.ctx.ebp_coast_target - 0.01 or e["excess_min"] < -0.3]
-  detail = (f"{len(a.episodes) - len(bad)}/{len(a.episodes)} clean; capacity releases {sum(e['capacity'] for e in a.episodes)}; " +
-            f"reasons {','.join(str(e['reason']) for e in a.episodes[-3:])}")
-  return (FAIL if bad else PASS if a.complete else None), detail
+  hard = [e for e in a.episodes if e["capacity"] or e["out_min"] < a.ctx.ebp_coast_target - 0.01]
+  soft = [e for e in a.episodes if e["excess_min"] < -0.3]   # judged against the coast model
+  sent = [e.get("sent_min", math.nan) for e in a.episodes]
+  detail = (f"{len(a.episodes) - len(hard) - len(soft)}/{len(a.episodes)} clean; capacity releases " +
+            f"{sum(e['capacity'] for e in a.episodes)}; reasons {','.join(str(e['reason']) for e in a.episodes[-3:])}; " +
+            f"min sent accel {_fmt(min(sent, default=math.nan))}, brake-assist seen {sum(e.get('assist', 0) for e in a.episodes)}x")
+  if hard:
+    return FAIL, detail
+  if not coast_calibrated(a.ctx):   # Task 12 D3 [D-11]: provisional until E0b
+    return (CAPTURED if a.complete else None), detail + f" [provisional: {COAST_CAL_TEST} not complete]"
+  return (FAIL if soft else PASS if a.complete else None), detail
 
 
 def r_ebp_handoff(a: EpisodeAnalyzer):
