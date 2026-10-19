@@ -85,6 +85,11 @@ MUTATIONS = [
   m("t13_b1_ebp_sent_ignored", "T13 B1", R,
     '          e.get("sent_min", math.nan) < a.ctx.ebp_coast_target - 0.01]', '          False]', T13),
   m("t13_b1_fit_not_saved", "T13 B1", R, '    a.data["coast_fit"] = {"version": 1, "gears": gears}\n', "", T13),
+  m("t13_b2_pre_blip_unlinked", "T13 B2 D-04", f"{TC}/analyzers.py", '               "leak": self._leak_pending}',
+    '               "leak": None}'),
+  m("t13_b2_gas_at_release_is_leak", "T13 B2 D-04", R,
+    '  gm_leaks = len({e["leak"] for e in a.episodes if e.get("leak") is not None})',
+    '  gm_leaks = len({e["leak"] for e in a.episodes if e.get("leak") is not None}) + sum(bool(e.get("close_gas")) for e in a.episodes)'),
 ]
 
 

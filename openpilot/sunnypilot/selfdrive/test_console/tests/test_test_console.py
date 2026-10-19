@@ -980,12 +980,41 @@ class TestTask12Verdicts(OpenpilotTestCase):
         self.assertEqual(status, FAIL, detail)
         self.assertIn("GEAR_MT leaks 1", detail)
 
-  def test_s5_close_with_gas_pressed_is_a_leak(self):
+  def test_s5_release_with_gas_pressed_is_not_a_leak(self):
+    # Task 13 B2 (reverses Task 12 D3's "close with gas = leak"): a clean heel-toe rev-match can still be on the gas as
+    # the clutch comes up - GEAR_MT reporting the gear then is the real release, not a leak
     a, sim = self.passing_s5()
     feed(a, sim.run(0.4, clutch=True, gear_raw=0, gas=True))
-    feed(a, sim.run(3.5, clutch=False, gear_raw=3, gas=True))   # GEAR_MT reports the gear while the blip is still on
+    feed(a, sim.run(3.5, clutch=False, gear_raw=3, gas=True))
+    status, detail = a.result()
+    self.assertNotEqual(status, FAIL, detail)
+    self.assertIn("GEAR_MT leaks 0", detail)
+    self.assertIn("released with gas 1x", detail)
+
+  def test_s5_pre_blip_gear_mt_leaks_fail(self):
+    # Task 13 B2 [D-04]: GEAR_MT reports a gear for `leak` s BEFORE the blip starts, then 0 again; the blip follows
+    for leak in (0.2, 0.4, 0.6):
+      with self.subTest(leak=leak):
+        a, sim = self.passing_s5()
+        feed(a, sim.run(0.1, clutch=True, gear_raw=0, gas=False))
+        feed(a, sim.run(leak, clutch=False, gear_raw=3, gas=False))
+        feed(a, sim.run(0.3, clutch=True, gear_raw=0, gas=True))
+        feed(a, sim.run(0.1, clutch=True, gear_raw=0, gas=False))
+        feed(a, sim.run(3.5, clutch=False, gear_raw=3, gas=False))
+        status, detail = a.result()
+        self.assertEqual(status, FAIL, detail)
+        self.assertIn("GEAR_MT leaks 1", detail)
+
+  def test_s5_leak_counted_once_per_clutch_event(self):
+    # a glitch with a blip on both sides of it: one leak, not two
+    a, sim = self.passing_s5()
+    feed(a, sim.run(0.3, clutch=True, gear_raw=0, gas=True))
+    feed(a, sim.run(0.3, clutch=False, gear_raw=3, gas=False))
+    feed(a, sim.run(0.3, clutch=True, gear_raw=0, gas=True))
+    feed(a, sim.run(3.5, clutch=False, gear_raw=3, gas=False))
     status, detail = a.result()
     self.assertEqual(status, FAIL, detail)
+    self.assertIn("GEAR_MT leaks 1", detail)
 
   def test_s2_one_gear_ratio_off_never_passes(self):
     # into 3rd the rpm settles 10 % off the 3rd-gear ratio (wrong seed ratio / bad decode): those bites are never

@@ -190,15 +190,18 @@ def r_blip_trace(a: EpisodeAnalyzer):
   if not a.episodes:
     return None, ""
   flick = sum(e["flickers"] for e in a.episodes)
-  # Task 12 D3 [D-04]: a GEAR_MT "close" that re-opens within ~1 s, or a close while the gas is still pressed (the blip
-  # leaked into a gear report), is a leak - not just a sub-0.15 s flicker
-  gm_leaks = sum(1 for e in a.episodes if e.get("reopened") or e.get("close_gas"))
+  # Task 12 D3 [D-04]: a GEAR_MT "close" that re-opens within ~1 s is a leak - not just a sub-0.15 s flicker.
+  # Task 13 B2: counted per clutch event (the leak id), whether the glitch came before or after the blip started; the
+  # gas still pressed at the real release is NOT a leak (heel-toe: legal) - reported only
+  gm_leaks = len({e["leak"] for e in a.episodes if e.get("leak") is not None})
+  close_gas = sum(1 for e in a.episodes if e.get("close_gas") and e.get("leak") is None)
   gate_leaks = sum(1 for e in a.episodes if "shifting" in e["gate_states"] and
                    any(st != "shifting" for st in e["gate_states"][e["gate_states"].index("shifting"):]))
   gate_seen = any(e["gate_states"] for e in a.episodes)
   rates = [e["rpm_rate_max_open"] for e in a.episodes]
   detail = (f"{len(a.episodes)} blips: GEAR_MT flickers {flick}, GEAR_MT leaks {gm_leaks}, gate leaks {gate_leaks}" +
-            f"{'' if gate_seen else ' (gate off: gate leak not exercised)'}; blip rpm rate max {max(rates):.0f} rpm/s")
+            f"{'' if gate_seen else ' (gate off: gate leak not exercised)'}; blip rpm rate max {max(rates):.0f} rpm/s" +
+            (f"; released with gas {close_gas}x (heel-toe, ok)" if close_gas else ""))
   return (PASS if flick == 0 and gm_leaks == 0 and gate_leaks == 0 else FAIL), detail
 
 

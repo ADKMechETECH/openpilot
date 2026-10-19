@@ -311,6 +311,10 @@ class ShiftDetector:
     self.jerk = JerkFilter()
     self.false_flares = 0
     self._flare_cand: float | None = None
+    # Task 13 B2 [D-04]: a close that re-opens within REOPEN_LEAK is one clutch event split in two episodes; both halves
+    # carry the same leak id, so a leak BEFORE the blip (first half, no blip) still marks the blipped second half
+    self._leak_seq = 0
+    self._leak_pending: int | None = None
 
   def _start(self, s: Sample) -> None:
     gas_dt = None
@@ -326,7 +330,9 @@ class ShiftDetector:
                "bite_lag": None, "resume_dt": None, "resume_jerk_max": 0., "post_cmd_max": -math.inf,
                "post_gas": False, "post_brake": False, "truncated": False,
                # Task 12: the gate's published state (A2: longitudinal stays active, the throttle is capped)
-               "paused_open": s.gate_paused, "blip_cmd_abs": 0., "reopened": False, "close_gas": False}
+               "paused_open": s.gate_paused, "blip_cmd_abs": 0., "reopened": False, "close_gas": False,
+               "leak": self._leak_pending}
+    self._leak_pending = None
     self._decoupled_seen = not coupled
     self._flare_cand = None
     self.state = "open"
@@ -387,6 +393,11 @@ class ShiftDetector:
         done.append(self._finish())
       elif s.clutch and s.v_ego > self.MIN_V:
         ep["reopened"] = s.t - ep["t_close"] <= self.REOPEN_LEAK
+        if ep["reopened"]:
+          if ep["leak"] is None:
+            self._leak_seq += 1
+            ep["leak"] = self._leak_seq
+          self._leak_pending = ep["leak"]
         done.append(self._finish(truncated=True))
 
     if self.state == "closed":
