@@ -169,7 +169,7 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
     self.output_should_stop = any(should_stop for _, _, should_stop in candidates)
     self.output_a_target = np.clip(output_a_target, ACCEL_MIN, ACCEL_MAX)
     # no-service-brake mode: controlsd applies the decel floor when braking isn't allowed (aTarget stays the plan's intent)
-    self.allow_brake = LongitudinalPlannerSP.update_no_service_brake(self, sm, reset_state, v_ego)
+    self.allow_brake = LongitudinalPlannerSP.update_no_service_brake(self, sm, reset_state, v_ego, self.fcw)
 
     self.v_desired_filter.x = self.v_desired_filter.x + self.dt * (self.output_a_target + a_prev) / 2.0
 

@@ -12,7 +12,7 @@ from openpilot.common.params import Params
 from openpilot.common.realtime import DT_MDL
 from openpilot.selfdrive.car.cruise import V_CRUISE_MAX
 from openpilot.sunnypilot.selfdrive.controls.lib.dec.dec import DynamicExperimentalController
-from openpilot.sunnypilot.selfdrive.controls.lib.no_service_brake import NoServiceBrake
+from openpilot.sunnypilot.selfdrive.controls.lib.no_service_brake import NoServiceBrake, overspeed_urgent
 from openpilot.sunnypilot.selfdrive.controls.lib.engine_brake_model import CoastEventLogger
 from openpilot.sunnypilot.selfdrive.controls.lib.gear_aware_accel import GearAwareAccel
 from openpilot.sunnypilot.selfdrive.controls.lib.e2e_alerts_helper import E2EAlertsHelper
@@ -22,6 +22,7 @@ from openpilot.sunnypilot.selfdrive.controls.lib.speed_limit.speed_limit_resolve
 from openpilot.sunnypilot.selfdrive.selfdrived.events import EventsSP
 from openpilot.sunnypilot.models.helpers import get_active_bundle
 
+EventNameSP = custom.OnroadEventSP.EventName
 DecState = custom.LongitudinalPlanSP.DynamicExperimentalControl.DynamicExperimentalControlState
 LongitudinalPlanSource = custom.LongitudinalPlanSP.LongitudinalPlanSource
 
@@ -72,9 +73,17 @@ class LongitudinalPlannerSP:
     return self.gear_aware_accel.update(long_inactive, sm['carState'], self._pitch(sm), fcw, sm['radarState'],
                                         a_cruise_prev, cruise_target)
 
-  def update_no_service_brake(self, sm: messaging.SubMaster, long_inactive: bool, v_ego: float) -> bool:
-    v_set = min(sm['carState'].vCruise, V_CRUISE_MAX) * CV.KPH_TO_MS  # driver's set speed, before SCC/SLA targets
-    return self.no_service_brake.update(long_inactive, self.non_adaptive, v_ego, v_set, sm['controlsState'].forceDecel)
+  def update_no_service_brake(self, sm: messaging.SubMaster, long_inactive: bool, v_ego: float, fcw: bool = False) -> bool:
+    CS = sm['carState']
+    v_set = min(CS.vCruise, V_CRUISE_MAX) * CV.KPH_TO_MS  # driver's set speed, before SCC/SLA targets
+    nsb = self.no_service_brake
+    # urgent only matters to the overspeed pulse mode (maintain ignores it); an invalid radarState invalidates the whole
+    # plan, which controlsd already treats as braking allowed
+    allow_brake = nsb.update(long_inactive, self.non_adaptive, v_ego, v_set, sm['controlsState'].forceDecel,
+                             overspeed_urgent(CS, fcw, sm['radarState']))
+    if nsb.escalation_event:
+      self.events_sp.add(EventNameSP.noServiceBrakeOverspeed)
+    return allow_brake
 
   def update_non_adaptive(self, long_inactive: bool) -> None:
     # The toggle is re-read at 1 Hz but only applied while longitudinal is inactive, so the mode never flips mid-engagement
@@ -185,5 +194,13 @@ class LongitudinalPlannerSP:
     e2eAlerts = longitudinalPlanSP.e2eAlerts
     e2eAlerts.greenLightAlert = self.e2e_alerts_helper.green_light_alert
     e2eAlerts.leadDepartAlert = self.e2e_alerts_helper.lead_depart_alert
+
+    # No-service-brake overspeed pulse mode (maintain mode leaves it unset: state off)
+    if self.no_service_brake.state != "off":
+      nsb = longitudinalPlanSP.noServiceBrake
+      nsb.state = self.no_service_brake.state
+      nsb.accelFloor = float(self.no_service_brake.accel_floor)
+      nsb.rampRate = float(self.no_service_brake.pulse.jerk)
+      nsb.overspeed = float(self.no_service_brake.overspeed)
 
     pm.send('longitudinalPlanSP', plan_sp_send)

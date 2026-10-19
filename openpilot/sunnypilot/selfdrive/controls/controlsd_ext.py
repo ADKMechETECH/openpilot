@@ -12,6 +12,7 @@ from openpilot.cereal import log, custom
 from opendbc.car import structs
 from openpilot.selfdrive.controls.lib.longcontrol import LongCtrlState
 from openpilot.common.params import Params
+from openpilot.common.realtime import DT_CTRL
 from openpilot.common.swaglog import cloudlog
 from openpilot.selfdrive.controls.lib.lane_centering import LaneCenteringController
 from openpilot.sunnypilot import PARAMS_UPDATE_PERIOD
@@ -22,7 +23,7 @@ from openpilot.sunnypilot.selfdrive.controls.lib.clutch_reengage import Takeover
 from openpilot.sunnypilot.selfdrive.controls.lib.clutch_shift_gate import ClutchShiftGate
 from openpilot.sunnypilot.selfdrive.controls.lib.engine_brake_preferred import EngineBrakePreferred
 from openpilot.sunnypilot.selfdrive.controls.lib.manual_low_speed_handback import LowSpeedHandback
-from openpilot.sunnypilot.selfdrive.controls.lib.no_service_brake import apply_brake_floor, read_decel_floor
+from openpilot.sunnypilot.selfdrive.controls.lib.no_service_brake import PulseFloor, apply_brake_floor, read_decel_floor
 from openpilot.sunnypilot.selfdrive.controls.lib.latcontrol_torque_v0 import LatControlTorque as LatControlTorqueV0
 
 
@@ -38,6 +39,7 @@ class ControlsExt(ModelStateBase):
     self.low_speed_handback = LowSpeedHandback(CP, params, process="controlsd")
     self.no_service_brake_enabled = params.get_bool("NoServiceBrakeHold")
     self.no_service_brake_floor = read_decel_floor(params)
+    self.no_service_brake_pulse = PulseFloor()
     self.engine_brake_preferred = EngineBrakePreferred(CP, params)
 
     self.lane_centering = LaneCenteringController()
@@ -47,7 +49,7 @@ class ControlsExt(ModelStateBase):
     self.CP_SP = messaging.log_from_bytes(params.get("CarParamsSP", block=True), custom.CarParamsSP)
     cloudlog.info("controlsd_ext got CarParamsSP")
 
-    self.sm_services_ext = ['radarState', 'selfdriveStateSP']
+    self.sm_services_ext = ['radarState', 'selfdriveStateSP', 'longitudinalPlanSP']
     self.pm_services_ext = ['carControlSP']
 
   def initialize_lateral_control(self, lac, CI, dt):
@@ -84,9 +86,18 @@ class ControlsExt(ModelStateBase):
 
       self._param_update_time = time.monotonic()
 
-  def apply_no_service_brake(self, sm: messaging.SubMaster, accel_limits: tuple[float, float]) -> tuple[float, float]:
-    # plannerd decides (longitudinalPlan.allowBrake); an invalid plan never clamps (fails toward allowing braking)
-    return apply_brake_floor(accel_limits, sm['longitudinalPlan'].allowBrake, sm.valid['longitudinalPlan'],
+  def apply_no_service_brake(self, sm: messaging.SubMaster, accel_limits: tuple[float, float], long_active: bool,
+                             last_accel: float) -> tuple[float, float]:
+    # plannerd decides (longitudinalPlan.allowBrake); an invalid plan never clamps (fails toward allowing braking).
+    # Overspeed pulse mode: plannerd's longitudinalPlanSP.noServiceBrake says coasting/pulsing and the target floor,
+    # PulseFloor moves the limit at the pulse jerk. Anything else (maintain mode, escalated/urgent, invalid) -> legacy.
+    plan_valid = sm.valid['longitudinalPlan']
+    pulse = self.no_service_brake_pulse.apply(accel_limits, long_active, plan_valid and sm.valid['longitudinalPlanSP'],
+                                              self.no_service_brake_enabled, sm['longitudinalPlanSP'].noServiceBrake,
+                                              last_accel, DT_CTRL)
+    if pulse is not None:
+      return pulse
+    return apply_brake_floor(accel_limits, sm['longitudinalPlan'].allowBrake, plan_valid,
                              self.no_service_brake_enabled, self.no_service_brake_floor)
 
   def apply_engine_brake_preferred(self, sm: messaging.SubMaster, long_active: bool, accel_limits: tuple[float, float],
