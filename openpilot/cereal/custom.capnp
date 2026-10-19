@@ -204,6 +204,23 @@ struct LongitudinalPlanSP @0xf35cc4560bbf6ec2 {
   aTarget @5 :Float32;
   events @6 :List(OnroadEventSP.Event);
   e2eAlerts @7 :E2eAlerts;
+  # fork-only (civic-cruise): no-service-brake overspeed backstop (Task 11). Ordinal may collide on a future sunnypilot rebase.
+  noServiceBrake @8 :NoServiceBrake;
+
+  struct NoServiceBrake {
+    state @0 :NoServiceBrakeState;
+    accelFloor @1 :Float32;   # m/s^2: lower accel limit controlsd ramps toward while coasting/pulsing
+    rampRate @2 :Float32;     # m/s^3: rate controlsd moves its floor at (pulse roll-on/roll-off)
+    overspeed @3 :Float32;    # m/s: vEgo - set speed
+
+    enum NoServiceBrakeState {
+      off @0;        # maintain mode or not clamping: controlsd uses longitudinalPlan.allowBrake only (legacy)
+      coasting @1;   # pulse mode: no-brake coast clamp
+      pulsing @2;    # pulse mode: bounded, jerk-ramped brake pulse
+      escalated @3;  # pulse mode: past the hard ceiling, full openpilot braking
+      urgent @4;     # pulse mode: lead/FCW/AEB, full openpilot braking
+    }
+  }
 
   struct DynamicExperimentalControl {
     state @0 :DynamicExperimentalControlState;
@@ -354,9 +371,11 @@ struct OnroadEventSP @0xda96579883444c35 {
     e2eChime @23;
     laneChangeRoadEdge @24;
     bigModelReady @25;
-    # fork-only (civic-cruise): manual low-speed handback. Ordinals may collide on a future sunnypilot rebase.
+    # fork-only (civic-cruise): manual low-speed handback (@26/@27), no-service-brake overspeed escalation (@28).
+    # Ordinals may collide on a future sunnypilot rebase.
     manualLowSpeedHandback @26;
     manualLowSpeedNoEntry @27;
+    noServiceBrakeOverspeed @28;
   }
 }
 

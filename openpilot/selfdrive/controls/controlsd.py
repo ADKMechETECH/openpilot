@@ -142,10 +142,11 @@ class Controls(ControlsExt):
     # accel PID loop
     pid_accel_limits = self.CI.get_pid_accel_limits(self.CP, self.CP_SP, CS.vEgo, CS.vCruise * CV.KPH_TO_MS)
     # Brake-range clamps compose by only ever RAISING the lower limit (max of the floors), so their order doesn't
-    # matter and they can't fight: no-service-brake (-floor when holding set speed) and engine-brake-preferred (coast
+    # matter and they can't fight: no-service-brake (-floor when holding set speed; in overspeed pulse mode a floor that
+    # moves at the pulse jerk between that and the bounded pulse decel) and engine-brake-preferred (coast
     # target for gentle, non-urgent decel). The clutch gate's takeover ramp (manual, smart re-engagement) then slews
     # inside that range, and the low-speed handback shrinks whatever range is left (tighter wins).
-    pid_accel_limits = self.apply_no_service_brake(self.sm, pid_accel_limits)
+    pid_accel_limits = self.apply_no_service_brake(self.sm, pid_accel_limits, CC.longActive, self.LoC.last_output_accel)
     pid_accel_limits = self.apply_engine_brake_preferred(self.sm, CC.longActive, pid_accel_limits, self.LoC.long_control_state,
                                                          self.calibrated_pose)
     pid_accel_limits = self.apply_clutch_takeover(self.sm, CC.longActive, pid_accel_limits)

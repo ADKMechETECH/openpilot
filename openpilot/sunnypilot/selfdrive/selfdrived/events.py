@@ -283,4 +283,14 @@ EVENTS_SP: dict[int, dict[str, Alert | AlertCallbackType]] = {
   EventNameSP.manualLowSpeedNoEntry: {
     ET.NO_ENTRY: manual_low_speed_no_entry_alert,
   },
+
+  # No-service-brake pulse mode (no_service_brake.py): the bounded brake pulse couldn't hold the overspeed band, so
+  # full openpilot braking is back. Fires once per escalation (one planner frame).
+  EventNameSP.noServiceBrakeOverspeed: {
+    ET.WARNING: Alert(
+      "Overspeed: Take Over",
+      "Bounded braking can't hold this grade",
+      AlertStatus.userPrompt, AlertSize.mid,
+      Priority.HIGH, VisualAlert.none, AudibleAlert.prompt, 4.),
+  },
 }
