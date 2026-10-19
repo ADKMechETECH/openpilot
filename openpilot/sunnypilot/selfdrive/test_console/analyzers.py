@@ -777,12 +777,22 @@ class GearMtMapAnalyzer(Analyzer):
 
 
 class BitHuntAnalyzer(Analyzer):
-  """S6: which raw POWERTRAIN_DATA bit toggles with GEAR_MT -> 0 (a clutch switch would lead it)."""
+  """
+  S6: which raw POWERTRAIN_DATA bit is the clutch switch. Two scorers on the same per-bit toggle record:
+    - rolling in gear: a bit that toggles with GEAR_MT -> 0 (a clutch switch would lead it);
+    - parked in neutral (GEAR_MT reads 0 throughout): the driver's press signature (registry.SIGNATURE) — a bit whose
+      toggles form 3 groups (split at >= SIG_GAP s of stillness) of 2N toggles each (press + release) is an N-press
+      candidate. Complete at `presses` GEAR_MT presses or `seconds` of window, whichever first.
+  """
   WINDOW = 0.3
+  SIG_GAP = 3.0      # s of stillness that separates the signature's groups (quick <1 s and slow ~2 s gaps stay inside)
 
   def __init__(self, spec: TestSpec, ctx: Context):
     super().__init__(spec, ctx)
     self.presses = self.goal["presses"]
+    self.seconds = self.goal.get("seconds")
+    self.signature_n = self.goal.get("signature_n")
+    self.window_ok = 0.
     self.prev_raw: int | None = None
     self.prev_mt: int | None = None
     self.toggles: dict[int, list[float]] = defaultdict(list)
@@ -793,6 +803,7 @@ class BitHuntAnalyzer(Analyzer):
     if not ok or s.raw_17c < 0:
       return []
     notes = []
+    self.window_ok += dt
     if self.prev_raw is not None:
       diff = s.raw_17c ^ self.prev_raw
       while diff:
@@ -809,12 +820,34 @@ class BitHuntAnalyzer(Analyzer):
     return notes
 
   def progress(self) -> tuple[str, float]:
-    return f"clutch presses {self.press_count}/{self.presses}", min(1., self.press_count / self.presses)
+    text = f"clutch presses {self.press_count}/{self.presses}"
+    frac = self.press_count / self.presses
+    if self.seconds:
+      text += f" • window {self.window_ok:.0f}/{self.seconds:.0f}s"
+      frac = max(frac, self.window_ok / self.seconds)
+    return text, min(1., frac)
 
   @staticmethod
   def dbc_bit(bit: int) -> int:
     """LSB-first index of the big-endian 64-bit payload -> DBC (Motorola) bit number byte*8 + bit-in-byte."""
     return (7 - bit // 8) * 8 + bit % 8
+
+  @classmethod
+  def signature_count(cls, ts: list[float]) -> int:
+    """N if the toggle times form the 3-group N-press signature (2N toggles per group), else 0."""
+    if len(ts) < 6:
+      return 0
+    groups, start = [], 0
+    for i in range(1, len(ts) + 1):
+      if i == len(ts) or ts[i] - ts[i - 1] >= cls.SIG_GAP:
+        groups.append(i - start)
+        start = i
+    return groups[0] // 2 if len(groups) == 3 and len(set(groups)) == 1 and groups[0] % 2 == 0 else 0
+
+  def signature_candidates(self) -> list[tuple[int, int]]:
+    """(DBC bit, N) for every bit whose toggles form the press signature; the registry's N first."""
+    out = [(self.dbc_bit(bit), n) for bit, ts in self.toggles.items() if (n := self.signature_count(ts))]
+    return sorted(out, key=lambda c: (c[1] != self.signature_n, c[0]))
 
   def candidates(self) -> list[tuple[int, float, int]]:
     out = []
@@ -1199,12 +1232,25 @@ def r_accel_by_gear(a: SegmentAnalyzer):
 
 
 def r_bit_hunt(a: BitHuntAnalyzer):
-  if not a.edges:
+  parts = []
+  sig = a.signature_candidates()
+  if sig:
+    parts.append("signature (DBC bit, N): " + ", ".join(f"{b} N={n}" for b, n in sig[:5]))
+  if a.edges:
+    c = a.candidates()
+    parts.append("vs GEAR_MT (DBC bit, hit rate, toggles): " + ", ".join(f"{b} {h:.0%} {n}" for b, h, n in c[:5]) if c else
+                 f"no bit tracks GEAR_MT->0 across {len(a.edges)} edges")
+  if not parts and a.window_ok <= 0.:
     return None, ""
-  c = a.candidates()
-  if not c:
-    return CAPTURED, f"no bit tracks GEAR_MT->0 across {len(a.edges)} edges"
-  return CAPTURED, "candidates (DBC bit, hit rate, toggles): " + ", ".join(f"{b} {h:.0%} {n}" for b, h, n in c[:5])
+  return CAPTURED, "; ".join(parts) or f"no 0x17C bit matched the signature in {a.window_ok:.0f}s (scrub cabana)"
+
+
+def r_window(a: SegmentAnalyzer):
+  """S7: a marked capture window for scrubbing every bus in cabana (the volume buttons are likely on B-CAN)."""
+  secs = sum(g.dur for g in a.segments)
+  if secs <= 0.:
+    return None, ""
+  return CAPTURED, f"{secs:.0f}s window marked (test_marker start/stop): scrub every logged bus in cabana for the 4/5 rhythm"
 
 
 RESULTS = {
@@ -1215,5 +1261,5 @@ RESULTS = {
   "handback_feel": r_handback_feel, "stop_hold": r_stop_hold, "neutral_coast": r_neutral_coast,
   "uphill_handback": r_uphill_handback, "ratio_check": r_ratio_check, "coast_fit": r_coast_fit, "ebp_trims": r_ebp_trims,
   "ebp_handoff": r_ebp_handoff, "ebp_downhill": r_ebp_downhill, "jerk_by_gear": r_jerk_by_gear,
-  "accel_by_gear": r_accel_by_gear, "bit_hunt": r_bit_hunt,
+  "accel_by_gear": r_accel_by_gear, "bit_hunt": r_bit_hunt, "window": r_window,
 }

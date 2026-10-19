@@ -24,7 +24,7 @@ from openpilot.sunnypilot.selfdrive.test_console.capture import Console, Store
 from openpilot.sunnypilot.selfdrive.test_console.conditions import BINS, CONDITIONS, WATCHED_TOGGLES, Context, check_conditions
 from openpilot.sunnypilot.selfdrive.test_console.registry import PHASES, TESTS, TESTS_BY_ID, Kind
 from openpilot.sunnypilot.selfdrive.test_console.signals import SAMPLE_FIELDS, LogEventTap, RawCanTap, Sample, SampleBuilder
-from openpilot.sunnypilot.selfdrive.test_console.status_io import CONSOLE_PARAMS, MARKERS_FILE, RESULTS_FILE, read_json
+from openpilot.sunnypilot.selfdrive.test_console.status_io import MARKERS_FILE, RESULTS_FILE, read_json
 from openpilot.sunnypilot.selfdrive.test_console.tests.sim import DT, Sim, feed
 
 ButtonType = structs.CarState.ButtonEvent.Type
@@ -105,7 +105,7 @@ class TestRegistry(OpenpilotTestCase):
     self.assertTrue({"E0a", "E0b", "E0c"} <= first)
     ids = [t.id for t in TESTS]
     self.assertLess(ids.index("E0c"), ids.index("E0a"), "E0c (gear inference) is the hard prereq of the coasts")
-    self.assertEqual(len(TESTS), 29)
+    self.assertEqual(len(TESTS), 30)
 
   def test_telemetry_tests_need_no_toggle(self):
     for t in TESTS:
@@ -521,7 +521,7 @@ class TestCustom(OpenpilotTestCase):
     raw = 0
     counter_bit = 1 << 4          # a counter-like bit toggling every frame
     clutch_bit = 1 << (63 - 35)   # payload bit: byte 3, bit-in-byte 3 -> DBC bit 27 (big-endian int)
-    for _press in range(10):
+    for _press in range(9):
       for _ in range(50):
         raw ^= counter_bit
         a.feed(sim.step(raw_17c=raw, gear_mt=3), True)
@@ -709,17 +709,18 @@ class TestNonActuating(OpenpilotTestCase):
         self.assertNotIn(f"import {mod}", text)
       self.assertNotIn("sendcan\", conflate", text.replace("sub_sock(\"sendcan\", conflate", ""))
 
-  def test_ui_writes_only_console_params(self):
+  def test_ui_writes_only_through_the_allowlist(self):
+    # Task 9 Part C: the UI may now set its sessions' feature toggles, but ONLY via dev_test_params.write_param, which
+    # refuses anything outside sessions.UI_WRITABLE. No other Param write (direct or via a Param-bound widget) in the UI.
     ui = PKG.parents[2] / "selfdrive" / "ui" / "sunnypilot" / "mici"
-    files = [ui / "layouts" / "dev_test.py", ui / "onroad" / "test_console_chip.py"]
+    files = [ui / "layouts" / "dev_test.py", ui / "layouts" / "dev_test_sessions.py", ui / "onroad" / "test_console_chip.py"]
     for path in files:
       self.assertTrue(path.exists(), path)
-      for name, node in self._calls(path):
-        if name in ("put", "put_bool", "put_nonblocking", "remove"):
-          arg = node.args[0]
-          key = arg.value if isinstance(arg, ast.Constant) else arg.id if isinstance(arg, ast.Name) else None
-          self.assertIn(key, CONSOLE_PARAMS + ("P_SELECTED", "P_ARMED", "P_BACKGROUND", "P_BUTTON", "P_PRESS"),
-                        f"{path.name} writes {key}")
+      for name, _ in self._calls(path):
+        self.assertNotIn(name, ("put", "put_bool", "put_nonblocking", "put_bool_nonblocking", "remove"), path.name)
+        self.assertNotIn(name, ("BigParamControl", "BigMultiParamToggle", "BigCircleParamControl"), path.name)
+    writer = [(name, node) for name, node in self._calls(ui / "layouts" / "dev_test_params.py") if name in ("put", "put_bool")]
+    self.assertEqual(len(writer), 2, "write_param is the single writer")
 
   def test_imported_control_modules_untouched(self):
     # the console imports constants/pure functions from the feature modules; it must never assign into them
@@ -764,6 +765,7 @@ class TestUiHelpers(OpenpilotTestCase):
     from openpilot.system.ui.lib.application import EXTRA_FONT_CHARS
     allowed = set(map(chr, range(32, 127))) | set(EXTRA_FONT_CHARS) | {"\n"}
     srcs = list(PKG.glob("*.py")) + [PKG.parents[2] / "selfdrive/ui/sunnypilot/mici/layouts/dev_test.py",
+                                     PKG.parents[2] / "selfdrive/ui/sunnypilot/mici/layouts/dev_test_sessions.py",
                                      PKG.parents[2] / "selfdrive/ui/sunnypilot/mici/onroad/test_console_chip.py"]
     for path in srcs:
       tree = ast.parse(path.read_text())

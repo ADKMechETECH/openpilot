@@ -277,7 +277,7 @@ class Console:
 
   def _update_background(self, s: Sample) -> None:
     for spec in TESTS:
-      if spec.kind != Kind.TELEMETRY or (self.armed and spec.id == self.selected):
+      if spec.kind != Kind.TELEMETRY or not spec.background or (self.armed and spec.id == self.selected):
         continue
       run = self.bg_runs.get(spec.id)
       if run is None:

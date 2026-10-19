@@ -4,16 +4,18 @@ Copyright (c) 2021-, Haibin Wen, sunnypilot, and a number of other contributors.
 This file is part of sunnypilot and is licensed under the MIT License.
 See the LICENSE.md file in the root directory for more details.
 
-"dev test" panel (DEV-TEST BUILD ONLY): the on-car test console's ordered validation plan, grouped by phase.
-Select a test, arm it; the steering-wheel button starts/stops its capture. The panel writes only the console's own
-TestConsole* Params — it never changes a feature toggle (each test lists the toggles it expects; set them yourself).
+"dev test" phase view (DEV-TEST BUILD ONLY): the on-car test console's ordered validation plan, grouped by phase —
+the secondary view; the session view (dev_test_sessions.py) is the default entry. Select a test, arm it; the
+steering-wheel button starts/stops its capture. This view writes only the console's own TestConsole* Params, through
+dev_test_params.write_param (the session view may also set its sessions' allowlisted feature toggles there).
 Arming is never blocked: the prereq line is a recommendation, the driver decides.
 """
 import time
 
 import pyray as rl
 
-from openpilot.selfdrive.ui.mici.widgets.button import BigButton, BigMultiToggle, BigParamControl, BigToggle, GreyBigButton
+from openpilot.selfdrive.ui.mici.widgets.button import BigButton, BigMultiToggle, BigToggle, GreyBigButton
+from openpilot.selfdrive.ui.sunnypilot.mici.layouts.dev_test_params import write_param
 from openpilot.selfdrive.ui.ui_state import ui_state
 from openpilot.sunnypilot.selfdrive.test_console.button import PRESS_MODES
 from openpilot.sunnypilot.selfdrive.test_console.conditions import CONDITIONS, toggle_label
@@ -30,6 +32,19 @@ STATE_TEXT = {"idle": "not armed", "armed": "ARMED: press to start", "capturing"
 
 def _refresh() -> None:
   poller.update(time.monotonic())
+
+
+def set_armed(test_id: str, armed: bool) -> None:
+  """Arm test_id (disarming whatever was armed), or disarm it if it is the selected one."""
+  if armed:
+    write_param(ui_state.params, P_SELECTED, test_id)
+    write_param(ui_state.params, P_ARMED, True)
+  elif ui_state.params.get(P_SELECTED) == test_id:
+    write_param(ui_state.params, P_ARMED, False)
+
+
+def is_armed(test_id: str) -> bool:
+  return ui_state.params.get(P_SELECTED) == test_id and ui_state.params.get_bool(P_ARMED)
 
 
 def _active(spec: TestSpec) -> dict:
@@ -81,19 +96,15 @@ class TestDetailPage(NavScroller):
     self._scroller.add_widgets([
       self._arm, self._status, self._conds, self._result, self._button, self._prereq, *how,
       InfoCard(f"phase {phase.num}: {phase.title.lower()}", phase.setup + first),
-      InfoCard("set these toggles yourself", toggles),
+      InfoCard("toggles this test expects", toggles + " • set them in its session page (or settings)"),
       InfoCard("pass if", spec.passes or "characterization only: CAPTURED, no pass/fail"),
     ])
 
   def _is_armed(self) -> bool:
-    return ui_state.params.get(P_SELECTED) == self.spec.id and ui_state.params.get_bool(P_ARMED)
+    return is_armed(self.spec.id)
 
   def _on_arm(self, state: bool) -> None:
-    if state:
-      ui_state.params.put(P_SELECTED, self.spec.id)
-      ui_state.params.put_bool(P_ARMED, True)
-    elif ui_state.params.get(P_SELECTED) == self.spec.id:
-      ui_state.params.put_bool(P_ARMED, False)
+    set_armed(self.spec.id, state)
 
   def show_event(self):
     super().show_event()
@@ -155,15 +166,16 @@ class TestButton(BigButton):
 class DevTestLayoutMici(NavScroller):
   def __init__(self):
     super().__init__()
-    self._live = InfoCard("dev test console", "")
-    background = BigParamControl("background telemetry", P_BACKGROUND)
+    self._live = InfoCard("dev test • phases", "")
+    background = BigToggle("background telemetry", initial_state=ui_state.params.get_bool(P_BACKGROUND),
+                           toggle_callback=lambda v: write_param(ui_state.params, P_BACKGROUND, v))
     current = ui_state.params.get(P_PRESS, return_default=True)
     self._press = BigMultiToggle("start press", list(PRESS_MODES), select_callback=self._on_press)
     self._press.set_value(current if current in PRESS_MODES else PRESS_MODES[0])
     items = [
       self._live,
-      InfoCard("telemetry only", "Sets no toggles, no driving authority. Arm a test, then press the wheel button to " +
-                                 "start/stop. Select/arm stopped or via a passenger."),
+      InfoCard("phase view", "Sets no feature toggles here (the session view can), no driving authority. Arm a test, " +
+                             "then press the wheel button to start/stop. Select/arm stopped or via a passenger."),
       InfoCard("first run on the C4", "Run phases 0, 1, 2 and the phase 7 calibration (E0c, E0a, E0b) first: they turn " +
                                      "the car from unknown to known."),
       background, self._press,
@@ -175,7 +187,7 @@ class DevTestLayoutMici(NavScroller):
     assert sum(isinstance(i, TestButton) for i in items) == len(TESTS)
 
   def _on_press(self, value: str) -> None:
-    ui_state.params.put(P_PRESS, value)
+    write_param(ui_state.params, P_PRESS, value)
 
   def _update_state(self):
     super()._update_state()
@@ -190,7 +202,7 @@ class DevTestLayoutMici(NavScroller):
     else:
       sel = ui_state.params.get(P_SELECTED) or ""
       text = "offline (offroad)" + (f" • {sel} armed" if sel and ui_state.params.get_bool(P_ARMED) else "")
-    self._live.update_text("dev test console", text)
+    self._live.update_text("dev test • phases", text)
 
 
 def dev_test_button_icon() -> rl.Texture:
