@@ -39,6 +39,7 @@ Run from the openpilot checkout on the civic-6mt-dev-test branch (needs network 
 """
 import json
 import os
+import signal
 import sys
 import tempfile
 import time
@@ -46,8 +47,9 @@ import time
 from opendbc.car import structs
 from openpilot.cereal import log, messaging
 from openpilot.selfdrive.test.process_replay.compare_logs import compare_logs
+from openpilot.selfdrive.test.process_replay.migration import migrate_all
 from openpilot.selfdrive.test.process_replay.process_replay import CONFIGS, MessageBasedRcvCallback, ProcessConfig, \
-  get_car_params_callback, replay_process
+  _replay_multi_process, get_car_params_callback, replay_process
 from openpilot.selfdrive.test.process_replay.test_processes import get_log_data, segments
 from openpilot.sunnypilot.selfdrive.controls.lib.engine_brake_model import engine_rpm_at
 from openpilot.tools.lib.logreader import LogReader
@@ -124,6 +126,13 @@ def with_process(msgs, name: str, running: bool) -> list:
   return out
 
 
+REPLAY_TIMEOUT = 300   # s per replay; a clean one takes ~1 min
+
+
+def _timeout(*_):
+  raise TimeoutError(f"replay did not finish in {REPLAY_TIMEOUT} s")
+
+
 def isolation(refdir: str, cars: list[str]) -> bool:
   from openpilot.sunnypilot.selfdrive.test_console.guard import Guard
   os.environ["TEST_CONSOLE_PROFILE"] = "civic_6mt"
@@ -134,24 +143,29 @@ def isolation(refdir: str, cars: list[str]) -> bool:
     _, dat = get_log_data(segment)
     # (1) a console failing on every frame: driving processes untouched, the console reports inert
     for proc in ("controlsd", "plannerd"):
+      signal.signal(signal.SIGALRM, _timeout)
+      signal.alarm(REPLAY_TIMEOUT)   # a dead console (no guard) leaves the harness waiting on it forever
       try:
         same, st = replay_with_console(car, dat, proc, refdir, fault="frame")
-      except Exception as e:   # the console process died (no guard): the replay can't continue
+      except Exception as e:   # the console process died (no guard): the replay can't continue / timed out
         print(f"{car} {proc}: replay raised with the console fault injected ({type(e).__name__}: {e}) - containment broken")
-        ok = False
-        continue
+        return False   # stop here: the dead console's leftovers can hang the next replay
+      finally:
+        signal.alarm(0)
       inert = bool(st.get("inert")) and int(st.get("errors") or 0) >= Guard.MAX_CONSECUTIVE and st.get("state") == "inert"
       if not inert:
         print(f"    console did not report inert: {st}")
       ok &= same and inert
     # (2) selfdrived: a dead test_consoled is ignored; a dead non-ignored process is not (control)
-    msgs = list(LogReader.from_bytes(dat))
-    n_ms = sum(1 for m in msgs if m.which() == "managerState")
     cfg = next(c for c in CONFIGS if c.proc_name == "selfdrived")
+    # replay_process's own migration rewrites every managerState to "all running" - migrate first, then inject
+    msgs = migrate_all(LogReader.from_bytes(dat), manager_states=True, panda_states=True,
+                       camera_states=len(cfg.vision_pubs) != 0)
+    n_ms = sum(1 for m in msgs if m.which() == "managerState")
     outs = {}
     for label, name, running in (("alive", "test_consoled", True), ("dead", "test_consoled", False),
                                  ("control", "tc_isolation_control", False)):
-      out = replay_process(cfg, with_process(msgs, name, running), disable_progress=True)
+      out = _replay_multi_process([cfg], with_process(msgs, name, running), None, None, None, None, True)
       outs[label] = [m for m in out if m.which() in cfg.subs]
     same = compare_logs(outs["alive"], outs["dead"], cfg.ignore, [], cfg.tolerance)
     control = compare_logs(outs["alive"], outs["control"], cfg.ignore, [], cfg.tolerance)

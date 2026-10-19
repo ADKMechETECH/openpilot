@@ -284,3 +284,17 @@ class TestB4ProofTools(OpenpilotTestCase):
       if button.update(100. + at, ev):
         fired.append(at)
     self.assertEqual(len(fired), 3, f"start / stop / resume, got {fired}")
+
+
+class TestB4GuardStreak(OpenpilotTestCase):
+  def test_persistent_failure_goes_inert_despite_other_sites_succeeding(self):
+    # the isolation replay's finding: the daemon loop runs drain (succeeds) and frame (fails) every iteration
+    from openpilot.sunnypilot.selfdrive.test_console.guard import Guard
+    g = Guard()
+
+    def boom():
+      raise ValueError("x")
+    for _ in range(Guard.MAX_CONSECUTIVE):
+      g.run("drain", lambda: None)
+      g.run("frame", boom)
+    self.assertTrue(g.inert, "a frame step failing every frame must go inert")

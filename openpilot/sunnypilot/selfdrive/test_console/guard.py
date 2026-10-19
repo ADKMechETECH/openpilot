@@ -38,12 +38,14 @@ def guarded(fn=None, *, default=None):
 
 
 class Guard:
-  """The daemon's per-frame guard: counts failures; after MAX_CONSECUTIVE in a row the console goes inert."""
+  """The daemon's per-frame guard: counts failures; after MAX_CONSECUTIVE in a row AT ONE SITE the console goes inert.
+  Task 13 B4: the streak is per site - with one global streak, the drain step succeeding every loop reset a frame step
+  that failed every frame, so a persistently broken console never went inert (found by the isolation replay)."""
   MAX_CONSECUTIVE = 100
 
   def __init__(self):
     self.errors = 0
-    self.consecutive = 0
+    self.consecutive: dict[str, int] = {}
     self.inert = False
 
   def run(self, site: str, fn, *a, force: bool = False, **kw):
@@ -52,13 +54,13 @@ class Guard:
       return None
     try:
       out = fn(*a, **kw)
-      self.consecutive = 0
+      self.consecutive[site] = 0
       return out
     except Exception:
       self.errors += 1
-      self.consecutive += 1
+      n = self.consecutive[site] = self.consecutive.get(site, 0) + 1
       log_once(site)
-      if self.consecutive >= self.MAX_CONSECUTIVE:
+      if n >= self.MAX_CONSECUTIVE:
         self.inert = True
-        cloudlog.error(f"test console: {self.consecutive} consecutive failures in {site} - going inert for this drive")
+        cloudlog.error(f"test console: {n} consecutive failures in {site} - going inert for this drive")
       return None

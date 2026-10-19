@@ -28,7 +28,7 @@ MUTATIONS = [
     "  return {k: _typed(v, RESULT_TYPES) for k, v in d.items() if isinstance(k, str) and isinstance(v, dict)}", "  return d"),
   m("d1_guard_raises", "D1 D-17", f"{TC}/guard.py", "      except Exception:\n        log_once(site)\n        return default",
     "      except ZeroDivisionError:\n        log_once(site)\n        return default"),
-  m("d1_guard_never_inert", "D1", f"{TC}/guard.py", "      if self.consecutive >= self.MAX_CONSECUTIVE:", "      if False:"),
+  m("d1_guard_never_inert", "D1", f"{TC}/guard.py", "      if n >= self.MAX_CONSECUTIVE:", "      if False:"),
   m("d1_allowlist_uncapped", "D1", f"{TC}/sessions.py", "frozenset(profile.allowlist) & CORE_MAX_ALLOW if", "frozenset(profile.allowlist) if"),
   m("d1_selfdrived_watches_console", "D1 D-01", "openpilot/selfdrive/selfdrived/selfdrived.py",
     "{'mapd', 'test_consoled'}", "{'mapd', }"),
@@ -42,8 +42,18 @@ MUTATIONS = [
     "    return (None if status == PASS and not self.complete else status), detail", "    return status, detail"),
   m("d3_c1_raw_ratio", "D3 D-03", R, "  ratio = (acc - coast) / want if math.isfinite(coast) and want < -0.05 else math.nan",
     "  ratio = acc / cmd if cmd < -1e-3 else math.nan"),
-  m("d3_c1_uncalibrated_pass", "D3 D-03", R, '''  if not coast_calibrated(a.ctx):
-    return CAPTURED, detail + f" [provisional: {COAST_CAL_TEST} coast calibration not complete]"''', ""),
+  # D-03 since Task 13 B1 has two layers (no fit -> CAPTURED, and no fit -> no coast estimate); the old bug is both gone
+  m("d3_c1_uncalibrated_pass", "D3 D-03 / T13 B1", R, '''  coast = seed + fit_offset(a)
+  want = cmd - coast
+  ratio = (acc - coast) / want if math.isfinite(coast) and want < -0.05 else math.nan
+  detail = (f"delivered {_fmt(ratio * 100, 0)}% of the braking beyond coasting (cmd {cmd:.2f}, a_ego {acc:.2f}, " +
+            f"coast fit {_fmt(coast)}, seed {_fmt(seed)}); {_assist_sent(a)}")
+  if not coast_calibrated(a.ctx):
+    return CAPTURED, detail + f" [provisional: coast model not fit ({COAST_CAL_TEST})]"''', '''  coast = seed
+  want = cmd - coast
+  ratio = (acc - coast) / want if math.isfinite(coast) and want < -0.05 else math.nan
+  detail = (f"delivered {_fmt(ratio * 100, 0)}% of the braking beyond coasting (cmd {cmd:.2f}, a_ego {acc:.2f}, " +
+            f"coast fit {_fmt(coast)}, seed {_fmt(seed)}); {_assist_sent(a)}")''', T + T13),
   m("d3_s5_reopen_not_leak", "D3 D-04", f"{TC}/analyzers.py",
     '        ep["reopened"] = s.t - ep["t_close"] <= self.REOPEN_LEAK', '        ep["reopened"] = False'),
   m("d3_s5_close_gas_ok", "D3 D-04", f"{TC}/analyzers.py", '          ep["close_gas"] = self._gas_at_close', '          ep["close_gas"] = False'),
@@ -100,6 +110,8 @@ MUTATIONS = [
   m("t13_b3_inert_status_skipped", "T13 B3", f"{TC}/guard.py", "    if self.inert and not force:", "    if self.inert:", T13),
   m("t13_b3_errors_not_shown", "T13 B3", "openpilot/selfdrive/ui/sunnypilot/mici/onroad/test_console_chip.py",
     "  if st.get(\"errors\"):\n", "  if False:\n", T13),
+  m("t13_b4_guard_global_streak", "T13 B4", f"{TC}/guard.py", "      self.consecutive[site] = 0\n",
+    "      self.consecutive = dict.fromkeys(self.consecutive, 0)\n", T13),
   m("t13_b3_inert_chip_vanishes", "T13 B3", "openpilot/selfdrive/ui/sunnypilot/mici/onroad/test_console_chip.py",
     "  if st.get(\"inert\"):\n", "  if False:\n", T13),
 ]
