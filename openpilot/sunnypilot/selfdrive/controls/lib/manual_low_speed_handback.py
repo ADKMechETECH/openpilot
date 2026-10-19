@@ -21,11 +21,21 @@ Sequence, once engaged and below the handback speed (latched until disengaged):
 Engaging below the handback speed (+ hysteresis) is refused (stock belowEngageSpeed, with manualLowSpeedNoEntry as the
 text), so openpilot can't be engaged at a standstill and pull away.
 
-Emergency braking is never handed back (Task 12 A3, Rule 5): while braking_urgency() reports a reason (FCW, a
-close/closing lead, a hard or stop request, invalid inputs, ...) the braking side stays at the incoming limit and the
-ramp clock stops — the car may brake to a stop; the handback finishes (re-seeded from the current command) only once
-the urgency clears. Driver-monitoring forceDecel never lets a handback start and aborts one in progress: stock brings
-the car to a stop (a stall is acceptable in that emergency).
+Emergency braking is never handed back (Task 12 A3, Rule 5), but only a real emergency counts (Task 13 A1): the
+handback uses braking_urgency.handback_urgency(), not the broad reason set. FCW, stock AEB, a hard (< -1.5 m/s^2) plan
+request and invalid/stale inputs pass through; the plan's "stopping" request and the broad lead reasons do not — an
+ordinary approach to slow or stopped traffic hands back at the handback speed exactly as with no lead. A lead counts
+only when it is imminent: a driver who brakes at a moderate 2 m/s^2 only after the ramp, the margin and a 1.5 s
+reaction could not stop 2 m short of it. While that holds, the braking side stays at the incoming limit and the ramp
+clock stops (the car may brake to a stop); the handback finishes, re-seeded from the current command, once it clears.
+An imminent lead latches until the stop (as openpilot brakes, the lead soon stops looking imminent — handing back then
+would leave the car rolling a few metres behind a stopped car).
+Standstill resolution (Task 13 A1): openpilot never holds a manual at a stop. If the car has stood still for
+STANDSTILL_RESOLVE seconds while urgent, the handback goes ahead anyway — the braking side ramps to 0 over the ramp
+time and openpilot disengages; the driver / Auto Brake Hold / hill-hold hold the car, as after any handback. If the car
+moves again (> STANDSTILL_SPEED + hysteresis) before the disengage, urgency counts again.
+Driver-monitoring forceDecel never lets a handback start and aborts one in progress: stock brings the car to a stop (a
+stall is acceptable in that emergency).
 
 ONE source of truth: controlsd runs this state machine and publishes it (carControlSP.manualLongitudinal: active,
 rampDone, disengage, the latched speed/ramp); selfdrived acts on the published state only (car_specific.py) — no second
@@ -39,6 +49,7 @@ from opendbc.car.structs import car
 from openpilot.common.params import Params
 from openpilot.common.realtime import DT_CTRL
 from openpilot.common.swaglog import cloudlog
+from openpilot.sunnypilot.selfdrive.controls.lib.braking_urgency import HANDBACK_DRIVER_REACTION
 
 TransmissionType = car.CarParams.TransmissionType
 
@@ -51,6 +62,10 @@ DEFAULT_RAMP_TIME = 0.5        # s, accel command ramps to 0 over this before th
 MAX_RAMP_TIME = 2.0            # s
 DISENGAGE_MARGIN = 0.1         # s, selfdrived disengages this long after the ramp ends (cross-process timing slack)
 ENGAGE_HYSTERESIS = 0.5        # m/s, engaging is refused below handback speed + this
+STANDSTILL_SPEED = 0.1         # m/s: below this the car is stopped (standstill resolution)
+STANDSTILL_MOVING = 0.5        # m/s: moving again above this -> urgency counts again
+STANDSTILL_RESOLVE = 0.5       # s stopped while urgent -> hand back anyway (never hold a manual at a stop)
+UNCONDITIONAL = ("fcw", "stock_aeb")  # never resolved at a stop (FCW can't fire at a standstill anyway: planner gate)
 
 
 def _read_float(params: Params, key: str, default: float, lo: float, hi: float) -> float:
@@ -82,6 +97,14 @@ class LowSpeedHandback:
     self.timer = 0.
     self.accel_start = 0.
     self.urgent = False
+    self.standstill_timer = 0.
+    self.resolved = False  # standstill resolution: stopped while urgent -> hand back anyway
+    self.lead_latched = False  # an imminent lead was seen: braking stays until the stop (then standstill resolution)
+
+  @property
+  def reaction_time(self) -> float:
+    """Ramp + disengage margin + the driver's reaction: how long until the driver brakes (handback_urgency)."""
+    return self.ramp_time + DISENGAGE_MARGIN + HANDBACK_DRIVER_REACTION
 
   def read_params(self) -> None:
     # call at 1 Hz; values are applied only while disengaged, so a change never alters a handback in progress
@@ -90,19 +113,35 @@ class LowSpeedHandback:
 
   def update(self, enabled: bool, v_ego: float, last_accel: float = 0., urgency: str | None = None,
              force_decel: bool = False) -> None:
-    """Call every controlsd frame. last_accel: the accel command sent on the previous frame; urgency: braking_urgency()."""
+    """Call every controlsd frame. last_accel: the accel command sent on the previous frame; urgency: the handback's
+    carve-out, braking_urgency.handback_urgency() (Task 13 A1) — not the broad braking_urgency() set."""
     if not self.available:
       return
-    urgent = urgency is not None
+    if self.lead_latched and urgency is None:
+      urgency = "lead_imminent"  # an imminent lead holds the braking until the stop: never hand back mid-stop
+    if self.active and urgency is not None and urgency not in UNCONDITIONAL and v_ego < STANDSTILL_SPEED:
+      self.standstill_timer += DT_CTRL
+      if self.standstill_timer >= STANDSTILL_RESOLVE - 1e-6 and not self.resolved:
+        self.resolved = True
+        cloudlog.event("manual_low_speed_handback_standstill", process=self.process, urgency=urgency)
+    else:
+      self.standstill_timer = 0.
+      if v_ego > STANDSTILL_MOVING:
+        self.resolved = False
+    urgent = urgency is not None and not self.resolved
     if not enabled:
       self.active = False
       self.timer = 0.
+      self.resolved = False
+      self.lead_latched = False
       self.speed, self.ramp_time = self._requested
     elif force_decel:
       if self.active:
         cloudlog.event("manual_low_speed_handback_abort", process=self.process, reason="force_decel", v_ego=v_ego)
       self.active = False   # stock brings the car to a stop; no handback while driver monitoring forces a decel
       self.timer = 0.
+      self.resolved = False
+      self.lead_latched = False
     elif not self.active:
       if v_ego < self.speed:
         self.active = True
@@ -118,6 +157,8 @@ class LowSpeedHandback:
         self.accel_start = last_accel
       self.timer += DT_CTRL
     self.urgent = urgent and self.active
+    if self.active and urgency == "lead_imminent":
+      self.lead_latched = True
 
   @property
   def ramp_done(self) -> bool:

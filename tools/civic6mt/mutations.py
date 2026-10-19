@@ -13,6 +13,8 @@ GAA = [f"{T}/test_gear_aware_accel.py"]
 B3 = [f"{T}/test_task12_nsb_latch.py"]
 EV = ["openpilot/sunnypilot/selfdrive/car/tests/test_clutch_gate_events.py"]
 ODBC = ["opendbc_repo/opendbc/car/honda/tests/test_manual_carstate.py"]
+CSIG = [f"{T}/test_task13_clutch_signal.py"]
+TRIP = [f"{T}/test_rule5.py::TestRule5Tripwire"]
 
 
 def m(mid, finding, file, old, new, tests):
@@ -87,7 +89,7 @@ MUTATIONS = [
   m("b1_lower_target_capped", "B1 C-01", f"{SP}/lib/no_service_brake.py",
     "    target_low = v_target is not None and v_target < v_set - 0.1", "    target_low = False", NSB),
   m("b2_margin_unclamped", "B2 C-04", f"{SP}/lib/no_service_brake.py",
-    'DEFAULT_OVERSPEED_MARGIN, 0.5, 15.), ceiling)', 'DEFAULT_OVERSPEED_MARGIN, 0.5, 15.), 99.)', NSB),
+    '               MAX_OVERSPEED_MARGIN, ceiling - PULSE_MIN_BAND)', '               99.)', NSB),
   m("b2_alert_no_repeat", "B2 C-06", f"{SP}/lib/no_service_brake.py",
     "(rising or not self._alerted)", "(not self._alerted)", NSB),
   m("b2_no_set_drop_grace", "B2 A-F-L5", f"{SP}/lib/no_service_brake.py",
@@ -133,4 +135,34 @@ MUTATIONS = [
     "ret.deprecated.clutchPressed = gear_mt not in GEAR_MT_COUPLED", "ret.deprecated.clutchPressed = gear_mt == 0", ODBC),
   m("b5_odbc_integra_rpm", "B5 B-M7", "opendbc_repo/opendbc/car/honda/carstate.py",
     "        if self.CP.carFingerprint == CAR.ACURA_INTEGRA:\n", "        if False:\n", ODBC),
+  # --- Task 13 (verification fix-ups) -------------------------------------------------------------------------------
+  m("t13_a1_broad_urgency", "T13 A1 N-1", f"{SP}/controlsd_ext.py",
+    "urgency = handback_urgency(self.urgency, sm['radarState'], v_ego, hb.reaction_time) if hb.available else None",
+    "urgency = self.urgency if hb.available else None", HB + R5),
+  m("t13_a1_imminent_ignored", "T13 A1", f"{SP}/lib/braking_urgency.py",
+    "    reason = handback_lead_reason(lead, v_ego, reaction)\n", "    reason = None\n", HB + R5),
+  m("t13_a1_no_standstill_resolution", "T13 A1 review2 N6", f"{SP}/lib/manual_low_speed_handback.py",
+    "        self.resolved = True\n", "        self.resolved = False\n", HB),
+  m("t13_a1_no_imminent_latch", "T13 A1", f"{SP}/lib/manual_low_speed_handback.py",
+    "      self.lead_latched = True\n", "      pass\n", HB),
+  m("t13_a1_fcw_resolved", "T13 A1", f"{SP}/lib/manual_low_speed_handback.py",
+    "urgency not in UNCONDITIONAL and ", "", HB),
+  m("t13_a2_margin_tied_to_ceiling", "T13 A2 N-2 N3", f"{SP}/lib/no_service_brake.py",
+    '               MAX_OVERSPEED_MARGIN, ceiling - PULSE_MIN_BAND)', '               ceiling)', NSB),
+  m("t13_a3_odbc_parser_counter", "T13 A3 review2 N2", "opendbc_repo/opendbc/car/honda/carstate.py",
+    "      parsers[Bus.pt].message_states[GEARBOX_ALT_2_ADDR].ignore_counter = True\n", "      pass\n", ODBC + CSIG),
+  m("t13_a3_odbc_no_counter_check", "T13 A3 review2 N2", "opendbc_repo/opendbc/car/honda/carstate.py",
+    "                                   self.gearbox_alt_2_counter_fail == 0 and \\\n", "", ODBC + CSIG),
+  m("t13_a3_odbc_no_reject_check", "T13 A3 review2 N2", "opendbc_repo/opendbc/car/honda/carstate.py",
+    "(rejected == 0 or (cp.last_nonempty_nanos - rejected) >= GEARBOX_ALT_2_REJECT_HOLD_NS)", "True", ODBC),
+  m("t13_a3_gaa_control_frame", "T13 A3 (GearAware frame timing)", f"{SP}/controlsd_ext.py",
+    "    return min(a_target, features.aTargetStock)\n", "    return a_target\n", R5),
+  m("t13_a3_gaa_planner_step", "T13 A3 (GearAware frame timing)", "openpilot/selfdrive/controls/lib/longitudinal_planner.py",
+    "        self.a_cruise = min(self.a_cruise, self.a_cruise_stock)\n", "        pass\n", R5),
+  # C2: the tripwire alone (not the matrix) must catch a limiter that stops branching on urgency
+  m("t13_c2_tripwire_handback", "T13 C2 review2 N4", f"{SP}/lib/manual_low_speed_handback.py",
+    "    lo = accel_limits[0] if self.urgent else max(", "    lo = max(", TRIP),
+  m("t13_c2_tripwire_nsb_gate", "T13 C2 review2 N4", f"{SP}/controlsd_ext.py",
+    "    if self.urgency is not None:\n      self.no_service_brake_pulse.floor = None\n      return accel_limits\n",
+    "    self.no_service_brake_pulse.floor = self.no_service_brake_pulse.floor  # urgency\n", TRIP),
 ]

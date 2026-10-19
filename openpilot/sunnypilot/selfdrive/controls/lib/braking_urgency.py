@@ -25,6 +25,13 @@ re-admits the lead MPC on (owner decision 2026-10-19: slow only when braking is 
 or a collision — never ordinary car-following): FCW / stock AEB, a lead inside the TTC window, a close lead that is
 also closing (or braking), a lead braking hard within COLLISION_BRAKING_MAX_HEADWAY, or the lead MPC itself demanding
 more than MPC_NEEDED_DECEL. A slower car far ahead, or steady following with no closing, is not a threat.
+
+handback_urgency() is the manual low-speed handback's own, narrower carve-out (Task 13 A1): the handback exists so the
+driver takes the final stop, so an ordinary approach to slow or stopped traffic must NOT freeze it (the broad lead
+reasons did: a stopped car 40 m ahead held the manual at a standstill, engaged, for good). It keeps every non-lead
+reason except "stopping" (the plan asking to stop is exactly what the handback hands over), and replaces the lead
+reasons with one kinematic test: the lead is imminent when a driver who starts braking only after the handback
+(ramp + margin + reaction) at a moderate HANDBACK_DRIVER_DECEL could not stop HANDBACK_MARGIN short of it.
 """
 import math
 
@@ -42,6 +49,11 @@ COLLISION_REASONS = ("fcw", "stock_aeb", "lead_ttc", "lead_close", "lead_braking
 COLLISION_CLOSE_MIN_CLOSING = 0.3   # m/s: "close" is a collision threat only while closing (or the lead is braking)
 COLLISION_BRAKING_MAX_HEADWAY = 3.0  # s: a lead braking hard is a threat when within this headway
 MPC_NEEDED_DECEL = -1.0              # m/s^2: the lead MPC asking for more than this means braking is really needed
+# Task 13 A1: the low-speed handback's own lead test (handback_lead_reason)
+HANDBACK_REASONS = ("invalid_plan", "invalid_radar", "force_decel", "fcw", "stock_aeb", "hard_decel")  # kept from R5
+HANDBACK_DRIVER_REACTION = 1.5       # s: from the handback prompt to the driver braking (on top of ramp + margin)
+HANDBACK_DRIVER_DECEL = 2.0          # m/s^2: a moderate driver stop
+HANDBACK_MARGIN = 2.0                # m: the driver's stop must end at least this far short of the lead
 
 
 def lead_reason(lead, v_ego: float, ttc_limit: float = LEAD_TTC, closing_limit: float = LEAD_CLOSING) -> str | None:
@@ -73,6 +85,36 @@ def collision_threat(lead, v_ego: float) -> str | None:
   if reason == "lead_braking":
     return reason if lead.dRel < COLLISION_BRAKING_MAX_HEADWAY * max(v_ego, 1.) else None
   return reason if reason in COLLISION_REASONS else None
+
+
+def handback_lead_reason(lead, v_ego: float, reaction: float) -> str | None:
+  """'lead_imminent' if a driver braking at HANDBACK_DRIVER_DECEL after `reaction` s could not stop HANDBACK_MARGIN short
+  of this lead: with the lead holding its speed (closing kinematics), or braking to a stop at its current decel."""
+  if not lead.present:
+    return None
+  room = lead.dRel - HANDBACK_MARGIN
+  closing = -lead.vRel
+  if closing > 0. and closing * reaction + closing ** 2 / (2. * HANDBACK_DRIVER_DECEL) > room:
+    return "lead_imminent"
+  if lead.aLeadK < -0.1:
+    lead_stop = max(lead.vLead, 0.) ** 2 / (2. * -lead.aLeadK)
+    v = max(v_ego, 0.)
+    if v * reaction + v ** 2 / (2. * HANDBACK_DRIVER_DECEL) > room + lead_stop:
+      return "lead_imminent"
+  return None
+
+
+def handback_urgency(urgency: str | None, radar, v_ego: float, reaction: float) -> str | None:
+  """The handback's carve-out (Task 13 A1), from this frame's braking_urgency() reason: the non-lead reasons in
+  HANDBACK_REASONS pass through; "stopping" and the broad lead reasons do not; an imminent lead (handback_lead_reason)
+  always counts. forceDecel is in the set, but the handback aborts on it before it looks at urgency."""
+  if urgency in HANDBACK_REASONS:
+    return urgency
+  for lead in (radar.leadOne, radar.leadTwo):
+    reason = handback_lead_reason(lead, v_ego, reaction)
+    if reason is not None:
+      return reason
+  return None
 
 
 def braking_urgency(*, plan_ok: bool, radar_ok: bool, force_decel: bool, fcw: bool, stock_aeb: bool, should_stop: bool,

@@ -40,11 +40,18 @@ Task 12 (both modes):
     state urgent) AND controlsd, checking its own urgency every control frame, ignores the floor. Never debounced.
   - B1: a cruise target lowered below the set speed by Smart Cruise Control (vision / map) or Speed Limit Assist is a
     real braking request: the clamp is released, and overspeed is measured against that effective target.
-  - B2: NoServiceBrakeOverspeedMargin is clamped to at most the hard ceiling; "Overspeed: Take Over" fires at the ceiling
+  - B2: NoServiceBrakeOverspeedMargin is clamped below the hard ceiling (Task 13 A2: at most the fixed MAX_OVERSPEED_MARGIN
+    6.7 m/s whatever the ceiling param says, and PULSE_MIN_BAND under the ceiling); "Overspeed: Take Over" fires at the ceiling
     in maintain mode too and repeats while still over it and speeding up; not for SET_DROP_GRACE after the driver lowers
     the set speed. The maintain mode's brake step at the margin (C-09) stays — pulse mode is the comfort fix — and its
     default floor (0.3) waits for on-car test C2 (C-07).
   - B3: the toggle, the mode and every float param latch together, only while openpilot is disengaged.
+
+Task 13 A3 (documented, not changed): the clamp is released on the BROAD Rule-5 lead reasons (any lead closing >= 1 m/s
+at any distance, TTC < 6 s, ...), wider than the handback's imminent-lead test. Kept on purpose: releasing only gives
+back openpilot's own set-speed braking (in non-adaptive that is the cruise plan, never lead-following, capped at
+-1.2 m/s^2) — the fail-safe direction. Narrowing it would remove braking near traffic on a descent, an authority
+reduction that should wait for on-car data (C1 brake strength, NSB1/NSB2). Cost: less coasting with traffic ahead.
 """
 from dataclasses import dataclass
 
@@ -62,6 +69,7 @@ MAX_DECEL_FLOOR = 3.5
 #  (Honda radarless: the camera-path negative ACCEL_COMMAND; how hard the VSA brakes on it is the open opendbc PR #2050
 #  question — unverified on our car. Not 0x1BE: that is the alternate user-brake-pedal message, not brake authority.)
 DEFAULT_OVERSPEED_MARGIN = 3.6  # m/s above set speed at which braking is allowed again
+MAX_OVERSPEED_MARGIN = 6.7      # m/s (~15 mph): fixed cap (Task 13 A2), independent of the hard-ceiling param (up to 11)
 BACKSTOP_RELEASE_RATIO = 0.5    # braking stays allowed until back under set speed + margin * ratio (hysteresis)
 # Overspeed backstop pulse mode. TODO(on-car): tune after C1 (radarless brake strength) and the maintain-mode feel
 #  (NSB2) are known; the band and the pulse force are only meaningful against the real brake authority.
@@ -141,8 +149,11 @@ class NsbParams:
 
 def read_nsb_params(params: Params, available: bool) -> NsbParams:
   ceiling = _read_float(params, "NoServiceBrakeOverspeedHardCeiling", DEFAULT_HARD_CEILING, *HARD_CEILING_RANGE)
-  # Task 12 B2 [C-04]: the margin is clamped to at most the hard ceiling, in both modes
-  margin = min(_read_float(params, "NoServiceBrakeOverspeedMargin", DEFAULT_OVERSPEED_MARGIN, 0.5, 15.), ceiling)
+  # Task 12 B2 [C-04] / Task 13 A2 [N-2, N3]: in both modes the margin is at most the fixed 6.7 m/s — raising the ceiling
+  # param (to 11) must not move the braking point to ~25 mph over — and stays PULSE_MIN_BAND under the ceiling, so braking
+  # always starts before the "Overspeed: Take Over" point (release < trigger < ceiling in pulse mode)
+  margin = min(_read_float(params, "NoServiceBrakeOverspeedMargin", DEFAULT_OVERSPEED_MARGIN, 0.5, 15.),
+               MAX_OVERSPEED_MARGIN, ceiling - PULSE_MIN_BAND)
   return NsbParams(
     enabled=available and params.get_bool("NoServiceBrakeHold"),
     # default ON: get_bool() ignores the registered default for an unset key (would read False), so use get()

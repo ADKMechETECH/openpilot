@@ -66,9 +66,10 @@ class TestHandbackComposition(OpenpilotTestCase):
     self.assertEqual(len(set(results.values())), 1, f"handback timing must not depend on the toggles: {results}")
 
   def test_adaptive_lead_stop_nsb_inert(self):
-    # adaptive: openpilot brakes for the stopping lead. Since Task 12 A3 a close/closing lead is Rule-5 urgency, so the
-    # handback keeps the brakes available and the car may be braked to a stop behind it (no contact). NoServiceBrakeHold
-    # is coupled to non-adaptive, so ON vs OFF must give the identical run (braking always allowed).
+    # adaptive: openpilot brakes for the stopping lead. Task 13 A1: the handback keeps the brakes available only while
+    # its own carve-out holds (an imminent lead — here the lead stops close ahead, so it latches and the car is braked to
+    # a stop behind it, no contact), then hands back at the stop instead of holding. NoServiceBrakeHold is coupled to
+    # non-adaptive, so ON vs OFF must give the identical run (braking always allowed).
     logs = {}
     for nsb in (False, True):
       with self.subTest(no_service_brake=nsb):
@@ -77,9 +78,11 @@ class TestHandbackComposition(OpenpilotTestCase):
         self.assertFalse(sim.contact)
         self.assertGreater(min(l["gap"] for l in log), 1.0)
         self.assertTrue(all(l["allow_brake"] for l in log))
+        self.assertTrue(any(l["hb_urgent"] for l in log), "precondition: the lead is imminent at the handback")
         for l in log:
-          if l["handback"] and l["urgency"] is not None:
+          if l["handback"] and l["hb_urgent"]:
             self.assertLessEqual(l["limits"][0], -3.0, "braking side at the stock limit while urgent")
+        self.assertFalse(log[-1]["enabled"], "handed back at the stop, not held")
         logs[nsb] = [(l["cmd"], l["enabled"]) for l in log]
     self.assertEqual(logs[False], logs[True])
 

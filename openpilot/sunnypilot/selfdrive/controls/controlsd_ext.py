@@ -4,6 +4,7 @@ Copyright (c) 2021-, Haibin Wen, sunnypilot, and a number of other contributors.
 This file is part of sunnypilot and is licensed under the MIT License.
 See the LICENSE.md file in the root directory for more details.
 """
+import math
 import time
 
 import openpilot.cereal.messaging as messaging
@@ -19,7 +20,7 @@ from openpilot.sunnypilot import PARAMS_UPDATE_PERIOD
 from openpilot.sunnypilot.livedelay.helpers import get_lat_delay
 from openpilot.sunnypilot.modeld_v2.modeld_base import ModelStateBase
 from openpilot.sunnypilot.selfdrive.controls.lib.blinker_pause_lateral import BlinkerPauseLateral
-from openpilot.sunnypilot.selfdrive.controls.lib.braking_urgency import controls_urgency, force_decel_from
+from openpilot.sunnypilot.selfdrive.controls.lib.braking_urgency import controls_urgency, force_decel_from, handback_urgency
 from openpilot.sunnypilot.selfdrive.controls.lib.clutch_reengage import TakeoverRamp, takeover_seed
 from openpilot.sunnypilot.selfdrive.controls.lib.clutch_shift_gate import ClutchShiftGate
 from openpilot.sunnypilot.selfdrive.controls.lib.engine_brake_preferred import EngineBrakePreferred
@@ -147,15 +148,30 @@ class ControlsExt(ModelStateBase):
       return accel_limits
     return self.clutch_takeover.limit_accel(long_active, CS.vEgo, self.urgency, plan.aTarget, accel_limits)
 
+  def plan_a_target(self, sm: messaging.SubMaster) -> float:
+    """The aTarget LongControl runs this frame. GearAware (Task 13 A3) shapes only the set-speed candidate in plannerd;
+    with a Rule-5 reason this control frame, take the stock-jerk plan plannerd published beside it (never higher than
+    the plan: only ever more braking / less throttle). GearAware off, or no valid plan-SP message: the plan unchanged."""
+    a_target = sm['longitudinalPlan'].aTarget
+    if self.urgency is None or not sm.all_checks(['longitudinalPlanSP']):
+      return a_target
+    features = sm['longitudinalPlanSP'].features
+    if not features.gearAware or not math.isfinite(features.aTargetStock):
+      return a_target
+    return min(a_target, features.aTargetStock)
+
   def post_clutch_takeover(self, LoC) -> None:
     pid = LoC.pid
     self.clutch_takeover.post_update(LoC.last_output_accel, pid.p + pid.i + pid.d + pid.f,
                                      LoC.long_control_state == LongCtrlState.pid)
 
   def update_low_speed_handback(self, enabled: bool, v_ego: float, last_accel: float, sm: messaging.SubMaster) -> bool:
-    """Manual transmission: returns True once the low-speed handback ramp is done (longitudinal must stop). Rule 5: it
-    never completes while braking is urgent; forceDecel blocks / aborts it."""
-    self.low_speed_handback.update(enabled, v_ego, last_accel, self.urgency, force_decel_from(sm))
+    """Manual transmission: returns True once the low-speed handback ramp is done (longitudinal must stop). Rule 5,
+    narrowed (Task 13 A1): it doesn't complete while handback_urgency() (FCW, stock AEB, a hard request, invalid inputs,
+    an imminent lead) holds — until the car has stood still a moment; forceDecel blocks / aborts it."""
+    hb = self.low_speed_handback
+    urgency = handback_urgency(self.urgency, sm['radarState'], v_ego, hb.reaction_time) if hb.available else None
+    hb.update(enabled, v_ego, last_accel, urgency, force_decel_from(sm))
     return self.low_speed_handback.ramp_done
 
   def lead_visible(self, sm: messaging.SubMaster) -> bool:

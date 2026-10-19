@@ -12,6 +12,7 @@ from openpilot.cereal import messaging
 from openpilot.common.params import Params
 from openpilot.common.realtime import DT_CTRL
 from openpilot.common.test import OpenpilotTestCase
+from openpilot.sunnypilot.selfdrive.controls.lib.braking_urgency import HANDBACK_DRIVER_DECEL, HANDBACK_DRIVER_REACTION
 from openpilot.selfdrive.controls.lib.longitudinal_planner import A_CRUISE_MAX_BP, J_CRUISE_VALS
 from openpilot.sunnypilot.selfdrive.controls.lib.clutch_reengage import RatioLock, TakeoverRamp, RATIO_LOCK_TIME, \
   TAKEOVER_JERK_BP, TAKEOVER_JERK_V, CATCHUP_RATE, DEFAULT_GAS_DEBOUNCE, DEFAULT_RATIO_TOL, STEP_BRAKE, \
@@ -397,14 +398,20 @@ class TestClosedLoop(OpenpilotTestCase):
     self.assertLess(min(r["cmd"] for r in sim.log if r["clutch"]), -0.1)
 
   def test_neutral_coast_toward_stopped_lead_adaptive(self):
-    # Task 12 A2 [A-F-H1]: adaptive mode, coasting in neutral (clutch in) toward a stopped car: openpilot brakes, no contact
+    # Task 12 A2 [A-F-H1]: adaptive mode, coasting in neutral (clutch in) toward a stopped car: openpilot brakes, no contact.
+    # Task 13 A1: it brakes down to the low-speed handback (the stopped car is still ~9-12 m off at 2.2 m/s: not
+    # imminent), hands back there, and the driver (2 m/s^2 after a 1.5 s reaction) takes the stop.
     for plant in ("open", "closed"):
       sim = ManualCarSim(speed=20., gear=4, plant=plant, lead=(120., 0.))
+      sim.driver_brake, sim.driver_reaction = HANDBACK_DRIVER_DECEL, HANDBACK_DRIVER_REACTION
       sim.run(1.0)
       sim.run(14.0, clutch=True)
       self.assertFalse(sim.contact, plant)
       self.assertGreater(sim.min_gap(), 2.0, plant)
       self.assertLess(sim.log[-1]["v"], 0.5, plant)
+      hb = next(r for r in sim.log if r["handback"])
+      self.assertLess(min(r["sent"] for r in sim.log if r["t"] < hb["t"]), -1.0, f"{plant}: openpilot braked from 20 m/s")
+      self.assertGreater(hb["gap"], 8., plant)
 
 
 class TestSeedMath(OpenpilotTestCase):

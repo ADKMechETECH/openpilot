@@ -69,6 +69,8 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
 
     self.v_desired_filter = FirstOrderFilter(init_v, 2.0, self.dt)
     self.a_cruise = init_a
+    self.a_cruise_stock = init_a  # GearAware: the set-speed candidate at stock jerk (== a_cruise while GearAware is off)
+    self.output_a_target_stock = 0.0
     self.output_a_target = init_a
     self.output_should_stop = False
 
@@ -110,6 +112,7 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
       self.v_desired_filter.x = v_ego
       self.output_a_target = np.clip(sm['carState'].aEgo, ACCEL_MIN, ACCEL_MAX)
       self.a_cruise = self.output_a_target
+      self.a_cruise_stock = self.a_cruise
 
     # Prevent divergence, smooth in current v_ego
     self.v_desired_filter.x = max(0.0, self.v_desired_filter.update(v_ego))
@@ -157,6 +160,16 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
     self.a_cruise = get_cruise_accel(is_e2e, v_cruise, v_ego,
                                      self.a_cruise, steer_angle_without_offset, self.CP, self.dt,
                                      accel_coast, self.allow_throttle, j_scale)
+    # GearAware (Task 13 A3): the stock-jerk shadow of the set-speed candidate. Under Rule-5 urgency the shaped one steps
+    # down to it here, and controlsd uses the stock plan (output_a_target_stock) in the very control frame urgency appears
+    gear_aware = self.gear_aware_accel.enabled
+    if gear_aware:
+      self.a_cruise_stock = get_cruise_accel(is_e2e, v_cruise, v_ego, self.a_cruise_stock, steer_angle_without_offset,
+                                             self.CP, self.dt, accel_coast, self.allow_throttle)
+      if self.urgency is not None:
+        self.a_cruise = min(self.a_cruise, self.a_cruise_stock)
+    else:
+      self.a_cruise_stock = self.a_cruise
     cruise_should_stop = should_stop(v_ego, self.a_cruise)
 
     if self.non_adaptive and not collision:
@@ -172,12 +185,16 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
         candidates.append((output_a_target_e2e, LongitudinalPlanSource.e2e, output_should_stop_e2e))
 
     output_a_target, self.mpc.source, _ = min(candidates, key=lambda c: c[0])
+    if gear_aware:
+      self.output_a_target_stock = float(np.clip(min(self.a_cruise_stock if src == LongitudinalPlanSource.cruise else a
+                                                     for a, src, _ in candidates), ACCEL_MIN, ACCEL_MAX))
     self.output_should_stop = any(should_stop for _, _, should_stop in candidates)
     self.output_a_target = np.clip(output_a_target, ACCEL_MIN, ACCEL_MAX)
     if self.non_adaptive and collision:
       # A1: the set-speed candidate resumes from the collision braking (ramping up at its own jerk), not from where it
       # was before the threat - no step back up when the lead MPC is dropped again
       self.a_cruise = min(self.a_cruise, float(self.output_a_target))
+      self.a_cruise_stock = min(self.a_cruise_stock, float(self.output_a_target))
     # no-service-brake mode: controlsd applies the decel floor when braking isn't allowed (aTarget stays the plan's intent)
     self.allow_brake = LongitudinalPlannerSP.update_no_service_brake(self, sm, v_ego, collision)
 
