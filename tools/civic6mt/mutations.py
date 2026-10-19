@@ -14,6 +14,7 @@ B3 = [f"{T}/test_task12_nsb_latch.py"]
 EV = ["openpilot/sunnypilot/selfdrive/car/tests/test_clutch_gate_events.py"]
 ODBC = ["opendbc_repo/opendbc/car/honda/tests/test_manual_carstate.py"]
 CSIG = [f"{T}/test_task13_clutch_signal.py"]
+TRIP = [f"{T}/test_rule5.py::TestRule5Tripwire"]
 
 
 def m(mid, finding, file, old, new, tests):
@@ -158,4 +159,10 @@ MUTATIONS = [
     "    return min(a_target, features.aTargetStock)\n", "    return a_target\n", R5),
   m("t13_a3_gaa_planner_step", "T13 A3 (GearAware frame timing)", "openpilot/selfdrive/controls/lib/longitudinal_planner.py",
     "        self.a_cruise = min(self.a_cruise, self.a_cruise_stock)\n", "        pass\n", R5),
+  # C2: the tripwire alone (not the matrix) must catch a limiter that stops branching on urgency
+  m("t13_c2_tripwire_handback", "T13 C2 review2 N4", f"{SP}/lib/manual_low_speed_handback.py",
+    "    lo = accel_limits[0] if self.urgent else max(", "    lo = max(", TRIP),
+  m("t13_c2_tripwire_nsb_gate", "T13 C2 review2 N4", f"{SP}/controlsd_ext.py",
+    "    if self.urgency is not None:\n      self.no_service_brake_pulse.floor = None\n      return accel_limits\n",
+    "    self.no_service_brake_pulse.floor = self.no_service_brake_pulse.floor  # urgency\n", TRIP),
 ]
