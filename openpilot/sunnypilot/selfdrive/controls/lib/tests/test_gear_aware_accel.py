@@ -22,13 +22,6 @@ def cs(v=15., gear=2, clutch=False):
   return CS
 
 
-def radar(closing=0.):
-  r = messaging.new_message('radarState').radarState
-  if closing:
-    r.leadOne.present, r.leadOne.dRel, r.leadOne.vRel = True, 60., -closing
-  return r
-
-
 def make(on=True, **kw):
   Params().put_bool("GearAwareAccel", on)
   CP, _ = make_cp(**kw)
@@ -48,8 +41,8 @@ class TestGearAwareAccel(OpenpilotTestCase):
                     lambda: make(op_long=False)):
       gaa = factory()  # (the param stays as each case set it while that case runs)
       for g in range(7):
-        self.assertEqual(gaa.update(True, cs(gear=g), 0., False, radar(), 0.5, 1.0), STOCK)
-        self.assertEqual(gaa.update(False, cs(gear=g), 0., False, radar(), 0.5, -0.2), STOCK)
+        self.assertEqual(gaa.update(True, cs(gear=g), 0., None, 0.5, 1.0), STOCK)
+        self.assertEqual(gaa.update(False, cs(gear=g), 0., None, 0.5, -0.2), STOCK)
     Params().remove("GearAwareAccel")
     self.assertFalse(Params().get_bool("GearAwareAccel"))
 
@@ -57,21 +50,24 @@ class TestGearAwareAccel(OpenpilotTestCase):
     gaa = make()
     for g in range(1, 7):
       v = 15. if g > 1 else 8.
-      rise, fall = gaa.update(False, cs(v=v, gear=g), 0., False, radar(), 0.5, 0.0)  # lift-off within coast span
+      rise, fall = gaa.update(False, cs(v=v, gear=g), 0., None, 0.5, 0.0)  # lift-off within coast span
       self.assertEqual(rise, JERK_SCALE_BY_GEAR[g - 1])
       self.assertEqual(fall, JERK_SCALE_BY_GEAR[g - 1])
     for kw in ({'clutch': True}, {'gear': 0}):  # clutch in / neutral: unknown gear -> stock
-      self.assertEqual(gaa.update(False, cs(**kw), 0., False, radar(), 0.5, 0.0), STOCK)
+      self.assertEqual(gaa.update(False, cs(**kw), 0., None, 0.5, 0.0), STOCK)
 
   def test_falling_stock_when_braking_needed_or_urgent(self):
     gaa = make()
     s = JERK_SCALE_BY_GEAR[1]
-    self.assertEqual(gaa.update(False, cs(), 0., False, radar(), 0.5, -1.2), (s, 1.0), "target needs the brakes")
-    self.assertEqual(gaa.update(False, cs(), 0., True, radar(), 0.5, 0.0), (s, 1.0), "FCW")
-    self.assertEqual(gaa.update(False, cs(), 0., False, radar(closing=3.), 0.5, 0.0), (s, 1.0), "closing lead")
-    self.assertEqual(gaa.update(False, cs(), 0., False, radar(), -1.0, -1.0), (s, 1.0), "already below engine braking")
-    self.assertEqual(gaa.update(False, cs(), -0.08, False, radar(), 0.5, -0.2), (s, 1.0), "downhill: no coast span")
-    self.assertEqual(gaa.update(False, cs(), 0., False, radar(), 0.5, -0.2), (s, s), "gentle lift-off: blended")
+    self.assertEqual(gaa.update(False, cs(), 0., None, 0.5, -1.2), (s, 1.0), "target needs the brakes")
+    # Rule 5 (Task 12): any braking urgency -> fully stock, rise and fall
+    for urgency in ("fcw", "lead_closing", "force_decel", "stock_aeb", "invalid_plan"):
+      self.assertEqual(gaa.update(False, cs(), 0., urgency, 0.5, 0.0), STOCK, urgency)
+    self.assertEqual(gaa.update(False, cs(), None, None, 0.5, 0.0), STOCK, "no pitch")
+    self.assertEqual(gaa.update(False, cs(), 0., None, 0.5, 0.0, clutch_valid=False), STOCK, "no clutch signal")
+    self.assertEqual(gaa.update(False, cs(), 0., None, -1.0, -1.0), (s, 1.0), "already below engine braking")
+    self.assertEqual(gaa.update(False, cs(), -0.08, None, 0.5, -0.2), (s, 1.0), "downhill: no coast span")
+    self.assertEqual(gaa.update(False, cs(), 0., None, 0.5, -0.2), (s, s), "gentle lift-off: blended")
 
   def test_get_cruise_accel_scaling(self):
     CP, _ = make_cp()
@@ -87,10 +83,10 @@ class TestGearAwareAccel(OpenpilotTestCase):
   def test_latch_only_while_long_inactive(self):
     gaa = make(on=False)
     Params().put_bool("GearAwareAccel", True)
-    for _ in range(int(2. / DT_MDL)):
-      self.assertEqual(gaa.update(False, cs(), 0., False, radar(), 0.5, 1.0), STOCK)
-    gaa.update(True, cs(), 0., False, radar(), 0.5, 1.0)
-    self.assertNotEqual(gaa.update(False, cs(), 0., False, radar(), 0.5, 1.0), STOCK)
+    for _ in range(int(2. / DT_MDL)):   # engaged (the 1 Hz param read happens in here): no switch mid-engagement
+      self.assertEqual(gaa.update(True, cs(), 0., None, 0.5, 1.0), STOCK)
+    gaa.update(False, cs(), 0., None, 0.5, 1.0)   # disengaged: latches
+    self.assertNotEqual(gaa.update(True, cs(), 0., None, 0.5, 1.0), STOCK)
 
   def test_closed_loop_throttle_on_softer_in_low_gear(self):
     # planner in the loop: resuming toward set speed in 2nd ramps a_cruise slower with the toggle on; OFF is stock

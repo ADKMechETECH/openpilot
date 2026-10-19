@@ -13,16 +13,23 @@ ASSUMPTION: holding at a stop and anti-rollback are covered by the driver and th
 (driver-selectable) and automatic hill-hold. Nothing here provides a standstill hold.
 
 Sequence, once engaged and below the handback speed (latched until disengaged):
-  1. controlsd ramps its accel command from where it was to 0 over ManualLowSpeedHandbackRamp seconds (limits
-     LongControl's accel range to a shrinking envelope around that start value, so there is no step and no PID windup),
+  1. controlsd ramps its THROTTLE side from where the command was to 0 over ManualLowSpeedHandbackRamp seconds, and its
+     braking side too while nothing is urgent (a shrinking envelope around the start value: no step, no PID windup);
+     the driver's prompt, manualLowSpeedHandback ("Low Speed: Take Over", below FCW in priority), shows from here,
   2. then pauses longitudinal (longActive=False: no gas, no brake, no standstill/stop request),
-  3. selfdrived disengages DISENGAGE_MARGIN later with the stock speedTooLow event; the driver sees one alert,
-     manualLowSpeedHandback ("Low Speed: Take Over"), which outranks the stock "Speed too low" text.
+  3. selfdrived disengages DISENGAGE_MARGIN later with the stock speedTooLow event ("openpilot Canceled").
 Engaging below the handback speed (+ hysteresis) is refused (stock belowEngageSpeed, with manualLowSpeedNoEntry as the
 text), so openpilot can't be engaged at a standstill and pull away.
 
-Both processes run this same state machine on the same carState stream and the same latched params, so they agree
-on timing to within a frame or two; the margin keeps the disengage after the ramp has finished.
+Emergency braking is never handed back (Task 12 A3, Rule 5): while braking_urgency() reports a reason (FCW, a
+close/closing lead, a hard or stop request, invalid inputs, ...) the braking side stays at the incoming limit and the
+ramp clock stops — the car may brake to a stop; the handback finishes (re-seeded from the current command) only once
+the urgency clears. Driver-monitoring forceDecel never lets a handback start and aborts one in progress: stock brings
+the car to a stop (a stall is acceptable in that emergency).
+
+ONE source of truth: controlsd runs this state machine and publishes it (carControlSP.manualLongitudinal: active,
+rampDone, disengage, the latched speed/ramp); selfdrived acts on the published state only (car_specific.py) — no second
+timer, no second param read.
 
 Manual + openpilot longitudinal only. Automatics/CVTs untouched; stock ACC (pcmCruise) is a no-op. Not a toggle:
 without it openpilot brakes a manual to a stop and auto-launches it (stall/lurch), so this is the safe default.
@@ -65,7 +72,7 @@ def handback_available(CP: car.CarParams) -> bool:
 
 
 class LowSpeedHandback:
-  def __init__(self, CP: car.CarParams, params: Params | None = None, process: str = ""):
+  def __init__(self, CP: car.CarParams, params: Params | None = None, process: str = "controlsd"):
     self.params = params or Params()
     self.available = handback_available(CP)
     self.process = process
@@ -74,47 +81,62 @@ class LowSpeedHandback:
     self.active = False  # handing back (latched until disengaged)
     self.timer = 0.
     self.accel_start = 0.
+    self.urgent = False
 
   def read_params(self) -> None:
     # call at 1 Hz; values are applied only while disengaged, so a change never alters a handback in progress
     if self.available:
       self._requested = read_handback_params(self.params)
 
-  def update(self, enabled: bool, v_ego: float, last_accel: float = 0.) -> None:
-    """Call every frame. last_accel: the accel command sent on the previous frame (controlsd only)."""
+  def update(self, enabled: bool, v_ego: float, last_accel: float = 0., urgency: str | None = None,
+             force_decel: bool = False) -> None:
+    """Call every controlsd frame. last_accel: the accel command sent on the previous frame; urgency: braking_urgency()."""
     if not self.available:
       return
+    urgent = urgency is not None
     if not enabled:
       self.active = False
       self.timer = 0.
       self.speed, self.ramp_time = self._requested
+    elif force_decel:
+      if self.active:
+        cloudlog.event("manual_low_speed_handback_abort", process=self.process, reason="force_decel", v_ego=v_ego)
+      self.active = False   # stock brings the car to a stop; no handback while driver monitoring forces a decel
+      self.timer = 0.
     elif not self.active:
       if v_ego < self.speed:
         self.active = True
         self.timer = 0.
         self.accel_start = last_accel
         cloudlog.event("manual_low_speed_handback", process=self.process, v_ego=v_ego, accel=last_accel,
-                       speed=self.speed, ramp=self.ramp_time)
+                       speed=self.speed, ramp=self.ramp_time, urgency=urgency or "")
+    elif urgent:
+      pass                  # the ramp clock stops: braking stays available
     else:
+      if self.urgent:       # urgency just cleared: finish from where the command is now (no step)
+        self.timer = 0.
+        self.accel_start = last_accel
       self.timer += DT_CTRL
+    self.urgent = urgent and self.active
 
   @property
   def ramp_done(self) -> bool:
     """controlsd: the command has reached 0, stop longitudinal (no gas, no brake, no stop/standstill request)."""
-    return self.active and self.timer >= self.ramp_time
+    return self.active and not self.urgent and self.timer >= self.ramp_time
 
   @property
   def disengage_due(self) -> bool:
-    """selfdrived: hand back now."""
-    return self.active and self.timer >= self.ramp_time + DISENGAGE_MARGIN - 1e-6
+    """Published for selfdrived: hand back now."""
+    return self.active and not self.urgent and self.timer >= self.ramp_time + DISENGAGE_MARGIN - 1e-6
 
   def limit_accel(self, accel_limits: tuple[float, float]) -> tuple[float, float]:
-    """controlsd: shrink LongControl's accel range linearly from the command at handback start to 0."""
+    """controlsd: shrink the accel range linearly from the command at handback start to 0. While urgent the braking
+    side stays at the incoming limit (Rule 5); only the throttle side ramps."""
     if not self.active:
       return accel_limits
     f = max(1. - self.timer / self.ramp_time, 0.) if self.ramp_time > 0. else 0.
-    lo = max(accel_limits[0], min(self.accel_start, 0.) * f)
     hi = min(accel_limits[1], max(self.accel_start, 0.) * f)
+    lo = accel_limits[0] if self.urgent else max(accel_limits[0], min(self.accel_start, 0.) * f)
     return lo, max(hi, lo)
 
   def below_engage_speed(self, v_ego: float) -> bool:

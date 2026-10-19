@@ -29,11 +29,22 @@ Overspeed backstop modes (NoServiceBrakeOverspeedMode, latched like the toggle):
     limit moves at NoServiceBrakeOverspeedPulseJerk down to NoServiceBrakeOverspeedPulseDecel, until back at
     set + NoServiceBrakeOverspeedReleaseMargin -> the limit moves back up at the same jerk (brake rolled off) and the
     car coasts again. Above set + NoServiceBrakeOverspeedHardCeiling while PULSING (the bounded force can't beat the
-    grade) -> ESCALATED: full openpilot braking + a one-shot "Overspeed: Take Over" alert, until under set + release or
-    disengaged. A close/closing lead, planner FCW or stock AEB/FCW -> urgent: full openpilot braking (forceDecel
-    already turns the whole clamp off). plannerd publishes the state and the target floor in
-    longitudinalPlanSP.noServiceBrake; controlsd (PulseFloor) moves the limit. PULSING publishes allowBrake True, so
-    a missing longitudinalPlanSP falls back to full braking, never to the coast clamp.
+    grade) -> ESCALATED: openpilot's normal braking (in non-adaptive that is the set-speed plan, capped at its
+    A_CRUISE_MIN of -1.2 m/s^2 — not "full" braking) + the "Overspeed: Take Over" alert, until under set + release or
+    disengaged. plannerd publishes the state and the target floor in longitudinalPlanSP.noServiceBrake; controlsd
+    (PulseFloor) moves the limit. PULSING publishes allowBrake True, so a missing longitudinalPlanSP falls back to
+    braking allowed, never to the coast clamp.
+
+Task 12 (both modes):
+  - Rule 5: any braking_urgency() reason releases the clamp the same frame — plannerd stops clamping (allowBrake True /
+    state urgent) AND controlsd, checking its own urgency every control frame, ignores the floor. Never debounced.
+  - B1: a cruise target lowered below the set speed by Smart Cruise Control (vision / map) or Speed Limit Assist is a
+    real braking request: the clamp is released, and overspeed is measured against that effective target.
+  - B2: NoServiceBrakeOverspeedMargin is clamped to at most the hard ceiling; "Overspeed: Take Over" fires at the ceiling
+    in maintain mode too and repeats while still over it and speeding up; not for SET_DROP_GRACE after the driver lowers
+    the set speed. The maintain mode's brake step at the margin (C-09) stays — pulse mode is the comfort fix — and its
+    default floor (0.3) waits for on-car test C2 (C-07).
+  - B3: the toggle, the mode and every float param latch together, only while openpilot is disengaged.
 """
 from dataclasses import dataclass
 
@@ -42,8 +53,6 @@ import numpy as np
 from openpilot.common.params import Params
 from openpilot.common.realtime import DT_MDL
 from openpilot.common.swaglog import cloudlog
-from openpilot.sunnypilot.selfdrive.controls.lib.engine_brake_preferred import DEFAULT_LEAD_CLOSING, DEFAULT_LEAD_TTC, \
-                                                                             lead_urgent
 
 # TODO(on-car): tune the default decel floor. 0.0 = pure throttle-only cruise; small negative accel requests may still
 #  be served by the brakes on some platforms (Honda radarless: VSA decides from ACCEL_COMMAND).
@@ -67,6 +76,8 @@ PULSE_JERK_RANGE = (0.5, 3.0)
 DEFAULT_HARD_CEILING = 6.7      # m/s above set (~15 mph): escalate to full braking past this while pulsing
 HARD_CEILING_RANGE = (4.5, 11.)
 PULSE_MIN_BAND = 0.45           # m/s (~1 mph): enforced gap release < trigger < ceiling (a bad combo tightens the trigger)
+ALERT_REPEAT = 4.0              # s: "Overspeed: Take Over" repeats this often while over the ceiling and speeding up
+SET_DROP_GRACE = 2.0            # s after the driver lowers the set speed: no overspeed escalation / alert
 # The stock-AEB consequence of openpilot longitudinal is platform-specific (disabled on Honda radarless, retained on some
 # other platforms). Nothing here assumes the Honda behavior; this list only drives a warning.
 VALIDATED_PLATFORMS = ("HONDA_CIVIC_2022",)
@@ -117,14 +128,30 @@ def read_pulse_params(params: Params, trigger: float) -> PulseParams:
   )
 
 
-def overspeed_urgent(CS, fcw: bool, radar) -> str | None:
-  """Pulse mode: a reason the overspeed logic must not limit braking at all this frame, or None."""
-  if fcw or CS.stockAeb or CS.stockFcw:
-    return "fcw_aeb"
-  if lead_urgent(radar.leadOne, CS.vEgo, DEFAULT_LEAD_TTC, DEFAULT_LEAD_CLOSING) or \
-     lead_urgent(radar.leadTwo, CS.vEgo, DEFAULT_LEAD_TTC, DEFAULT_LEAD_CLOSING):
-    return "lead"
-  return None
+@dataclass(frozen=True)
+class NsbParams:
+  """Everything NoServiceBrake reads, latched together while openpilot is disengaged (Task 12 B3)."""
+  enabled: bool = False
+  backstop: bool = True
+  margin: float = DEFAULT_OVERSPEED_MARGIN
+  mode: str = DEFAULT_OVERSPEED_MODE
+  decel_floor: float = DEFAULT_DECEL_FLOOR
+  pulse: PulseParams = PulseParams()
+
+
+def read_nsb_params(params: Params, available: bool) -> NsbParams:
+  ceiling = _read_float(params, "NoServiceBrakeOverspeedHardCeiling", DEFAULT_HARD_CEILING, *HARD_CEILING_RANGE)
+  # Task 12 B2 [C-04]: the margin is clamped to at most the hard ceiling, in both modes
+  margin = min(_read_float(params, "NoServiceBrakeOverspeedMargin", DEFAULT_OVERSPEED_MARGIN, 0.5, 15.), ceiling)
+  return NsbParams(
+    enabled=available and params.get_bool("NoServiceBrakeHold"),
+    # default ON: get_bool() ignores the registered default for an unset key (would read False), so use get()
+    backstop=bool(params.get("NoServiceBrakeOverspeedBackstop", return_default=True)),
+    margin=margin,
+    mode=read_overspeed_mode(params),
+    decel_floor=read_decel_floor(params),
+    pulse=read_pulse_params(params, margin),
+  )
 
 
 class NoServiceBrake:
@@ -133,15 +160,9 @@ class NoServiceBrake:
     self.available = bool(CP.openpilotLongitudinalControl)  # pcmCruise cars: no-op
     self.validated_platform = CP.carFingerprint in VALIDATED_PLATFORMS
     self._warned_platform = False
-    self._enabled_requested = False
-    self.backstop_enabled = True
-    self.overspeed_margin = DEFAULT_OVERSPEED_MARGIN
-    self._mode_requested = DEFAULT_OVERSPEED_MODE
-    self.decel_floor = DEFAULT_DECEL_FLOOR
-    self.pulse = PulseParams()
+    self._requested = NsbParams()
     self.read_params()
-    self.enabled = self._enabled_requested
-    self.mode = self._mode_requested
+    self.p = self._requested
     self.backstop_active = False
     self.allow_brake = True
     self._frame = 0
@@ -150,35 +171,90 @@ class NoServiceBrake:
     self.state = "off"        # what controlsd sees: off | coasting | pulsing | escalated | urgent
     self.accel_floor = 0.
     self.overspeed = 0.
+    self.urgency: str | None = None
     self.escalation_event = False
+    self.alert_timer = 0.
+    self.v_set_prev: float | None = None
+    self.set_drop_timer = 0.
+    self.v_prev: float | None = None
+    self._alerted = False
+
+  # the latched values, under their pre-Task-12 names
+  @property
+  def enabled(self) -> bool:
+    return self.p.enabled
+
+  @property
+  def mode(self) -> str:
+    return self.p.mode
+
+  @property
+  def backstop_enabled(self) -> bool:
+    return self.p.backstop
+
+  @property
+  def overspeed_margin(self) -> float:
+    return self.p.margin
+
+  @property
+  def decel_floor(self) -> float:
+    return self.p.decel_floor
+
+  @property
+  def pulse(self) -> PulseParams:
+    return self.p.pulse
 
   def read_params(self) -> None:
-    self._enabled_requested = self.available and self.params.get_bool("NoServiceBrakeHold")
-    # default ON: get_bool() ignores the registered default for an unset key (would read False), so use get()
-    self.backstop_enabled = bool(self.params.get("NoServiceBrakeOverspeedBackstop", return_default=True))
-    self.overspeed_margin = _read_float(self.params, "NoServiceBrakeOverspeedMargin", DEFAULT_OVERSPEED_MARGIN, 0.5, 15.)
-    self._mode_requested = read_overspeed_mode(self.params)
-    self.decel_floor = read_decel_floor(self.params)
-    self.pulse = read_pulse_params(self.params, self.overspeed_margin)
-    if self._enabled_requested and not self.validated_platform and not self._warned_platform:
+    self._requested = read_nsb_params(self.params, self.available)
+    if self._requested.enabled and not self.validated_platform and not self._warned_platform:
       cloudlog.warning("no_service_brake: enabled on an unvalidated platform; verify its openpilot-long braking and AEB first")
       self._warned_platform = True
 
-  def update(self, long_inactive: bool, non_adaptive: bool, v_ego: float, v_set: float, force_decel: bool,
-             urgent: str | None = None) -> bool:
-    """Call every planner frame. Returns allow_brake. urgent (pulse mode only): see overspeed_urgent()."""
+  def _overspeed_alert(self, over: float, ceiling: float, rising: bool) -> None:
+    """Task 12 B2 [C-06]: the "Overspeed: Take Over" alert fires on reaching the ceiling and repeats every
+    ALERT_REPEAT while still over it with the speed rising — in both modes. Suppressed for SET_DROP_GRACE after the
+    driver lowers the set speed (A-F-L5: that overspeed is the driver's own doing)."""
+    self.alert_timer = max(self.alert_timer - DT_MDL, 0.)
+    if over > ceiling and self.set_drop_timer <= 0. and self.alert_timer <= 0. and (rising or not self._alerted):
+      self.escalation_event = True
+      self.alert_timer = ALERT_REPEAT
+    self._alerted = over > ceiling and (self._alerted or self.escalation_event)
+
+  def update(self, engaged: bool, non_adaptive: bool, v_ego: float, v_set: float, force_decel: bool,
+             urgency: str | None = None, v_target: float | None = None) -> bool:
+    """Call every planner frame. Returns allow_brake.
+    engaged: selfdriveState.enabled (params latch only while disengaged); v_set: the driver's set speed; v_target: the
+    effective cruise target after SCC-V / SCC-M / SLA (None = the set speed); urgency: braking_urgency()."""
     if self._frame % int(1. / DT_MDL) == 0:
       self.read_params()
     self._frame += 1
-    if long_inactive:  # like non-adaptive: never switch modes mid-engagement
-      self.enabled = self._enabled_requested
-      self.mode = self._mode_requested
+    if not engaged:  # never switch modes or re-tune mid-engagement
+      self.p = self._requested
+      self.alert_timer, self._alerted = 0., False   # a new engagement alerts afresh
+    self.escalation_event = False
+    self.urgency = urgency
+
+    # driver lowered the set speed: no escalation alert for a moment (the overspeed is the driver's doing)
+    if self.v_set_prev is not None and v_set < self.v_set_prev - 0.1:
+      self.set_drop_timer = SET_DROP_GRACE
+    else:
+      self.set_drop_timer = max(self.set_drop_timer - DT_MDL, 0.)
+    self.v_set_prev = v_set
+    rising = self.v_prev is not None and v_ego > self.v_prev + 1e-3
+    self.v_prev = v_ego
+
+    # Task 12 B1 [C-01]: a curve-speed / map / speed-limit target below the set speed is a real braking request: the
+    # clamp never caps it, and overspeed is measured against that effective target
+    target_low = v_target is not None and v_target < v_set - 0.1
+    v_ref = min(v_set, v_target) if v_target is not None else v_set
 
     clamp_wanted = self.enabled and non_adaptive and not force_decel
     if self.mode == "pulse":
-      self.allow_brake = self._update_pulse(clamp_wanted, long_inactive, v_ego, v_set, urgent)
+      self.allow_brake = self._update_pulse(clamp_wanted, not engaged, v_ego, v_ref,
+                                            urgency or ("lower_target" if target_low else None), rising)
       return self.allow_brake
     self.state = "off"
+    self.overspeed = v_ego - v_ref
     if not clamp_wanted:
       self.backstop_active = False
     elif self.backstop_enabled:
@@ -188,10 +264,12 @@ class NoServiceBrake:
         self.backstop_active = True
       elif v_ego < v_set + self.overspeed_margin * BACKSTOP_RELEASE_RATIO:
         self.backstop_active = False
+      self._overspeed_alert(v_ego - v_set, self.pulse.ceiling, rising)
     else:
       self.backstop_active = False
 
-    self.allow_brake = not clamp_wanted or self.backstop_active
+    # Rule 5 + B1 (the maintain mode's only additions): urgency or a lowered target releases the clamp
+    self.allow_brake = not clamp_wanted or self.backstop_active or urgency is not None or target_low
     return self.allow_brake
 
   def _set_phase(self, phase: str, v_ego: float, v_set: float) -> None:
@@ -199,8 +277,8 @@ class NoServiceBrake:
                    v_set=round(v_set, 2))
     self.phase = phase
 
-  def _update_pulse(self, clamp_wanted: bool, long_inactive: bool, v_ego: float, v_set: float, urgent: str | None) -> bool:
-    self.escalation_event = False
+  def _update_pulse(self, clamp_wanted: bool, long_inactive: bool, v_ego: float, v_set: float, urgent: str | None,
+                    rising: bool) -> bool:
     self.backstop_active = False
     self.overspeed = v_ego - v_set
     p = self.pulse
@@ -210,14 +288,17 @@ class NoServiceBrake:
       if self.phase == "coasting" and self.overspeed > p.trigger:
         self._set_phase("pulsing", v_ego, v_set)
       if self.phase == "pulsing":
-        if self.overspeed > p.ceiling:
-          # the bounded pulse can't beat this grade: full braking, tell the driver once
+        if self.overspeed > p.ceiling and self.set_drop_timer <= 0.:
+          # the bounded pulse can't beat this grade: full braking, tell the driver
           self._set_phase("escalated", v_ego, v_set)
-          self.escalation_event = True
         elif self.overspeed <= p.release:
           self._set_phase("coasting", v_ego, v_set)
       elif self.phase == "escalated" and self.overspeed < p.release:
         self._set_phase("coasting", v_ego, v_set)
+      if self.phase == "escalated":
+        self._overspeed_alert(self.overspeed, p.ceiling, rising)
+      else:
+        self._alerted = False
 
     if not clamp_wanted:
       self.state, self.accel_floor = "off", 0.

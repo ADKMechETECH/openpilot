@@ -10,9 +10,9 @@ from opendbc.car import structs
 
 from opendbc.car.chrysler.values import RAM_DT
 from openpilot.common.params import Params
-from openpilot.common.realtime import DT_CTRL
 from openpilot.selfdrive.selfdrived.events import Events
-from openpilot.sunnypilot.selfdrive.controls.lib.manual_low_speed_handback import LowSpeedHandback
+from openpilot.sunnypilot.selfdrive.controls.lib.manual_low_speed_handback import DEFAULT_HANDBACK_SPEED, ENGAGE_HYSTERESIS, \
+                                                                                handback_available
 from openpilot.sunnypilot.selfdrive.selfdrived.events import EventsSP
 
 EventName = log.OnroadEvent.EventName
@@ -29,34 +29,31 @@ class CarSpecificEventsSP:
     self.low_speed_alert = False
 
     self.params = params or Params()
-    self.clutch_gate_available = CP.transmissionType == TransmissionType.manual
-    self.clutch_gate_enabled = self.clutch_gate_available and self.params.get_bool("ClutchShiftGate")
-    self.low_speed_handback = LowSpeedHandback(CP, self.params, process="selfdrived")
-    self._frame = 0
+    self.handback_available = handback_available(CP)
 
-  def update(self, CS: structs.CarState, events: Events, enabled: bool = False):
+  def update(self, CS: structs.CarState, events: Events, enabled: bool = False, ml=None, ml_fresh: bool = False):
+    """ml: carControlSP.manualLongitudinal as controlsd published it; ml_fresh: received within the last few frames.
+    Task 12: selfdrived acts on controlsd's published state only (one source of truth) and fails to stock without it."""
     events_sp = EventsSP()
+    fresh = ml is not None and ml_fresh
 
-    if self.clutch_gate_available:
-      if self._frame % int(1. / DT_CTRL) == 0:
-        self.clutch_gate_enabled = self.params.get_bool("ClutchShiftGate")
-        self.low_speed_handback.read_params()
-      self._frame += 1
-      # Clutch/shift gate: with the clutch open the throttle only revs a disconnected engine (rev-match / heel-toe
-      # blip), so it is not a driver accel override. controlsd's gate already coasts longitudinal, and the panda
-      # still disallows longitudinal while gas is pressed. Brake events are untouched (heel-toe brake still counts).
-      if self.clutch_gate_enabled and CS.deprecated.clutchPressed and events.has(EventName.gasPressedOverride):
-        events.remove(EventName.gasPressedOverride)
+    # Clutch/shift gate: during a shift the throttle only revs a disconnected engine (rev-match / heel-toe blip), so it
+    # is not a driver accel override - but ONLY while controlsd says the gate is actually paused (A2.6). Then controlsd
+    # holds the command at exactly 0 while the gas is pressed (the panda allows nothing else). Brake events are untouched.
+    if fresh and ml.gatePaused and CS.deprecated.clutchPressed and events.has(EventName.gasPressedOverride):
+      events.remove(EventName.gasPressedOverride)
 
-    # Manual low-speed handback: controlsd has ramped the command to 0; disengage, and refuse to engage at low speed
-    # (no brake-to-stop, no standstill hold, no launch). No-op for automatics and stock ACC.
-    self.low_speed_handback.update(enabled, CS.vEgo)
-    if self.low_speed_handback.disengage_due:
-      events.add(EventName.speedTooLow)
-      events_sp.add(EventNameSP.manualLowSpeedHandback)
-    if self.low_speed_handback.below_engage_speed(CS.vEgo):
-      events.add(EventName.belowEngageSpeed)
-      events_sp.add(EventNameSP.manualLowSpeedNoEntry)
+    # Manual low-speed handback (controlsd owns it): the prompt from the ramp start, the stock speedTooLow disengage when
+    # controlsd says so, and no engaging below the latched handback speed (no brake-to-stop, no hold, no launch).
+    if self.handback_available:
+      if fresh and ml.handbackDisengage:
+        events.add(EventName.speedTooLow)
+      elif fresh and ml.handbackActive:
+        events_sp.add(EventNameSP.manualLowSpeedHandback)
+      speed = ml.handbackSpeed if fresh and ml.handbackSpeed > 0. else DEFAULT_HANDBACK_SPEED
+      if CS.vEgo < speed + ENGAGE_HYSTERESIS:
+        events.add(EventName.belowEngageSpeed)
+        events_sp.add(EventNameSP.manualLowSpeedNoEntry)
 
     if self.CP.brand == 'chrysler':
       if self.CP.carFingerprint in RAM_DT:

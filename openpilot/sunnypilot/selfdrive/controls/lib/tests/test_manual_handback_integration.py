@@ -29,7 +29,7 @@ def make_sim(non_adaptive, no_service_brake, **kw):
   CP, CP_SP = make_cp()
   sim = Sim(CP, CP_SP, **kw)
   assert sim.planner.non_adaptive == non_adaptive, "test setup: toggle not latched"
-  assert sim.nsb_enabled == no_service_brake
+  assert sim.ext.no_service_brake_enabled == no_service_brake
   return sim
 
 
@@ -46,7 +46,9 @@ class TestHandbackComposition(OpenpilotTestCase):
     cmds = [l["cmd"] for l in log[start - 1:off + 1]]
     max_step = max(abs(b - a) for a, b in zip(cmds, cmds[1:], strict=False))
     self.assertLess(max_step, abs(log[start - 1]["cmd"]) / (DEFAULT_RAMP_TIME / DT_CTRL) * 1.5 + 0.02, msg)
-    self.assertEqual({l["alert"].alert_type for l in log if l["alert"].alert_type}, {HANDBACK_ALERT}, msg)
+    # the prompt from the ramp start (A3.3); stock speedTooLow's own alert follows at the disengage
+    shown = {l["alert"].alert_type for l in log if l["alert"].alert_type}
+    self.assertEqual(shown - {"speedTooLow/immediateDisable"}, {HANDBACK_ALERT}, msg)
     self.assertFalse(any(l["enabled"] for l in log[off:]), msg)
     return start, off
 
@@ -64,16 +66,20 @@ class TestHandbackComposition(OpenpilotTestCase):
     self.assertEqual(len(set(results.values())), 1, f"handback timing must not depend on the toggles: {results}")
 
   def test_adaptive_lead_stop_nsb_inert(self):
-    # adaptive: openpilot brakes for the stopping lead down to the threshold and hands back. NoServiceBrakeHold is
-    # coupled to non-adaptive, so ON vs OFF must give the identical run (braking always allowed).
+    # adaptive: openpilot brakes for the stopping lead. Since Task 12 A3 a close/closing lead is Rule-5 urgency, so the
+    # handback keeps the brakes available and the car may be braked to a stop behind it (no contact). NoServiceBrakeHold
+    # is coupled to non-adaptive, so ON vs OFF must give the identical run (braking always allowed).
     logs = {}
     for nsb in (False, True):
       with self.subTest(no_service_brake=nsb):
         sim = make_sim(False, nsb, speed=12., lead={"pos": 45., "v": 12., "decel": 1.5})
         log = sim.run(30.)
-        start, _ = self.assert_clean_handback(log, f"nsb={nsb}")
-        self.assertLess(log[start - 1]["cmd"], -0.3)
+        self.assertFalse(sim.contact)
+        self.assertGreater(min(l["gap"] for l in log), 1.0)
         self.assertTrue(all(l["allow_brake"] for l in log))
+        for l in log:
+          if l["handback"] and l["urgency"] is not None:
+            self.assertLessEqual(l["limits"][0], -3.0, "braking side at the stock limit while urgent")
         logs[nsb] = [(l["cmd"], l["enabled"]) for l in log]
     self.assertEqual(logs[False], logs[True])
 
@@ -91,7 +97,9 @@ class TestHandbackComposition(OpenpilotTestCase):
           log.append(sim.step())
           gaps.append(gap)
         self.assertIsNotNone(braked)
-        self.assertTrue(all(l["cmd"] >= -0.3 - 1e-6 or not nsb for l in log[:braked]), "NSB clamp active before the brake")
+        # NSB clamps before the brake, except while non-adaptive is braking for the collision threat (A1)
+        self.assertTrue(all(l["cmd"] >= -0.3 - 1e-6 or not nsb or l["collision"] for l in log[:braked]),
+                        "NSB clamp active before the brake")
         off = first(log, lambda l: not l["enabled"])
         self.assertEqual(off, braked, "the brake pedal disengages on the same step")
         self.assertGreater(log[off]["v_in"], DEFAULT_HANDBACK_SPEED + 3., "disengaged by the brake, well above the threshold")
@@ -100,16 +108,18 @@ class TestHandbackComposition(OpenpilotTestCase):
         self.assertEqual(log[-1]["speed"], 0.)
         self.assertGreater(min(gaps), 0.)
 
-  def test_non_adaptive_lead_stop_without_driver_is_fcw_not_handback(self):
-    # documents the interaction: in non-adaptive mode openpilot never slows for the lead, so without the driver it
-    # does not reach the handback speed by itself - FCW is the warning, the driver must brake
+  def test_non_adaptive_lead_stop_without_driver_brakes_no_contact(self):
+    # (replaces test_non_adaptive_lead_stop_without_driver_is_fcw_not_handback, which asserted openpilot never slowed
+    # and only FCW warned — the hazard Task 12 A1 removes.) The lead stopping ahead is a collision threat: non-adaptive
+    # re-admits the lead MPC, brakes, and the low-speed handback keeps braking available (A3): no contact.
     for nsb in (False, True):
       with self.subTest(no_service_brake=nsb):
         sim = make_sim(True, nsb, speed=12., lead={"pos": 60., "v": 12., "decel": 1.5}, v_set=12.)
-        log = sim.run(8.)
-        self.assertTrue(any(l["fcw"] for l in log), "FCW still warns")
-        self.assertFalse(any(l["handback"] for l in log))
-        self.assertGreater(min(l["v_in"] for l in log), DEFAULT_HANDBACK_SPEED + ENGAGE_HYSTERESIS)
+        log = sim.run(20.)
+        self.assertFalse(sim.contact)
+        self.assertGreater(min(l["gap"] for l in log), 1.0)
+        self.assertLess(min(l["cmd"] for l in log), -1.0, "openpilot brakes for the stopping lead")
+        self.assertLess(log[-1]["speed"], DEFAULT_HANDBACK_SPEED + ENGAGE_HYSTERESIS)
 
   def test_nsb_floor_and_ramp_compose(self):
     # NSB floor and the handback envelope both shrink LongControl's range; the tighter bound wins, never widens

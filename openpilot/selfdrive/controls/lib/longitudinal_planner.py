@@ -97,12 +97,12 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
     # PCM cruise speed may be updated a few cycles later, check if initialized
     v_cruise_initialized = sm['carState'].vCruise != V_CRUISE_UNSET
     reset_state = reset_state or not v_cruise_initialized
-    LongitudinalPlannerSP.update_non_adaptive(self, reset_state)
+    LongitudinalPlannerSP.update_non_adaptive(self, sm)
 
     throttle_probs = sm['modelV2'].meta.disengagePredictions.gasPressProbs
     throttle_prob = throttle_probs[1] if len(throttle_probs) > 1 else 1.0
-    # non-adaptive cruise holds set speed: don't let the model's predicted lift (traffic, stops) cap throttle
-    self.allow_throttle = throttle_prob > ALLOW_THROTTLE_THRESHOLD or v_ego <= MIN_ALLOW_THROTTLE_SPEED or self.non_adaptive
+    # stock throttle cap on a predicted lift, in non-adaptive mode too (Task 12 A1: it only ever limits throttle)
+    self.allow_throttle = throttle_prob > ALLOW_THROTTLE_THRESHOLD or v_ego <= MIN_ALLOW_THROTTLE_SPEED
 
     steer_angle_without_offset = sm['carState'].steeringAngleDeg - sm['vehicleParameters'].angleOffsetDeg
 
@@ -145,17 +145,23 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
 
     is_e2e = self.is_e2e(sm) and not self.non_adaptive
 
+    # Rule 5 (Task 12): the braking-urgency predicate, from the most braking-demanding candidate (the lead MPC)
+    LongitudinalPlannerSP.update_urgency(self, sm, self.fcw, output_should_stop_mpc, output_a_target_mpc, v_ego)
+    # A1: non-adaptive keeps emergency collision braking (the lead MPC comes back only for a real threat)
+    collision = LongitudinalPlannerSP.update_collision_braking(self, sm, self.fcw, output_a_target_mpc, v_ego, self.dt)
+
     # manual: engine-brake coast telemetry (never affects control) and gear-indexed set-speed jerk shaping
     LongitudinalPlannerSP.update_coast_logger(self, sm, self.fcw)
-    j_scale = LongitudinalPlannerSP.update_gear_aware_accel(self, sm, reset_state, self.fcw, self.a_cruise,
+    j_scale = LongitudinalPlannerSP.update_gear_aware_accel(self, sm, self.a_cruise,
                                                             float(np.clip(v_cruise - v_ego, A_CRUISE_MIN, ACCEL_MAX)))
     self.a_cruise = get_cruise_accel(is_e2e, v_cruise, v_ego,
                                      self.a_cruise, steer_angle_without_offset, self.CP, self.dt,
                                      accel_coast, self.allow_throttle, j_scale)
     cruise_should_stop = should_stop(v_ego, self.a_cruise)
 
-    if self.non_adaptive:
-      # Set-speed only: drop the lead-following MPC and e2e candidates. The MPC still ran above, so FCW is unchanged.
+    if self.non_adaptive and not collision:
+      # Set-speed only: drop the lead-following MPC and e2e candidates. The MPC still ran above, so FCW is unchanged,
+      # and on a collision threat (A1) the MPC is re-admitted below.
       # TODO(on-car): verify set-speed hold on an empty road, and what the radarless brake path does above set speed
       #  (a_cruise still asks for up to -1.2 m/s^2 downhill; see opendbc PR #2050).
       candidates = [(self.a_cruise, LongitudinalPlanSource.cruise, cruise_should_stop)]
@@ -168,8 +174,12 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
     output_a_target, self.mpc.source, _ = min(candidates, key=lambda c: c[0])
     self.output_should_stop = any(should_stop for _, _, should_stop in candidates)
     self.output_a_target = np.clip(output_a_target, ACCEL_MIN, ACCEL_MAX)
+    if self.non_adaptive and collision:
+      # A1: the set-speed candidate resumes from the collision braking (ramping up at its own jerk), not from where it
+      # was before the threat - no step back up when the lead MPC is dropped again
+      self.a_cruise = min(self.a_cruise, float(self.output_a_target))
     # no-service-brake mode: controlsd applies the decel floor when braking isn't allowed (aTarget stays the plan's intent)
-    self.allow_brake = LongitudinalPlannerSP.update_no_service_brake(self, sm, reset_state, v_ego, self.fcw)
+    self.allow_brake = LongitudinalPlannerSP.update_no_service_brake(self, sm, v_ego, collision)
 
     self.v_desired_filter.x = self.v_desired_filter.x + self.dt * (self.output_a_target + a_prev) / 2.0
 

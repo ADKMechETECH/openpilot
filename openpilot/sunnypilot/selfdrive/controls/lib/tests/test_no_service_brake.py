@@ -33,6 +33,7 @@ class DownhillSim:
     self.params = Params()
     self.speed, self.a_ego, self.downhill, self.force_decel = speed, 0., downhill, force_decel
     self.distance, self.lead = 0., lead  # lead: (initial gap m, lead speed m/s)
+    self.engaged = False  # the first planner frame is disengaged (params latch), then engaged (Task 12 B3)
     self.lead_pos = lead[0] if lead else 0.
     self.log = []
 
@@ -61,6 +62,7 @@ class DownhillSim:
     sm = {'radarState': radar.radarState, 'carState': car_state.carState, 'controlsState': control.controlsState}
     for s in ('carControl', 'selfdriveState', 'vehicleParameters', 'carStateSP', 'liveMapDataSP', 'gpsLocation'):
       sm[s] = getattr(messaging.new_message(s), s)
+    sm['selfdriveState'].enabled = self.engaged
     sm['modelV2'] = model.modelV2
     return sm
 
@@ -69,6 +71,7 @@ class DownhillSim:
     enabled = self.params.get_bool("NoServiceBrakeHold")
     for _ in range(round(seconds / DT_MDL)):
       self.planner.update(self._sm())
+      self.engaged = True
       limits = apply_brake_floor((ACCEL_MIN, ACCEL_MAX), self.planner.allow_brake, True, enabled, floor)
       for _ in range(round(DT_MDL / DT_CTRL)):
         CS = messaging.new_message('carState').carState
@@ -180,3 +183,6 @@ class TestNoServiceBrake(OpenpilotTestCase):
     Params().put_bool("NoServiceBrakeHold", True)
     sim.run(3.)
     self.assertFalse(sim.planner.no_service_brake.enabled, "must not switch on mid-engagement")
+    sim.engaged = False
+    sim.run(DT_MDL)
+    self.assertTrue(sim.planner.no_service_brake.enabled, "latches once disengaged")

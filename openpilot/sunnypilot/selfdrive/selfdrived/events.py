@@ -76,8 +76,9 @@ def speed_limit_pre_active_alert(CP: car.CarParams, CS: car.CarState, sm: messag
 
 
 def manual_low_speed_no_entry_alert(CP: car.CarParams, CS: car.CarState, sm: messaging.SubMaster, metric: bool, soft_disable_time: int, personality) -> Alert:
-  # only built on an engage attempt, so reading the param here is cheap
-  speed = read_handback_params(Params())[0] + ENGAGE_HYSTERESIS
+  # the threshold controlsd latched and publishes (one source of truth); the param only if controlsd isn't up yet
+  ml = sm['carControlSP'].manualLongitudinal if sm is not None and 'carControlSP' in sm.data else None
+  speed = (ml.handbackSpeed if ml is not None and ml.handbackSpeed > 0. else read_handback_params(Params())[0]) + ENGAGE_HYSTERESIS
   speed_conv = round(speed * (CV.MS_TO_KPH if metric else CV.MS_TO_MPH))
   return NoEntryAlert(f"Manual: Drive Above {speed_conv} {'km/h' if metric else 'mph'} to Engage", priority=Priority.MID)
 
@@ -270,14 +271,15 @@ EVENTS_SP: dict[int, dict[str, Alert | AlertCallbackType]] = {
       Priority.LOW, VisualAlert.none, AudibleAlert.prompt, 2.),
   },
 
-  # Manual transmission low-speed handback (manual_low_speed_handback.py). The stock speedTooLow/belowEngageSpeed events
-  # do the disengage/refusal; these outrank their alerts so the driver gets one alert with the right text.
+  # Manual transmission low-speed handback (manual_low_speed_handback.py). Task 12 A3: the prompt shows from the start
+  # of the ramp (while controlsd hands longitudinal back), at Priority.HIGH — below FCW (HIGHEST), which it must never
+  # replace or mask; the stock speedTooLow event then does the disengage ("openpilot Canceled / Speed too low").
   EventNameSP.manualLowSpeedHandback: {
-    ET.IMMEDIATE_DISABLE: Alert(
+    ET.WARNING: Alert(
       "Low Speed: Take Over",
-      "openpilot handed longitudinal back to you",
+      "openpilot is handing longitudinal back to you",
       AlertStatus.userPrompt, AlertSize.mid,
-      Priority.HIGHEST, VisualAlert.none, AudibleAlert.prompt, 3.),
+      Priority.HIGH, VisualAlert.none, AudibleAlert.prompt, 3.),
   },
 
   EventNameSP.manualLowSpeedNoEntry: {

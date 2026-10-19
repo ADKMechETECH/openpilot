@@ -9,10 +9,12 @@ from openpilot.cereal import messaging, custom
 from opendbc.car import structs
 from openpilot.common.constants import CV
 from openpilot.common.params import Params
+from openpilot.common.swaglog import cloudlog
 from openpilot.common.realtime import DT_MDL
 from openpilot.selfdrive.car.cruise import V_CRUISE_MAX
 from openpilot.sunnypilot.selfdrive.controls.lib.dec.dec import DynamicExperimentalController
-from openpilot.sunnypilot.selfdrive.controls.lib.no_service_brake import NoServiceBrake, overspeed_urgent
+from openpilot.sunnypilot.selfdrive.controls.lib.braking_urgency import MPC_NEEDED_DECEL, braking_urgency, collision_threat
+from openpilot.sunnypilot.selfdrive.controls.lib.no_service_brake import NoServiceBrake
 from openpilot.sunnypilot.selfdrive.controls.lib.engine_brake_model import CoastEventLogger
 from openpilot.sunnypilot.selfdrive.controls.lib.gear_aware_accel import GearAwareAccel
 from openpilot.sunnypilot.selfdrive.controls.lib.e2e_alerts_helper import E2EAlertsHelper
@@ -24,6 +26,7 @@ from openpilot.sunnypilot.models.helpers import get_active_bundle
 
 EventNameSP = custom.OnroadEventSP.EventName
 DecState = custom.LongitudinalPlanSP.DynamicExperimentalControl.DynamicExperimentalControlState
+COLLISION_DWELL = 2.0   # s: non-adaptive keeps the lead MPC re-admitted until no collision threat for this long
 LongitudinalPlanSource = custom.LongitudinalPlanSP.LongitudinalPlanSource
 
 
@@ -50,6 +53,12 @@ class LongitudinalPlannerSP:
     self.non_adaptive = self.non_adaptive_available and self._params.get_bool("NonAdaptiveLongitudinal")
     self._non_adaptive_requested = self.non_adaptive
     self._non_adaptive_frame = 0
+    # Task 12 A1 (owner decision 2026-10-19): non-adaptive keeps emergency collision braking. The lead MPC candidate is
+    # re-admitted only for a real threat (braking_urgency.collision_threat / FCW / the MPC itself needing real braking),
+    # held for COLLISION_DWELL after it clears so it doesn't chatter; never for ordinary following.
+    self.collision_hold = 0.
+    self.collision_reason = ""
+    self.urgency: str | None = None
 
     # No-service-brake ("coast over set speed"); only ever active together with non-adaptive (see no_service_brake.py)
     self.no_service_brake = NoServiceBrake(CP, self._params)
@@ -68,29 +77,75 @@ class LongitudinalPlannerSP:
     pitch = self._pitch(sm)
     self.coast_logger.update(sm['carState'], sm['carControl'].longActive, fcw, pitch if pitch is not None else float('nan'))
 
-  def update_gear_aware_accel(self, sm: messaging.SubMaster, long_inactive: bool, fcw: bool, a_cruise_prev: float,
-                              cruise_target: float) -> tuple[float, float]:
-    return self.gear_aware_accel.update(long_inactive, sm['carState'], self._pitch(sm), fcw, sm['radarState'],
-                                        a_cruise_prev, cruise_target)
+  @staticmethod
+  def _engaged(sm) -> bool:
+    return bool(sm['selfdriveState'].enabled)
 
-  def update_no_service_brake(self, sm: messaging.SubMaster, long_inactive: bool, v_ego: float, fcw: bool = False) -> bool:
+  @staticmethod
+  def _checks(sm, service: str) -> bool:
+    # a real SubMaster: alive + frequency + valid; the unit-test sims pass plain dicts of fresh messages
+    return sm.all_checks([service]) if hasattr(sm, 'all_checks') else True
+
+  def _clutch_valid(self, sm) -> bool:
+    return bool(sm['carStateSP'].clutchSignalValid) and self._checks(sm, 'carStateSP')
+
+  def update_urgency(self, sm: messaging.SubMaster, fcw: bool, should_stop: bool, a_target: float, v_ego: float) -> str | None:
+    """Rule 5, plannerd side: urgency from the most braking-demanding candidate (the lead MPC's output and stop request,
+    the planner's FCW). An invalid/stale radarState counts; the plan itself is this process."""
     CS = sm['carState']
-    v_set = min(CS.vCruise, V_CRUISE_MAX) * CV.KPH_TO_MS  # driver's set speed, before SCC/SLA targets
+    radar_ok = self._checks(sm, 'radarState')
+    self.urgency = braking_urgency(plan_ok=True, radar_ok=radar_ok, force_decel=sm['controlsState'].forceDecel, fcw=fcw,
+                                   stock_aeb=CS.stockAeb or CS.stockFcw, should_stop=should_stop, a_target=a_target,
+                                   v_ego=v_ego, radar=sm['radarState'])
+    return self.urgency
+
+  def update_collision_braking(self, sm: messaging.SubMaster, fcw: bool, a_target_mpc: float, v_ego: float, dt: float) -> bool:
+    """A1: non-adaptive re-admits the lead MPC (and releases the NSB clamp) while a collision threat is present, plus
+    COLLISION_DWELL. Returns whether it is re-admitted this frame. Always False outside non-adaptive mode."""
+    if not self.non_adaptive:
+      self.collision_hold, self.collision_reason = 0., ""
+      return False
+    CS, radar = sm['carState'], sm['radarState']
+    reason = "fcw" if fcw else "stock_aeb" if (CS.stockAeb or CS.stockFcw) else None
+    for lead in (radar.leadOne, radar.leadTwo):
+      reason = reason or collision_threat(lead, v_ego)
+    if reason is None and radar.leadOne.present and a_target_mpc < MPC_NEEDED_DECEL:
+      reason = "mpc_needs_braking"
+    if reason is not None:
+      if self.collision_hold <= 0.:
+        cloudlog.event("non_adaptive_collision_braking", active=True, reason=reason, v_ego=round(v_ego, 2))
+      self.collision_hold, self.collision_reason = COLLISION_DWELL, reason
+    elif self.collision_hold > 0.:
+      self.collision_hold = max(self.collision_hold - dt, 0.)
+      if self.collision_hold <= 0.:
+        cloudlog.event("non_adaptive_collision_braking", active=False, reason=self.collision_reason)
+        self.collision_reason = ""
+    return self.collision_hold > 0.
+
+  def update_gear_aware_accel(self, sm: messaging.SubMaster, a_cruise_prev: float, cruise_target: float) -> tuple[float, float]:
+    return self.gear_aware_accel.update(self._engaged(sm), sm['carState'], self._pitch(sm), self.urgency, a_cruise_prev,
+                                        cruise_target, self._clutch_valid(sm))
+
+  def update_no_service_brake(self, sm: messaging.SubMaster, v_ego: float, collision: bool = False) -> bool:
+    CS = sm['carState']
+    v_set = min(CS.vCruise, V_CRUISE_MAX) * CV.KPH_TO_MS  # the driver's set speed
+    # B1: the effective target after Smart Cruise Control (vision/map) / Speed Limit Assist, when one of them is lower
+    v_target = float(self.output_v_target) if self.source != LongitudinalPlanSource.cruise else None
     nsb = self.no_service_brake
-    # urgent only matters to the overspeed pulse mode (maintain ignores it); an invalid radarState invalidates the whole
-    # plan, which controlsd already treats as braking allowed
-    allow_brake = nsb.update(long_inactive, self.non_adaptive, v_ego, v_set, sm['controlsState'].forceDecel,
-                             overspeed_urgent(CS, fcw, sm['radarState']))
+    urgency = self.urgency or ("collision" if collision else None)
+    allow_brake = nsb.update(self._engaged(sm), self.non_adaptive, v_ego, v_set, sm['controlsState'].forceDecel,
+                             urgency, v_target)
     if nsb.escalation_event:
       self.events_sp.add(EventNameSP.noServiceBrakeOverspeed)
     return allow_brake
 
-  def update_non_adaptive(self, long_inactive: bool) -> None:
-    # The toggle is re-read at 1 Hz but only applied while longitudinal is inactive, so the mode never flips mid-engagement
+  def update_non_adaptive(self, sm: messaging.SubMaster) -> None:
+    # The toggle is re-read at 1 Hz but only applied while openpilot is disengaged (Task 12 B3: not merely while
+    # longitudinal is off — a gas override or a shift must not flip it), so the mode never flips mid-engagement
     if self._non_adaptive_frame % int(1. / DT_MDL) == 0:
       self._non_adaptive_requested = self.non_adaptive_available and self._params.get_bool("NonAdaptiveLongitudinal")
     self._non_adaptive_frame += 1
-    if long_inactive:
+    if not self._engaged(sm):
       self.non_adaptive = self._non_adaptive_requested
 
   def is_e2e(self, sm: messaging.SubMaster) -> bool:
@@ -195,12 +250,21 @@ class LongitudinalPlannerSP:
     e2eAlerts.greenLightAlert = self.e2e_alerts_helper.green_light_alert
     e2eAlerts.leadDepartAlert = self.e2e_alerts_helper.lead_depart_alert
 
-    # No-service-brake overspeed pulse mode (maintain mode leaves it unset: state off)
-    if self.no_service_brake.state != "off":
-      nsb = longitudinalPlanSP.noServiceBrake
-      nsb.state = self.no_service_brake.state
-      nsb.accelFloor = float(self.no_service_brake.accel_floor)
-      nsb.rampRate = float(self.no_service_brake.pulse.jerk)
-      nsb.overspeed = float(self.no_service_brake.overspeed)
+    # No-service-brake: state + target floor (pulse mode) and the latched values (every frame, Task 12 B3)
+    n = self.no_service_brake
+    nsb = longitudinalPlanSP.noServiceBrake
+    nsb.state = n.state
+    nsb.accelFloor = float(n.accel_floor)
+    nsb.rampRate = float(n.pulse.jerk)
+    nsb.overspeed = float(n.overspeed)
+    nsb.enabled, nsb.mode, nsb.backstop = bool(n.enabled), n.mode, bool(n.backstop_enabled)
+    nsb.margin, nsb.decelFloor, nsb.urgency = float(n.overspeed_margin), float(n.decel_floor), n.urgency or ""
+
+    features = longitudinalPlanSP.features
+    features.nonAdaptive = bool(self.non_adaptive)
+    features.collisionBraking = self.collision_hold > 0.
+    features.collisionReason = self.collision_reason
+    features.gearAware = bool(self.gear_aware_accel.enabled)
+    features.urgency = self.urgency or ""
 
     pm.send('longitudinalPlanSP', plan_sp_send)

@@ -105,6 +105,7 @@ class TestCoastEventLogger(OpenpilotTestCase):
       v += cs.get("a_ego", -0.5) * DT_MDL
 
   def events(self):
+    self.assertTrue(self.logger.drain(), "writer thread never caught up")
     path = os.path.join(self.tmp.name, "coast.jsonl")
     if not os.path.exists(path):
       return []
@@ -149,6 +150,23 @@ class TestCoastEventLogger(OpenpilotTestCase):
     self.run_frames(COAST_MAX_EVENT * 2 + 1., a_ego=0.)
     self.run_frames(0.5, gas=True)
     self.assertEqual(len(self.events()), 3)
+
+  def test_slow_disk_never_blocks_the_planner_loop(self):
+    # Task 12 B5: file I/O is on the writer thread. A disk stalling 0.3 s per write must not stall update(); a full
+    # queue drops events (counted, logged) instead of blocking.
+    import time
+    from unittest import mock
+    from openpilot.sunnypilot.selfdrive.controls.lib.engine_brake_model import COAST_QUEUE_MAX
+    stall = mock.MagicMock(info=lambda line: time.sleep(0.3))
+    with mock.patch.object(self.logger, "_file_logger", return_value=stall):
+      worst = 0.
+      for _ in range(COAST_QUEUE_MAX + 8):    # one finished event per loop
+        t0 = time.monotonic()
+        self.run_frames(COAST_MIN_EVENT + 0.2)
+        self.run_frames(DT_MDL, gas=True)
+        worst = max(worst, time.monotonic() - t0)
+      self.assertLess(worst, 0.25, "update() blocked on the disk")
+      self.assertGreater(self.logger.events_dropped, 0)
 
   def test_unavailable_never_writes(self):
     self.logger = CoastEventLogger(False, DT_MDL, log_dir=self.tmp.name)

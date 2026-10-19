@@ -206,12 +206,29 @@ struct LongitudinalPlanSP @0xf35cc4560bbf6ec2 {
   e2eAlerts @7 :E2eAlerts;
   # fork-only (civic-cruise): no-service-brake overspeed backstop (Task 11). Ordinal may collide on a future sunnypilot rebase.
   noServiceBrake @8 :NoServiceBrake;
+  # fork-only (civic-cruise): latched planner feature state (Task 12 B3) + non-adaptive collision braking (A1)
+  features @9 :LongitudinalFeatures;
+
+  struct LongitudinalFeatures {
+    nonAdaptive @0 :Bool;          # latched for this engagement
+    collisionBraking @1 :Bool;     # non-adaptive: the lead MPC is re-admitted for a collision threat (A1)
+    collisionReason @2 :Text;      # what triggered it ("" when not)
+    gearAware @3 :Bool;            # latched
+    urgency @4 :Text;              # the planner's braking-urgency reason ("" = none)
+  }
 
   struct NoServiceBrake {
     state @0 :NoServiceBrakeState;
     accelFloor @1 :Float32;   # m/s^2: lower accel limit controlsd ramps toward while coasting/pulsing
     rampRate @2 :Float32;     # m/s^3: rate controlsd moves its floor at (pulse roll-on/roll-off)
-    overspeed @3 :Float32;    # m/s: vEgo - set speed
+    overspeed @3 :Float32;    # m/s: vEgo - the effective cruise target (Task 12 B1)
+    # Task 12 B3: the values latched for this engagement (published every frame, maintain mode too)
+    enabled @4 :Bool;
+    mode @5 :Text;
+    backstop @6 :Bool;
+    margin @7 :Float32;
+    decelFloor @8 :Float32;
+    urgency @9 :Text;         # the braking-urgency reason plannerd saw this frame ("" = none)
 
     enum NoServiceBrakeState {
       off @0;        # maintain mode or not clamping: controlsd uses longitudinalPlan.allowBrake only (legacy)
@@ -405,6 +422,38 @@ struct CarControlSP @0xa5cd762cd951a455 {
   leadOne @2 :LeadData;
   leadTwo @3 :LeadData;
   intelligentCruiseButtonManagement @4 :IntelligentCruiseButtonManagement;
+  # fork-only (civic-cruise, Task 12): manual-transmission longitudinal state owned by controlsd. selfdrived acts on it
+  # (gate-paused gas-override removal, low-speed handback disengage) instead of re-deriving it. Ordinal may collide on a
+  # future sunnypilot rebase.
+  manualLongitudinal @5 :ManualLongitudinal;
+
+  struct ManualLongitudinal {
+    urgency @0 :Text;              # controlsd's braking-urgency reason this frame ("" = none)
+    gateEnabled @1 :Bool;          # latched for this engagement
+    gateState @2 :GateState;
+    gatePaused @3 :Bool;           # a shift: throttle capped at the coast value, braking passes
+    gateBlocked @4 :Bool;          # ClutchShiftGate is on but refused (DisengageOnAccelerator ON / no clutch signal)
+    reengageSmart @5 :Bool;        # latched
+    ebpEnabled @6 :Bool;           # latched
+    ebpSuppressing @7 :Bool;
+    ebpLockedOut @8 :Bool;         # capacity failure: off for the rest of the engagement
+    handbackActive @9 :Bool;       # the low-speed handback ramp is running (prompt)
+    handbackRampDone @10 :Bool;
+    handbackDisengage @11 :Bool;   # selfdrived: disengage now (speedTooLow)
+    handbackSpeed @12 :Float32;    # latched handback threshold (selfdrived refuses engagement below it + hysteresis)
+    handbackRamp @13 :Float32;     # latched
+    handbackAvailable @14 :Bool;
+    nsbEnabled @15 :Bool;          # latched (controlsd side)
+    nsbDecelFloor @16 :Float32;    # latched (controlsd side)
+
+    enum GateState {
+      idle @0;
+      gasReleased @1;
+      shifting @2;
+      reengaging @3;
+      coastTimeout @4;
+    }
+  }
 
   struct Param {
     key @0 :Text;
@@ -469,6 +518,10 @@ struct BackupManagerSP @0xf98d843bfd7004a3 {
 
 struct CarStateSP @0xb86e6369214c01c8 {
   speedLimit @0 :Float32;
+  # fork-only (civic-cruise, Task 12): the manual gearbox's own gear signal and whether it is alive. Ordinals may collide
+  # on a future sunnypilot rebase.
+  gearRaw @1 :Int8;
+  clutchSignalValid @2 :Bool;
 }
 
 struct LiveMapDataSP @0xf416ec09499d9d19 {

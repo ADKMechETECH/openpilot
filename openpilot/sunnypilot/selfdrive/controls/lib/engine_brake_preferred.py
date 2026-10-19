@@ -16,7 +16,10 @@ urgency, gets openpilot's real (braking) command untouched: a hard hand-off, nev
      states, PID anti-windup) can't go into the brake range. Clamping the plan alone would not work: the PID adds its
      own braking to track it.
 
-Backstops — any one of them means NO suppression (and suppression stays off for RELEASE_HOLD afterwards):
+Backstops — any one of them means NO suppression (and suppression stays off for RELEASE_HOLD afterwards). Since Task 12
+the shared Rule-5 predicate (braking_urgency) comes first: any urgency reason (FCW, forceDecel, stop/hard request, a
+close/closing lead, invalid or STALE plan/radar via sm.all_checks, stock AEB/FCW) steps EBP aside the same frame; the
+EBP-specific checks below then apply on top:
   - lead present with closing speed >= EngineBrakeLeadClosingSpeed, or TTC < EngineBrakeLeadTtc, or closer than
     LEAD_MIN_HEADWAY, or decelerating harder than LEAD_DECEL (leadOne and leadTwo);
   - demanded decel (now, or anywhere in the plan's next PLAN_HORIZON) steeper than EngineBrakeHardFloor (-1.5);
@@ -26,7 +29,10 @@ Backstops — any one of them means NO suppression (and suppression stays off fo
     for CAPACITY_TIME) or persistently (the integrated shortfall, i.e. how much faster the car is now going than the
     plan wanted, exceeds CAPACITY_DV) — the model over-estimated engine braking, or the coast command doesn't coast on
     this car; brake,
-    and stop suppressing for the rest of the engagement (the estimate isn't trusted again until re-engaged).
+    and stop suppressing for the rest of the engagement (the estimate isn't trusted again until re-engaged — a shift or
+    a gas override does not reset it; only a disengage does);
+  - the clutch signal isn't alive (CarStateSP.clutchSignalValid): inert.
+The toggle and every EBP param latch only while openpilot is disengaged (Task 12 B3).
 This is a comfort feature: every doubt resolves toward braking. It does not touch FCW, openpilot's accel limits,
 opendbc safety or panda — it only narrows the command range openpilot already has.
 
@@ -48,6 +54,7 @@ from openpilot.common.params import Params
 from openpilot.common.realtime import DT_CTRL
 from openpilot.common.swaglog import cloudlog
 from openpilot.selfdrive.modeld.constants import ModelConstants
+from openpilot.sunnypilot.selfdrive.controls.lib.braking_urgency import lead_urgent as _lead_urgent
 from openpilot.sunnypilot.selfdrive.controls.lib.engine_brake_model import G, estimate_coast_decel, infer_gear
 
 TransmissionType = structs.CarParams.TransmissionType
@@ -74,7 +81,7 @@ CAPACITY_TOL = 0.15                # m/s^2 (also catches a coast command that ju
 CAPACITY_TIME = 0.75               # s
 CAPACITY_DV = 0.25                 # m/s of accumulated speed shortfall vs. the demand
 RELEASE_HOLD = 1.5                 # s: after a release or an urgent trigger, brake normally at least this long
-URGENT_REASONS = ("lead", "hard_floor", "fcw_aeb", "force_decel", "capacity", "demand")
+URGENT_REASONS = ("lead", "hard_floor", "capacity", "demand", "urgency")
 MIN_SPEED = 5.0                    # m/s
 
 
@@ -90,17 +97,9 @@ def _read_float(params: Params, key: str, default: float, rng: tuple[float, floa
 
 
 def lead_urgent(lead, v_ego: float, ttc_limit: float, closing_limit: float) -> bool:
-  """radarState LeadData: True if this lead rules out suppressing the brakes."""
-  if not lead.present:
-    return False
-  closing = -lead.vRel
-  if closing >= closing_limit:
-    return True
-  if closing > 0.1 and lead.dRel / closing < ttc_limit:
-    return True
-  if lead.dRel < max(LEAD_MIN_GAP, LEAD_MIN_HEADWAY * v_ego):
-    return True
-  return lead.aLeadK < LEAD_DECEL
+  """radarState LeadData: True if this lead rules out suppressing the brakes (the Rule-5 criteria with EBP's own,
+  tunable TTC / closing thresholds — braking_urgency always applies the defaults on top)."""
+  return _lead_urgent(lead, v_ego, ttc_limit, closing_limit)
 
 
 class EngineBrakePreferred:
@@ -113,7 +112,7 @@ class EngineBrakePreferred:
     self.lead_ttc = DEFAULT_LEAD_TTC
     self.lead_closing = DEFAULT_LEAD_CLOSING
     self.read_params()
-    self.enabled = self._enabled_requested
+    self._latch()
     self._plan_horizon_n = sum(t <= PLAN_HORIZON for t in ModelConstants.T_IDXS)
     self.reset()
 
@@ -129,33 +128,34 @@ class EngineBrakePreferred:
     self.reason = "inactive"
 
   def read_params(self) -> None:
+    # 1 Hz; applied by _latch() only while openpilot is disengaged (Task 12 B3)
     self._enabled_requested = self.available and self.params.get_bool("EngineBrakePreferred")
-    self.hard_floor = _read_float(self.params, "EngineBrakeHardFloor", DEFAULT_HARD_FLOOR, HARD_FLOOR_RANGE)
-    self.coast_target = _read_float(self.params, "EngineBrakeCoastTarget", DEFAULT_COAST_TARGET, COAST_TARGET_RANGE)
-    self.lead_ttc = _read_float(self.params, "EngineBrakeLeadTtc", DEFAULT_LEAD_TTC, LEAD_TTC_RANGE)
-    self.lead_closing = _read_float(self.params, "EngineBrakeLeadClosingSpeed", DEFAULT_LEAD_CLOSING, LEAD_CLOSING_RANGE)
+    self._requested = (_read_float(self.params, "EngineBrakeHardFloor", DEFAULT_HARD_FLOOR, HARD_FLOOR_RANGE),
+                       _read_float(self.params, "EngineBrakeCoastTarget", DEFAULT_COAST_TARGET, COAST_TARGET_RANGE),
+                       _read_float(self.params, "EngineBrakeLeadTtc", DEFAULT_LEAD_TTC, LEAD_TTC_RANGE),
+                       _read_float(self.params, "EngineBrakeLeadClosingSpeed", DEFAULT_LEAD_CLOSING, LEAD_CLOSING_RANGE))
 
-  def _backstop(self, CS, plan, plan_valid: bool, radar, radar_valid: bool, force_decel: bool,
-                long_control_state, pitch: float | None) -> str | None:
-    """Reason suppression is ruled out this frame, or None."""
-    if not plan_valid:
-      return "plan_invalid"
-    if not radar_valid:
-      return "radar_invalid"
+  def _latch(self) -> None:
+    self.enabled = self._enabled_requested
+    self.hard_floor, self.coast_target, self.lead_ttc, self.lead_closing = self._requested
+
+  def _backstop(self, CS, plan, urgency: str | None, long_control_state, pitch: float | None,
+                clutch_valid: bool) -> str | None:
+    """Reason suppression is ruled out this frame, or None. Rule 5 first."""
+    if urgency is not None:
+      return "urgency"
+    if not clutch_valid:
+      return "no_clutch_signal"
     if pitch is None or not math.isfinite(pitch):
       return "no_pitch"
-    if force_decel:
-      return "force_decel"
-    if plan.fcw or CS.stockAeb or CS.stockFcw:
-      return "fcw_aeb"
-    if plan.shouldStop or long_control_state != LongCtrlState.pid:
+    if long_control_state != LongCtrlState.pid:
       return "stopping"
     if CS.vEgo < MIN_SPEED:
       return "slow"
     if plan.aTarget < self.hard_floor or any(a < self.hard_floor for a in list(plan.accels)[:self._plan_horizon_n]):
       return "hard_floor"
-    if lead_urgent(radar.leadOne, CS.vEgo, self.lead_ttc, self.lead_closing) or \
-       lead_urgent(radar.leadTwo, CS.vEgo, self.lead_ttc, self.lead_closing):
+    if lead_urgent(self._radar.leadOne, CS.vEgo, self.lead_ttc, self.lead_closing) or \
+       lead_urgent(self._radar.leadTwo, CS.vEgo, self.lead_ttc, self.lead_closing):
       return "lead"
     if self.gear == 0:
       return "no_gear"
@@ -175,15 +175,20 @@ class EngineBrakePreferred:
     self.capacity_dv = 0.
     self.reason = reason
 
-  def update(self, long_active: bool, CS, plan, plan_valid: bool, radar, radar_valid: bool, force_decel: bool,
-             long_control_state, pitch: float | None) -> bool:
-    """Call every controlsd frame. Returns True while service-brake commands are suppressed."""
-    if not long_active:
-      self.enabled = self._enabled_requested  # never switches on/off mid-engagement
+  def update(self, enabled: bool, long_active: bool, CS, plan, radar, urgency: str | None, long_control_state,
+             pitch: float | None, clutch_valid: bool = True) -> bool:
+    """Call every controlsd frame. Returns True while service-brake commands are suppressed.
+    enabled: openpilot engaged (latching + the capacity lockout's lifetime); urgency: braking_urgency()."""
+    if not enabled:
+      self._latch()   # never switches on/off, or re-tunes, mid-engagement
       self.reset()
       return False
     if not self.enabled:
       return False
+    if not long_active:   # a shift, a gas override: stop suppressing, but the capacity lockout stays
+      self._release("inactive")
+      return False
+    self._radar = radar
 
     self.gear = infer_gear(CS.deprecated.engineRpm, CS.vEgo, CS.deprecated.clutchPressed)
     grade = pitch if pitch is not None and math.isfinite(pitch) else 0.
@@ -192,7 +197,7 @@ class EngineBrakePreferred:
     a_gravity = -G * math.sin(grade)
     self.a_eb_credited = max(CAPACITY_MARGIN * (self.a_eb - a_gravity) + a_gravity, self.hard_floor)
 
-    reason = self._backstop(CS, plan, plan_valid, radar, radar_valid, force_decel, long_control_state, pitch)
+    reason = self._backstop(CS, plan, urgency, long_control_state, pitch, clutch_valid)
     a_demand = plan.aTarget
     if reason is None and self.suppress:
       # capacity: the car must actually be slowing about as demanded while the brakes are held off
