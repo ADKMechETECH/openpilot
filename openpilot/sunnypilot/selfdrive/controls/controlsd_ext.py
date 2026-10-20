@@ -11,6 +11,7 @@ import openpilot.cereal.messaging as messaging
 from openpilot.cereal import log, custom
 
 from opendbc.car import structs
+from opendbc.car.structs import CLUTCH_PEDAL_UNKNOWN
 from openpilot.selfdrive.controls.lib.longcontrol import LongCtrlState
 from openpilot.common.params import Params
 from openpilot.common.realtime import DT_CTRL
@@ -103,7 +104,8 @@ class ControlsExt(ModelStateBase):
     # Must run every frame (not short-circuited) so the gate sees every gas/clutch/RPM edge.
     # TODO(on-car): verify the Honda radarless VSA/PCM accept ACC_CONTROL with CONTROL_ON set and a coast command for the
     #  length of a shift with the clutch in (no CRUISE_FAULT, no cruise cancel).
-    self.clutch_shift_gate.update(sm['carState'], enabled, CS_SP.gearRaw if self.clutch_valid else -1, self.clutch_valid)
+    self.clutch_shift_gate.update(sm['carState'], enabled, CS_SP.gearRaw if self.clutch_valid else -1, self.clutch_valid,
+                                  CS_SP.clutchPedal if self.clutch_valid else CLUTCH_PEDAL_UNKNOWN)
 
   def apply_no_service_brake(self, sm: messaging.SubMaster, accel_limits: tuple[float, float], long_active: bool,
                              last_accel: float) -> tuple[float, float]:
