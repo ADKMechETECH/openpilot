@@ -108,9 +108,11 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
 
     steer_angle_without_offset = sm['carState'].steeringAngleDeg - sm['vehicleParameters'].angleOffsetDeg
 
+    LongitudinalPlannerSP.update_gas_override(self, sm, reset_state)
     if reset_state:
       self.v_desired_filter.x = v_ego
-      self.output_a_target = np.clip(sm['carState'].aEgo, ACCEL_MIN, ACCEL_MAX)
+      # Task 16: manual + gas override -> coast first (never above 0); otherwise stock aEgo
+      self.output_a_target = np.clip(LongitudinalPlannerSP.reset_accel(self, sm['carState'].aEgo), ACCEL_MIN, ACCEL_MAX)
       self.a_cruise = self.output_a_target
       self.a_cruise_stock = self.a_cruise
 

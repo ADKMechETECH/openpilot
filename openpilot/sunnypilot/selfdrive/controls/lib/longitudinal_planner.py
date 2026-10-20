@@ -68,6 +68,25 @@ class LongitudinalPlannerSP:
     self.gear_aware_accel = GearAwareAccel(CP, self._params)
     self.coast_logger = CoastEventLogger(CP.transmissionType == structs.CarParams.TransmissionType.manual, DT_MDL)
 
+    # Task 16 (Stage 2 on-car, always on for manuals): the planner re-seeds from aEgo while the driver overrides with the
+    # gas; on a manual that is the driver's own acceleration, which vanishes the instant they lift (closed throttle).
+    self.manual = CP.transmissionType == structs.CarParams.TransmissionType.manual
+    self.gas_override_reset = False
+
+  def update_gas_override(self, sm: messaging.SubMaster, reset_state: bool) -> None:
+    """Task 16: remembers that the current planner reset is a driver gas override while engaged. It stays set through
+    the lift until the planner stops resetting (longitudinal back), so the first plans after the lift see it too."""
+    if not reset_state:
+      self.gas_override_reset = False
+    elif self._engaged(sm) and sm['carState'].gasPressed:
+      self.gas_override_reset = True
+
+  def reset_accel(self, a_ego: float) -> float:
+    """Task 16: the accel the planner re-seeds from. Manual + gas override: 'coast first, then plan' - never above 0, so
+    openpilot never re-opens the throttle the driver just closed (Stage 2: +1.6 m/s^2 requested after a lift at +1.8
+    re-accelerated the car for ~1.5 s to 5.5 mph over set). Automatics and every other reset: stock (aEgo)."""
+    return min(a_ego, 0.) if self.manual and self.gas_override_reset else a_ego
+
   @staticmethod
   def _pitch(sm: messaging.SubMaster) -> float | None:
     orientation = sm['carControl'].orientationNED

@@ -24,6 +24,7 @@ from openpilot.common.realtime import DT_CTRL, DT_MDL
 from openpilot.common.test import OpenpilotTestCase
 from openpilot.sunnypilot.selfdrive.controls.lib.braking_urgency import braking_urgency
 from openpilot.sunnypilot.selfdrive.controls.lib.clutch_shift_gate import GateState
+from openpilot.sunnypilot.selfdrive.controls.lib.engine_brake_preferred import DEFAULT_COAST_TARGET
 from openpilot.sunnypilot.selfdrive.controls.lib.tests.manual_sim import FakeSM, ManualCarSim, Pose, controls_frame
 
 REASONS = ("fcw", "force_decel", "stock_aeb", "stopping", "hard_decel", "invalid_plan", "stale_plan", "invalid_radar",
@@ -106,7 +107,9 @@ def nsb_pulse(over):
 def ebp():
   sim = ManualCarSim(speed=25., gear=6, v_set=24.7, NonAdaptiveLongitudinal=True, EngineBrakePreferred=True,
                      ClutchShiftGate=False)
-  assert frames_until(sim, lambda s: s.ext.engine_brake_preferred.suppress and last(s)["limits"][0] >= 0., 6.)
+  # suppressing: the lower limit raised to the coast target (Task 16: -0.2, closed throttle)
+  assert frames_until(sim, lambda s: s.ext.engine_brake_preferred.suppress and
+                      last(s)["limits"][0] >= DEFAULT_COAST_TARGET - 1e-9, 6.)
   return sim
 
 

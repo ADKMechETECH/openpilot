@@ -19,7 +19,7 @@ from openpilot.selfdrive.modeld.constants import ModelConstants
 from openpilot.sunnypilot.selfdrive.controls.lib.braking_urgency import braking_urgency
 from openpilot.sunnypilot.selfdrive.controls.lib.engine_brake_model import G, engine_rpm_at, estimate_coast_decel
 from openpilot.sunnypilot.selfdrive.controls.lib.engine_brake_preferred import EngineBrakePreferred, lead_urgent, \
-  CAPACITY_TIME, RELEASE_HOLD, DEFAULT_HARD_FLOOR, HARD_FLOOR_RANGE, LEAD_TTC_RANGE, COAST_TARGET_RANGE
+  CAPACITY_TIME, RELEASE_HOLD, DEFAULT_HARD_FLOOR, HARD_FLOOR_RANGE, LEAD_TTC_RANGE, COAST_TARGET_RANGE, DEFAULT_COAST_TARGET
 from openpilot.sunnypilot.selfdrive.controls.lib.no_service_brake import apply_brake_floor, read_decel_floor
 from openpilot.sunnypilot.selfdrive.controls.lib.tests.test_manual_low_speed_handback import make_cp, TransmissionType
 
@@ -166,7 +166,9 @@ class ManualSim:
 
 
 def brake_cmds(log):
-  return [l["cmd"] for l in log if l["cmd"] < -1e-6]
+  # commands below the coast target - where the service brakes could join. Stage 2 C2 (on-car): between the coast target
+  # (-0.2) and 0 the car only closes the throttle (engine braking), so those aren't brake-range commands.
+  return [l["cmd"] for l in log if l["cmd"] < DEFAULT_COAST_TARGET - 1e-6]
 
 
 # Scenarios
@@ -185,7 +187,7 @@ class TestEngineBrakePreferred(OpenpilotTestCase):
       p.remove(k)
       self.assertFalse(p.get_bool(k))
     self.assertAlmostEqual(p.get("EngineBrakeHardFloor", return_default=True), -1.5)
-    self.assertAlmostEqual(p.get("EngineBrakeCoastTarget", return_default=True), 0.0)
+    self.assertAlmostEqual(p.get("EngineBrakeCoastTarget", return_default=True), DEFAULT_COAST_TARGET)
 
   def test_gentle_trim_coasts_on_engine_braking(self):
     setup(ebp=False, non_adaptive=True)
@@ -245,7 +247,7 @@ class TestEngineBrakePreferred(OpenpilotTestCase):
       plan.accels = [demand] * len(ModelConstants.T_IDXS)
       self.assertEqual(engaged(ebp, CS, plan, radar), demand == -0.3,
                        f"demand {demand}")
-      self.assertEqual(ebp.limit_accel((-3.5, 2.0)), (0.0, 2.0) if demand == -0.3 else (-3.5, 2.0))
+      self.assertEqual(ebp.limit_accel((-3.5, 2.0)), (DEFAULT_COAST_TARGET, 2.0) if demand == -0.3 else (-3.5, 2.0))
     # a hard decel planned within the next second also rules it out, even if aTarget itself is gentle
     ebp.reset()
     plan.aTarget = -0.3
@@ -266,7 +268,9 @@ class TestEngineBrakePreferred(OpenpilotTestCase):
     # the capacity / demand backstops must hand off to the brakes before the gap gets meaningfully worse than stock.
     setup(ebp=False)
     off = ManualSim(true_eb_scale=0.2, **GENTLE_FOLLOW).run(16.)  # stock, same car
-    setup(ebp=True)
+    # worst case for the backstops: coast target 0 (the weakest allowed; on the real car ~zero torque, no engine braking -
+    # Stage 2 C2). The default -0.2 slows the car more, so the suppression can end without any backstop (checked below)
+    setup(ebp=True, EngineBrakeCoastTarget=0.0)
     sim = ManualSim(true_eb_scale=0.2, **GENTLE_FOLLOW)
     on = sim.run(16.)
     releases = [l for prev, l in zip(on, on[1:], strict=False) if prev["suppress"] and not l["suppress"]]
@@ -279,10 +283,16 @@ class TestEngineBrakePreferred(OpenpilotTestCase):
     self.assertGreater(min(l["gap"] for l in on), min(l["gap"] for l in off) - 3.0)
     self.assertFalse(any(l["fcw"] for l in on))
     self.assertTrue(sim.ebp.capacity_failed, "and the estimate isn't trusted again this engagement")
+    # the default coast target (-0.2, closed throttle) on the same over-optimistic model: never a smaller gap, no FCW
+    setup(ebp=True)
+    default = ManualSim(true_eb_scale=0.2, **GENTLE_FOLLOW).run(16.)
+    self.assertGreaterEqual(min(l["gap"] for l in default), min(l["gap"] for l in on) - 0.05)
+    self.assertFalse(any(l["fcw"] for l in default))
 
   def test_coast_command_that_holds_speed_is_caught(self):
-    # if ACCEL_COMMAND 0 holds speed on the real car (no engine braking at all at the coast target), same backstop
-    setup(ebp=True, non_adaptive=True)
+    # no engine braking at all at the coast command -> the capacity backstop. Stage 2 C2 showed ACCEL_COMMAND 0 is exactly
+    # that on the car (~zero torque), so this pins the coast target to 0 (still allowed) to keep testing the backstop
+    setup(ebp=True, non_adaptive=True, EngineBrakeCoastTarget=0.0)
     log = ManualSim(true_eb_scale=0.0, **GENTLE_TRIM).run(8.)
     capacity = [l for l in log if l["reason"] == "capacity"]
     self.assertEqual(len(capacity), 1)
@@ -325,7 +335,7 @@ class TestEngineBrakePreferred(OpenpilotTestCase):
     for l in log:
       self.assertGreaterEqual(l["lower"], -0.3 - 1e-9)
       if l["suppress"]:
-        self.assertEqual(l["lower"], 0.0)
+        self.assertEqual(l["lower"], max(-0.3, DEFAULT_COAST_TARGET))
     self.assertEqual(brake_cmds(log), [])
 
   def test_unavailable_on_automatic_and_stock_acc(self):
@@ -437,3 +447,14 @@ class TestEngineBrakePreferred(OpenpilotTestCase):
     self.assertEqual(ebp.coast_target, COAST_TARGET_RANGE[0])
     self.assertEqual(ebp.lead_ttc, LEAD_TTC_RANGE[0])
     self.assertEqual(ebp.lead_closing, 3.0)
+
+
+class TestCoastTargetDefault(OpenpilotTestCase):
+  def test_default_coast_target_closes_the_throttle(self):
+    # Stage 2 C2 (on-car): ACCEL_COMMAND 0 holds ~zero axle torque (no engine braking); a small negative closes the
+    # throttle. The default must be that small negative, in the Python constant and in the compiled Params default.
+    from openpilot.common.params import Params
+    self.assertEqual(DEFAULT_COAST_TARGET, -0.2)
+    p = Params()
+    p.remove("EngineBrakeCoastTarget")
+    self.assertAlmostEqual(float(p.get("EngineBrakeCoastTarget", return_default=True)), -0.2)
