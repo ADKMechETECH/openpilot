@@ -524,6 +524,8 @@ struct CarStateSP @0xb86e6369214c01c8 {
   # on a future sunnypilot rebase.
   gearRaw @1 :Int8;
   clutchSignalValid @2 :Bool;
+  # fork-only (civic-cruise, Task 15): clutch pedal switches: 0 unknown (default), 1 up, 2 travel, 3 floor.
+  clutchPedal @3 :Int8;
 }
 
 struct LiveMapDataSP @0xf416ec09499d9d19 {
