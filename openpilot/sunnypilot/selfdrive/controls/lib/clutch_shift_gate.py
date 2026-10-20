@@ -17,7 +17,9 @@ with the clutch in, and a shift is no reason to drop them.
     gate is actually paused, from the state controlsd publishes): the command is exactly 0, which is what the panda
     requires while gas is pressed (it blocks any other 0x1C8 accel).
 
-Trigger: clutch open (clutchPressed; Honda: GEAR_MT not 1-6 / 14) is authoritative. Secondary cues:
+Trigger: clutch open (clutchPressed = drivetrain decoupled; Honda: the clutch pedal's top switch has opened - the
+earliest cue, as the pedal starts to move - or GEAR_MT not 1-6 / 14, or a phantom gear, see opendbc honda/carstate.py)
+is authoritative. Secondary cues:
   - ClutchShiftGateGasReleaseHint (default OFF): a short throttle cap after a gas-override release, in case a clutch
     press follows;
   - the RPM-flare backstop (a missed clutch signal while openpilot itself is on the throttle: the engine free-revs):
@@ -26,12 +28,17 @@ Trigger: clutch open (clutchPressed; Honda: GEAR_MT not 1-6 / 14) is authoritati
     only starts a cap from idle, never extends a shift, and after FLARE_COOLDOWN_COUNT flares within FLARE_COOLDOWN_WINDOW
     it rests for FLARE_COOLDOWN (a noisy rpm can't keep re-capping).
 
-Resume: fixed REENGAGE_DELAY after GEAR_MT reports a gear, or (ClutchReengageSmart) on ratio lock + gas released for
-ClutchReengageGasDebounce; if smart has no lock within SMART_LOCK_TIMEOUT it falls back to the fixed delay (logged) — it
-never waits ClutchShiftGateMaxCoast. `resumed` flags the frame a shift ends into idle (controlsd starts the takeover
-ramp there; never on the transition into coastTimeout).
+Resume: fixed REENGAGE_DELAY after the drivetrain reads coupled again (restarted if the reported gear changes), or
+(ClutchReengageSmart) on ratio lock + gas released for ClutchReengageGasDebounce; if smart has no lock within
+SMART_LOCK_TIMEOUT it falls back to the fixed delay (logged) — it never waits ClutchShiftGateMaxCoast. Since Task 15 the
+fixed delay (0.15 s) is shorter than lock + steady + debounce, so smart no longer takes over earlier on this car; what it
+still adds is the on-throttle rule (wait for the lift) and the seeded takeover ramp.
+`resumed` flags the frame a shift ends into idle (controlsd starts the takeover ramp there; never on the transition into
+coastTimeout).
 Shift timeout (ClutchShiftGateMaxCoast, <= 5 s): clutch in longer than that is neutral-coasting, not a shift -> state
-coastTimeout: throttle stays capped at <= 0, nothing else is limited.
+coastTimeout: throttle stays capped at <= 0, nothing else is limited. Neutral (Task 15): with a live clutch pedal switch
+(CarStateSP.clutchPedal), decoupled with the pedal fully up for NEUTRAL_CONFIRM is neutral with the clutch out - not a
+shift - so it goes to coastTimeout at once instead of after MaxCoast.
 
 Inert (= stock, never enabled) while DisengageOnAccelerator is ON (a blip would disengage at the panda; the gate refuses
 and publishes gateBlocked so the HUD says why) and while the clutch signal isn't alive (CarStateSP.clutchSignalValid).
@@ -40,7 +47,7 @@ Toggle and params latch only while openpilot is disengaged (Task 12 B3).
 from collections import deque
 from enum import IntEnum
 
-from opendbc.car.structs import car
+from opendbc.car.structs import car, CLUTCH_PEDAL_UP, CLUTCH_PEDAL_UNKNOWN
 
 from openpilot.common.filter_simple import FirstOrderFilter
 from openpilot.common.params import Params
@@ -53,12 +60,19 @@ TransmissionType = car.CarParams.TransmissionType
 
 # TODO(on-car): verify all timing/threshold constants below against cabana logs of real shifts on the car.
 GAS_RELEASE_WINDOW = 0.6  # s, time after a gas release to wait for a clutch press before resuming
-REENGAGE_DELAY = 0.5      # s, after the clutch re-engages before resuming (GEAR_MT may report a gear mid-engagement)
+# Task 15 (Stage 1 data, 2026-10-20): GEAR_MT is the PCM's ratio-derived gear and reports the new gear only once the
+# pedal is fully up and the rpm already matches (lag 0.00-0.07 s to a +-2 % ratio lock in every real shift), so the old
+# 0.5 s was pure extra coast. What's left is a settle debounce: ~7 GEARBOX_ALT_2 frames (50 Hz) of a steady gear.
+REENGAGE_DELAY = 0.15     # s, the drivetrain reads coupled (and the gear doesn't change) for this long before resuming
+NEUTRAL_CONFIRM = 0.5     # s, decoupled with the clutch pedal fully up = neutral (real shifts: GEAR_MT reports the gear
+                          # within ~0.3 s of the pedal reaching the top)
 SMART_LOCK_TIMEOUT = 1.0  # s after GEAR_MT reports a gear: no ratio lock by then -> the fixed-delay takeover
 FLARE_RPM_RATE = 1500.    # rpm/s, RPM rise rate treated as a free-revving (decoupled) engine
 FLARE_MAX_A_EGO = 0.5     # m/s^2, ...but only if the car isn't accelerating with it
 FLARE_MIN_SPEED = 2.0     # m/s, below this RPM/speed coupling is not meaningful (launch, standstill)
 FLARE_CLEAR_TIME = 1.0    # s, the backstop holds the cap until no flare has been seen for this long
+FLARE_HOLDOFF = 0.5       # s after the drivetrain last read decoupled: no flare may start (a downshift's re-coupling rpm
+                          # rise; this used to be covered by the 0.5 s REENGAGE_DELAY, Task 15 made it explicit)
 FLARE_WINDOW = 0.1        # s, baseline of the filtered-rpm rate
 FLARE_SAMPLES = 3         # consecutive NEW ENGINE_DATA samples over the rate
 FLARE_SAMPLE_GAP = 0.2    # s with no new ENGINE_DATA sample (a steady rpm repeats its value) ends a flare in progress
@@ -101,6 +115,7 @@ class ClutchShiftGate:
     self.state = GateState.idle
     self.timer = 0.0
     self.flare_clear_timer = 0.0
+    self.since_decoupled = FLARE_HOLDOFF
     self.gas_pressed_prev = False
     self.rpm_filter = FirstOrderFilter(0., RPM_FILTER_RC, DT_CTRL)
     self.rpm_hist: deque[float] = deque(maxlen=max(1, round(FLARE_WINDOW / DT_CTRL)) + 1)
@@ -115,6 +130,8 @@ class ClutchShiftGate:
     self.gas_clear_time = 0.
     self.reengage_time = 0.
     self.coast_time = 0.
+    self.neutral_time = 0.
+    self.reengage_gear = -1
     self.fallback = False
     self.paused = False
     self.resumed = False  # True on the frame a shift ended into idle (controlsd starts the takeover ramp there)
@@ -176,8 +193,10 @@ class ClutchShiftGate:
       cloudlog.event("clutch_shift_gate", state=state.name, prev=self.state.name)
       self.state = state
 
-  def update(self, CS: car.CarState, enabled: bool, gear_raw: int = -1, clutch_valid: bool = False) -> GateState:
-    """Call every controls frame. enabled = openpilot engaged (latching); gear_raw / clutch_valid from CarStateSP."""
+  def update(self, CS: car.CarState, enabled: bool, gear_raw: int = -1, clutch_valid: bool = False,
+             clutch_pedal: int = CLUTCH_PEDAL_UNKNOWN) -> GateState:
+    """Call every controls frame. enabled = openpilot engaged (latching); gear_raw / clutch_valid / clutch_pedal from
+    CarStateSP (clutch_pedal unknown = no pedal switch: GEAR_MT alone, MaxCoast is the only neutral bound)."""
     self.t += DT_CTRL
     flare = self._rpm_flare(CS)
     gas_released = self.gas_pressed_prev and not CS.gasPressed
@@ -202,13 +221,17 @@ class ClutchShiftGate:
     clutch = self.clutch
     # The backstop only *starts* a cap (a missed clutch signal). It must not extend a shift already in progress:
     # the RPM jump as the clutch bites on a downshift looks like a flare but is the engine re-coupling.
+    self.since_decoupled = 0. if clutch else min(self.since_decoupled + DT_CTRL, FLARE_HOLDOFF)
     if clutch:
       self.flare_clear_timer = 0.
-    elif flare and self.state in (GateState.idle, GateState.gasReleased):
+    elif flare and self.state in (GateState.idle, GateState.gasReleased) and self.since_decoupled >= FLARE_HOLDOFF - 1e-6:
       self.flare_clear_timer = FLARE_CLEAR_TIME
     else:
       self.flare_clear_timer = max(self.flare_clear_timer - DT_CTRL, 0.)
     decoupled = clutch or self.flare_clear_timer > 0.
+    # neutral with the clutch out: decoupled while the pedal sits fully up (clutch_pedal is only ever UP when its switch
+    # is alive). Not a shift: coastTimeout now rather than after MaxCoast.
+    self.neutral_time = self.neutral_time + DT_CTRL if clutch and clutch_pedal == CLUTCH_PEDAL_UP else 0.
 
     if decoupled:
       if self.state != GateState.coastTimeout:  # a timed-out coast stays timed out until the clutch re-engages
@@ -218,9 +241,9 @@ class ClutchShiftGate:
       self._set_state(GateState.idle)
     elif self.state in (GateState.shifting, GateState.coastTimeout):
       self._set_state(GateState.reengaging)
-      self.timer = REENGAGE_DELAY
-      self.reengage_time = 0.
-      self.fallback = False
+      self._start_reengage(gear_raw)
+    elif self.state == GateState.reengaging and gear_raw != self.reengage_gear:
+      self._start_reengage(gear_raw)   # the reported gear changed without decoupling: settle again
     elif gas_released and self.state == GateState.idle and self.gas_release_hint:
       self._set_state(GateState.gasReleased)
       self.timer = GAS_RELEASE_WINDOW
@@ -235,6 +258,12 @@ class ClutchShiftGate:
 
     self._shift_timeout(CS, clutch)
     return self._result()
+
+  def _start_reengage(self, gear_raw: int) -> None:
+    self.timer = REENGAGE_DELAY
+    self.reengage_time = 0.
+    self.reengage_gear = gear_raw
+    self.fallback = False
 
   def _ratio_lock_valid(self, CS: car.CarState) -> bool:
     return CS.vEgo >= self.reengage.ratio_min_speed
@@ -253,6 +282,11 @@ class ClutchShiftGate:
   def _shift_timeout(self, CS: car.CarState, clutch: bool) -> None:
     """8b: bound the coast. Clutch in longer than ClutchShiftGateMaxCoast (<= 5 s) is neutral-coasting, not a shift."""
     if self.state != GateState.shifting or not clutch:
+      self.coast_time = 0.
+      return
+    if self.neutral_time >= NEUTRAL_CONFIRM - 1e-6:
+      cloudlog.event("clutch_shift_gate_timeout", reason="neutral", coast_time=round(self.coast_time, 2), v_ego=CS.vEgo)
+      self._set_state(GateState.coastTimeout)
       self.coast_time = 0.
       return
     self.coast_time += DT_CTRL

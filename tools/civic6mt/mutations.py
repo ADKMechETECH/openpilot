@@ -152,10 +152,12 @@ MUTATIONS = [
   m("b5_odbc_liveness", "B5 A-F-M6", "opendbc_repo/opendbc/car/honda/carstate.py",
     "ret_sp.clutchSignalValid = ts > 0 and (cp.last_nonempty_nanos - ts) < GEARBOX_ALT_2_TIMEOUT_NS",
     "ret_sp.clutchSignalValid = True", ODBC),
-  m("b5_odbc_unknown_gear_coupled", "A2.7 B-L1", "opendbc_repo/opendbc/car/honda/carstate.py",
-    "ret.deprecated.clutchPressed = gear_mt not in GEAR_MT_COUPLED", "ret.deprecated.clutchPressed = gear_mt == 0", ODBC),
-  m("b5_odbc_integra_rpm", "B5 B-M7", "opendbc_repo/opendbc/car/honda/carstate.py",
-    "        if self.CP.carFingerprint == CAR.ACURA_INTEGRA:\n", "        if False:\n", ODBC),
+  m("b5_odbc_unknown_gear_coupled", "A2.7 B-L1", "opendbc_repo/opendbc/car/honda/carstate.py",   # re-pointed in Task 15
+    "pedal_pressed or gear_mt not in GEAR_MT_COUPLED or phantom", "pedal_pressed or gear_mt == 0 or phantom", ODBC),
+  # re-pointed in Task 15: every radarless manual now reads POWERTRAIN_DATA (the Integra had no ENGINE_DATA; the Civic's
+  # ENGINE_DATA rpm is 0 on the car)
+  m("b5_odbc_integra_rpm", "B5 B-M7 / T15 rpm", "opendbc_repo/opendbc/car/honda/carstate.py",
+    '        rpm = cp.vl["POWERTRAIN_DATA"]["ENGINE_RPM"]\n', '        rpm = cp.vl["ENGINE_DATA"]["ENGINE_RPM"]\n', ODBC),
   # --- Task 13 (verification fix-ups) -------------------------------------------------------------------------------
   m("t13_a1_broad_urgency", "T13 A1 N-1", f"{SP}/controlsd_ext.py",   # re-pointed in Task 14 (the call moved)
     "      urgency = handback_urgency(self.urgency, radar, v_ego, reaction, a_down)\n",
@@ -206,4 +208,23 @@ MUTATIONS = [
     "      reason = reason or collision_threat(lead, v_ego)", "      reason = reason", FORCED),
   m("t14_b1_no_cruise_reseed_forced", "T14 B1 W2", "openpilot/selfdrive/controls/lib/longitudinal_planner.py",
     "      self.a_cruise = min(self.a_cruise, float(self.output_a_target))", "      pass", FORCED),
+  # --- Task 15 (Stage 1 on-car data: rpm source, clutch pedal switch, phantom gear, settle delay) --------------------
+  m("t15_odbc_pedal_ignored", "T15 pedal switch", "opendbc_repo/opendbc/car/honda/carstate.py",
+    "ret.deprecated.clutchPressed = pedal_pressed or gear_mt", "ret.deprecated.clutchPressed = gear_mt", ODBC),
+  m("t15_odbc_phantom_ignored", "T15 phantom gear", "opendbc_repo/opendbc/car/honda/carstate.py",
+    "not in GEAR_MT_COUPLED or phantom\n", "not in GEAR_MT_COUPLED\n", ODBC),
+  m("t15_odbc_phantom_trusts_any_motion", "T15 phantom gear", "opendbc_repo/opendbc/car/honda/carstate.py",
+    "      if rpm >= PHANTOM_RPM_RELEASE or tracks:\n", "      if True:\n", ODBC),
+  m("t15_odbc_pedal_both_on_is_up", "T15 pedal switch", "opendbc_repo/opendbc/car/honda/carstate.py",
+    "    if up and floor:\n      return CLUTCH_PEDAL_UNKNOWN\n", "", ODBC),
+  m("t15_odbc_pedal_never_stale", "T15 pedal switch", "opendbc_repo/opendbc/car/honda/carstate.py",
+    "    if ts <= 0 or (cp.last_nonempty_nanos - ts) >= GAS_PEDAL_2_TIMEOUT_NS:", "    if ts <= 0:", ODBC),
+  m("t15_gate_no_neutral_shortcut", "T15 neutral", f"{SP}/lib/clutch_shift_gate.py",
+    "    if self.neutral_time >= NEUTRAL_CONFIRM - 1e-6:", "    if False:", GATE),
+  m("t15_gate_neutral_ignores_pedal", "T15 neutral", f"{SP}/lib/clutch_shift_gate.py",
+    "if clutch and clutch_pedal == CLUTCH_PEDAL_UP else 0.", "if clutch else 0.", GATE),
+  m("t15_gate_no_flare_holdoff", "T15 settle delay", f"{SP}/lib/clutch_shift_gate.py",
+    " and self.since_decoupled >= FLARE_HOLDOFF - 1e-6:", ":", GATE),
+  m("t15_gate_gear_change_no_restart", "T15 settle delay", f"{SP}/lib/clutch_shift_gate.py",
+    "    elif self.state == GateState.reengaging and gear_raw != self.reengage_gear:", "    elif False:", GATE),
 ]

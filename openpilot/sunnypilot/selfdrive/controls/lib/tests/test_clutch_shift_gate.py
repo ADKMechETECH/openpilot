@@ -1,10 +1,11 @@
-from opendbc.car.structs import car
+from opendbc.car.structs import car, CLUTCH_PEDAL_UNKNOWN, CLUTCH_PEDAL_UP, CLUTCH_PEDAL_TRAVEL, CLUTCH_PEDAL_FLOOR
 
 from openpilot.common.params import Params
 from openpilot.common.realtime import DT_CTRL
 from openpilot.common.test import OpenpilotTestCase
 from openpilot.sunnypilot.selfdrive.controls.lib.clutch_shift_gate import ClutchShiftGate, GateState, FLARE_CLEAR_TIME, \
-                                                                         GAS_RELEASE_WINDOW, REENGAGE_DELAY
+                                                                         GAS_RELEASE_WINDOW, REENGAGE_DELAY, NEUTRAL_CONFIRM, \
+                                                                         FLARE_HOLDOFF
 
 TransmissionType = car.CarParams.TransmissionType
 CRUISE_RPM = 2200.
@@ -28,10 +29,10 @@ def cs(clutch=False, gas=False, rpm=CRUISE_RPM, v=V_CRUISE, a=0., brake=False):
   return CS
 
 
-def upd(gate, CS, enabled=True, gear_raw=3, clutch_valid=True) -> bool:
+def upd(gate, CS, enabled=True, gear_raw=3, clutch_valid=True, clutch_pedal=CLUTCH_PEDAL_UNKNOWN) -> bool:
   """One controls frame of the gate (engaged, live clutch signal); returns whether it is capping throttle for a shift
   (Task 12 A2: a shift no longer pauses longitudinal - `paused` now means "throttle capped, braking passes")."""
-  gate.update(CS, enabled, gear_raw, clutch_valid)
+  gate.update(CS, enabled, gear_raw, clutch_valid, clutch_pedal)
   return gate.paused
 
 
@@ -251,7 +252,7 @@ class TestGateTask12(OpenpilotTestCase):
     # [A-F-H1, B-C2] longitudinal stays active; the upper limit goes to the coast value, the lower limit is untouched
     self.run_for(0.5, clutch=True)
     self.assertEqual(self.gate.limit_accel((-3.5, 2.0)), (-3.5, 0.0))
-    for state_setup in (lambda: self.run_for(0.2), ):   # reengaging (clutch out, delay running)
+    for state_setup in (lambda: self.run_for(REENGAGE_DELAY / 2), ):   # reengaging (clutch out, delay running)
       state_setup()
       self.assertEqual(self.gate.state, GateState.reengaging)
       self.assertEqual(self.gate.limit_accel((-3.5, 2.0)), (-3.5, 0.0))
@@ -393,3 +394,76 @@ class TestGateTask12(OpenpilotTestCase):
     upd(self.gate, cs(clutch=True), clutch_valid=False)
     self.assertFalse(self.gate.enabled)
     self.assertEqual(self.gate.limit_accel((-3.5, 2.0)), (-3.5, 2.0))
+
+
+class TestGateTask15(OpenpilotTestCase):
+  """Task 15 (Stage 1 data): the clutch pedal switch, neutral with the clutch out, the shorter settle delay."""
+
+  def setup_method(self):
+    Params().put_bool("ClutchShiftGate", True)
+    self.gate = ClutchShiftGate(make_cp())
+
+  def run_for(self, seconds, gear_raw=3, clutch_pedal=CLUTCH_PEDAL_UNKNOWN, **kw):
+    return [upd(self.gate, cs(**kw), gear_raw=gear_raw, clutch_pedal=clutch_pedal) for _ in range(round(seconds / DT_CTRL))]
+
+  def test_neutral_clutch_out_goes_straight_to_coast_timeout(self):
+    # decoupled (GEAR_MT 0 -> clutchPressed) with the pedal fully up: neutral, not a shift
+    self.run_for(1.0, clutch_pedal=CLUTCH_PEDAL_UP)
+    self.run_for(NEUTRAL_CONFIRM - 0.05, clutch=True, gear_raw=0, clutch_pedal=CLUTCH_PEDAL_UP, rpm=850.)
+    self.assertEqual(self.gate.state, GateState.shifting)
+    self.run_for(0.1, clutch=True, gear_raw=0, clutch_pedal=CLUTCH_PEDAL_UP, rpm=850.)
+    self.assertEqual(self.gate.state, GateState.coastTimeout)
+    self.assertFalse(self.gate.paused)
+    self.assertEqual(self.gate.limit_accel((-3.5, 2.0)), (-3.5, 0.0), "no throttle into a disconnected engine")
+    # into gear: clutch down, select, release -> reengaging -> idle after the settle delay
+    self.run_for(0.5, clutch=True, gear_raw=0, clutch_pedal=CLUTCH_PEDAL_FLOOR)
+    self.assertEqual(self.gate.state, GateState.coastTimeout)
+    after = self.run_for(1.0, gear_raw=4, clutch_pedal=CLUTCH_PEDAL_UP)
+    self.assertEqual(self.gate.state, GateState.idle)
+    self.assertAlmostEqual(after.index(False) * DT_CTRL, REENGAGE_DELAY, delta=0.02)
+
+  def test_clutch_held_down_is_a_shift_not_neutral(self):
+    self.run_for(1.0, clutch_pedal=CLUTCH_PEDAL_UP)
+    self.assertTrue(all(self.run_for(3.0, clutch=True, gear_raw=0, clutch_pedal=CLUTCH_PEDAL_FLOOR)))
+    self.assertEqual(self.gate.state, GateState.shifting)
+    self.assertTrue(all(self.run_for(1.0, clutch=True, gear_raw=0, clutch_pedal=CLUTCH_PEDAL_TRAVEL)))
+    self.assertEqual(self.gate.state, GateState.shifting)
+
+  def test_normal_shift_end_is_not_neutral(self):
+    # the pedal reaches the top a few frames before GEAR_MT reports the gear (Stage 1: median 10 ms, <= ~0.3 s)
+    self.run_for(1.0, clutch_pedal=CLUTCH_PEDAL_UP)
+    self.run_for(0.6, clutch=True, gear_raw=0, clutch_pedal=CLUTCH_PEDAL_FLOOR, rpm=1500.)
+    self.run_for(0.3, clutch=True, gear_raw=0, clutch_pedal=CLUTCH_PEDAL_UP, rpm=1500.)
+    self.assertEqual(self.gate.state, GateState.shifting)
+    after = self.run_for(1.0, gear_raw=4, clutch_pedal=CLUTCH_PEDAL_UP, rpm=1500.)
+    self.assertAlmostEqual(after.index(False) * DT_CTRL, REENGAGE_DELAY, delta=0.02)
+
+  def test_no_pedal_switch_no_neutral_shortcut(self):
+    self.run_for(1.0)
+    self.run_for(2.0, clutch=True, gear_raw=0, rpm=850.)
+    self.assertEqual(self.gate.state, GateState.shifting, "without the switch only MaxCoast bounds the coast")
+
+  def test_gear_change_while_reengaging_restarts_the_settle(self):
+    self.run_for(1.0)
+    self.run_for(0.5, clutch=True, gear_raw=0)
+    self.run_for(REENGAGE_DELAY - 0.05, gear_raw=4)
+    self.assertEqual(self.gate.state, GateState.reengaging)
+    held = self.run_for(REENGAGE_DELAY - 0.05, gear_raw=5)
+    self.assertTrue(all(held), "a new gear restarts the debounce")
+    self.assertEqual(self.gate.state, GateState.reengaging)
+    self.run_for(0.1, gear_raw=5)
+    self.assertEqual(self.gate.state, GateState.idle)
+
+  def test_flare_holdoff_after_decoupling(self):
+    # an rpm rise right after the shift (re-coupling on a downshift) can't start the backstop for FLARE_HOLDOFF
+    self.run_for(1.0, rpm=1000.)
+    self.run_for(0.5, clutch=True, gear_raw=0, rpm=1000.)
+    rpms = [1000. + 60. * i for i in range(round(FLARE_HOLDOFF / DT_CTRL) - 5)]   # +6000 rpm/s, no gas
+    states = [upd(self.gate, cs(rpm=r, a=-0.4), gear_raw=3) for r in rpms]
+    self.assertEqual(self.gate.state, GateState.idle)
+    self.assertFalse(any(states[round(REENGAGE_DELAY / DT_CTRL) + 1:]), "no flare cap inside the hold-off")
+    # well after the shift the backstop is armed again
+    self.run_for(1.0, rpm=rpms[-1])
+    flare = [upd(self.gate, cs(rpm=rpms[-1] + 60. * i, a=-0.4), gear_raw=3) for i in range(20)]
+    self.assertTrue(any(flare), "the backstop still works outside the hold-off")
+

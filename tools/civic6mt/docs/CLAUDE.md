@@ -75,6 +75,18 @@ Signals verified against opendbc master `06ade56` (2026-10-14); full detail in
   Already decoded on bus 0; carstate ignores it for manuals. `GEAR_MT == 0` = clutch open.
 - **Throttle:** `PEDAL_GAS` (`POWERTRAIN_DATA` 0x17C) — drives `gasPressed`; continuous `gas` deprecated/unused.
 - **RPM:** `ENGINE_RPM` in `ENGINE_DATA` (0x158) and `POWERTRAIN_DATA` (0x17C) — present, undecoded.
+  **On-car (Stage 1, 2026-10-20): 0x158's `ENGINE_RPM` is always 0 on this car; only 0x17C carries RPM.** The fork's
+  carstate read 0x158 for CIVIC_2022 → `engineRpm` = 0 → EBP / GearAware / ratio lock / flare backstop inert. **Fixed in
+  Task 15** (every radarless manual reads 0x17C).
+
+**On-car Stage 1 (2026-10-20, stock SP, route `00000002--6c1a3bb7d4`) — full detail `docs/stage1-findings-2026-10-20.md`:**
+0x1DD 50 Hz, counter +1 on every frame, 0 checksum faults; GEAR_MT ∈ {0, 1–6, 14}; 0 with clutch in while in gear AND
+in neutral clutch-out. GEAR_MT is **ratio-derived**: it reports a gear only when the clutch is fully up and the ratio
+already matches (no bite lag — `REENGAGE_DELAY` is extra coast), and it **falsely reports a gear in neutral at idle**
+when speed matches a gear's idle ratio (seen 6th, then 5th). **Clutch pedal switches found:** `GAS_PEDAL_2` (0x130)
+byte 6 bit 50 = clutch fully up, bit 51 = clutch on the floor (undefined in the DBC). Gear ratios = seed within 0.4 %.
+0x130 `ENGINE_TORQUE_ESTIMATE` reads as axle torque; closed-throttle crank drag 23–27 Nm (seed 27–38) — the seed
+over-predicts flat-road engine braking by 0–0.26 m/s² (worst in 2nd).
 - capnp slots already exist (deprecated group): `clutchPressed @28`, `engineRpm @46`, `gas @3` —
   populate these in the manual branch.
 
@@ -796,9 +808,53 @@ console fixed, and found the Task 13 imminent-lead latch defective both ways). F
   CORE **1010 passed** (same 1), WIDE 2196. **`mutate.py` 70/70, `mutate_devtest.py` 48/48.** Console: replay 0 diffs on
   all 4 segments (console clean), isolation OK, offline OK, equiv every armed test captured, render PASS; clutch / engine-
   brake replays PASS.
-- **Wrap-up:** pushed; bundles regenerated (9th regen); docs re-mirrored (fork copies + Dropbox). Nothing flashed;
+- **Wrap-up:** pushed feature `4329294f2`, dev-test `1da48b74e` (opendbc unchanged, `434871715`); bundles regenerated (9th regen); docs re-mirrored (fork copies + Dropbox). Nothing flashed;
   nothing merged toward any base. **The low-speed handback is ready for stop-and-go-with-traffic testing** (after the
   empty-lot handback and Phase 0 signals); the downhill braking question is C1's.
+
+**Task 15 — first pass from Stage 1 on-car data** (brief: the owner's Task 15 message, 2026-10-20; data:
+`docs/stage1-findings-2026-10-20.md`, route `00000002--6c1a3bb7d4`). Goal: the fork ready for Stage 2 (op-long ON, every
+custom feature OFF). opendbc `ec94b772a` (1), `d5af6598b` (2), `0ca828dde` (3); feature `dc4d4eec2` (schema + bump),
+`2729be830` (4), `83f8e6173` (tools). Every custom toggle still defaults OFF; non-adaptive untouched (Stage 4).
+- **1 RPM source (blocker):** every Bosch-radarless manual reads `POWERTRAIN_DATA.ENGINE_RPM` (0x17C) — `ENGINE_DATA`'s
+  is 0 on the car. Before this the ratio lock, flare backstop, EBP and GearAware were inert on the car.
+- **2 clutch pedal switches:** `GAS_PEDAL_2` (0x130) `CLUTCH_PEDAL_UP` (bit 50, opens as the pedal starts to move) /
+  `CLUTCH_PEDAL_FLOOR` (bit 51) added to `_honda_common.dbc` (comment: seen on this car only). New fork-only
+  `CarStateSP.clutchPedal` (`custom.capnp` @3): **0 unknown** (the default, so an unset field never reads "pedal up"),
+  1 up, 2 travel, 3 floor; unknown while 0x130 is missing / > 250 ms old or both bits are on. `deprecated.clutchPressed`
+  **keeps its meaning for every consumer — "drivetrain decoupled"** — and now opens on the pedal switch first: pedal
+  off the top OR `GEAR_MT` ∉ {1–6, 14} OR phantom. *Implemented differently from the brief's "wire into clutchPressed":*
+  pointing clutchPressed at the pedal alone would make neutral-with-the-clutch-out read "coupled" (EBP would credit
+  engine braking in neutral); `clutchPedal` is what separates clutch-in from neutral. The trigger is the top switch, not
+  the floor switch (owner, 2026-10-20). Floor is decoded for telemetry only.
+- **3 phantom-gear guard** (`PhantomGearGuard`, opendbc carstate): a gear first reported < 1100 rpm and < 13 m/s is
+  untrusted (decoupled) until the rpm follows the speed at that ratio (expected Δ ≥ 80 rpm, actual within 35 %) or
+  rises ≥ 1250; every new value judged afresh (sweeps go 2 → 1 without a 0). *Implemented differently from "rpm near
+  idle AND speed low → don't trust":* that alone would also distrust real low-rpm engagements forever (openpilot can't
+  throttle while untrusted, so it couldn't raise the rpm out of the band); the kinematic test releases those. A
+  pedal-time rule was tried on the data and rejected (phantoms 0.02–0.8 s after pedal-up, real ones up to 0.98 s).
+- **4 gate:** `REENGAGE_DELAY` 0.5 → **0.15 s** (settle debounce, restarted on a gear change while re-engaging);
+  `NEUTRAL_CONFIRM` 0.5 s: decoupled with the pedal fully up = neutral → `coastTimeout` at once (no switch → MaxCoast
+  only); `FLARE_HOLDOFF` 0.5 s: no flare may start within 0.5 s of decoupled (the old 0.5 s delay covered a downshift's
+  re-coupling rpm rise implicitly — found by `test_downshift_rpm_jump_does_not_extend_shift`). **Knock-on:** smart
+  re-engage (lock + 0.12 s steady + 0.15 s gas debounce) is now *slower* than the fixed path on this car; kept (OFF) for
+  the on-throttle rule and the seeded ramp; its test now pins "at the lock, not the fallback".
+- **5 coast model:** not refit (Stage 4). `EngineBrakePreferred` default OFF confirmed (`params_keys.h`); TOGGLES says
+  keep it OFF until the refit.
+- **Proof on the car's own bus:** `tools/civic6mt/carstate_route_replay.py <route dir> [--gate]` runs the real opendbc
+  CarState (and optionally the real gate, ON + engaged as a what-if) over every segment. Stage 1 route: rpm never 0;
+  pedal decodes (up 644 s / travel 93 s / floor 89 s); **all 29 phantom episodes flagged, 0.00 s of in-gear driving above
+  idle read as decoupled**; gate: 81 episodes all started by a real decoupling (no flare / false start), resume median
+  0.15 s / max 0.21 s after coupled, 15 neutral coasts to coastTimeout at once.
+- **Run (PC, 2026-10-20):** CORE **902 passed** (+ the pre-existing `test_default_chestnut` failure), WIDE **2209
+  passed**; ruff clean; mutations: 9 new Task 15 entries + 2 re-pointed (`b5_odbc_unknown_gear_coupled`,
+  `b5_odbc_integra_rpm`) — **`mutate.py` 79/79**. Self-referenced replays, every toggle OFF, vs the Task 14 tip
+  `4329294f2`: **controlsd, plannerd and card 0 diffs on all 4 CI segments** (card added because it runs the opendbc
+  carstate; the CI segments are automatics, so the manual branch is exercised only by the route replay above).
+- **New on-car unknowns:** cold idle must stay < 1100 rpm (phantom guard); the pedal switch bits confirmed with the pedal
+  moved slowly in cabana; does a 0.15 s resume feel abrupt (the takeover ramp still rate-limits it); `NEUTRAL_CONFIRM`
+  vs real slow releases (pedal up 0.5–1.2 s before GEAR_MT reported was seen — those go through coastTimeout briefly, no
+  throttle either way).
 
 ## Test console architecture (core + vehicle profile)
 The on-car test console is a **vehicle-agnostic core** — capture state machine, detectors/analyzers, the registry/session
@@ -830,8 +886,9 @@ AEB/CMBS** on this car. Keep `DisengageOnAccelerator` OFF if using the clutch ga
 Signals — cabana, engine running (parked, then rolling slowly):
 - [ ] `GEARBOX_ALT_2.GEAR_MT`: 0 with clutch down in gear, 1–6 per gear, 14 in reverse; what it reads in
       true neutral at a stop with the clutch out.
-- [ ] `GEAR_MT` lag: how long after the clutch pedal moves (in and out) it changes — sets whether
-      `REENGAGE_DELAY` (0.5 s) and the gas-release cue are right-sized.
+- [x] `GEAR_MT` lag: how long after the clutch pedal moves (in and out) it changes — sets whether
+      `REENGAGE_DELAY` (0.5 s) and the gas-release cue are right-sized. *(Stage 1: reports the gear at full engagement,
+      ratio already locked → Task 15 cut the delay to 0.15 s.)*
 - [ ] `ENGINE_DATA.ENGINE_RPM` matches the tach with no extra scaling; its update rate/noise is clean
       enough for the 1500 rpm/s flare threshold.
 - [ ] `PEDAL_GAS` → clutch timing in real shifts (how long between lift and clutch) — only matters if
@@ -878,7 +935,7 @@ Behavior — empty road, low speed, ready to take over, one toggle at a time:
       radarless car has no panda gas check; this is a regression check for the Nidec/Bosch revert).
 - [ ] **Clutch gate + rev-match:** real heel-toe/rev-matched downshifts with the gate on: stays coasting,
       no override/disengage from the blip (DisengageOnAccelerator OFF), brake still disengages as stock.
-- [ ] Engine-brake downshift with long active and no brake: does openpilot add throttle after the 0.5 s
+- [ ] Engine-brake downshift with long active and no brake: does openpilot add throttle after the (0.15 s since Task 15)
       re-engage delay and fight the engine braking? (tuning item) Then A/B with `ClutchReengageSmart` ON: takeover
       at the bite, seeded at the engine-braking decel — no lurch/hole, no brake tap (C2 decides the seed).
 - [ ] **No-service-brake:** with non-adaptive ON and floor 0.3 — does `ACCEL_COMMAND` ≥ −0.3 actually stay
@@ -926,6 +983,14 @@ Behavior — empty road, low speed, ready to take over, one toggle at a time:
 - [ ] **(Task 12 A2) RPM-flare thresholds** against real ENGINE_DATA: 3 new samples > 1500 rpm/s, no gas; cool-down
       after 2 flares in 10 s. Zero false flares over a normal drive (sim: 10 min of σ 30 rpm noise at 25 Hz).
 - [ ] Uphill handback: crossing the threshold on the gas uphill — how fast the car slows once the ramp ends.
+- [ ] **(Task 15) Clutch pedal switch:** in cabana, move the clutch pedal slowly: `GAS_PEDAL_2.CLUTCH_PEDAL_UP` (bit 50)
+      opens at the first movement, `CLUTCH_PEDAL_FLOOR` (bit 51) closes only at the floor; `CarStateSP.clutchPedal` reads
+      1 / 2 / 3 accordingly and never 0 once running.
+- [ ] **(Task 15) Phantom guard at cold idle:** right after a cold start, rolling in neutral: is idle under 1100 rpm
+      (`PHANTOM_RPM_MAX`)? If not, a phantom gear at cold idle would be trusted.
+- [ ] **(Task 15) 0.15 s resume:** gate ON, real up/downshifts: the resume 0.15 s after the clutch is fully out — no lurch
+      (the takeover ramp still rate-limits it); `clutch_shift_gate_timeout reason=neutral` on a neutral coast with the
+      clutch out, not on a slow clutch release.
 
 Task 6 (engine-brake features) — only after the items above, toggles one at a time:
 - [ ] **Coast logging first (no toggle needed):** drive normally with coasts in each gear; confirm

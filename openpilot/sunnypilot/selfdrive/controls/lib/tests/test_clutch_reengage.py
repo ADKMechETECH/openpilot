@@ -183,7 +183,9 @@ class TestSmartGate(GateHarness):
     after = self.shift(gear_to=5)
     resume = after.index(False)
     self.assertGreaterEqual(resume + 1, LOCK_FRAMES)
-    self.assertLess(resume * DT_CTRL, REENGAGE_DELAY, "at the lock, before the fixed delay")
+    # Task 15: the fixed delay is now 0.15 s (GEAR_MT reports at the lock on the real car), shorter than lock + steady +
+    # gas debounce, so "before the fixed delay" no longer holds; the takeover is still at the lock, not the fallback
+    self.assertLess(resume * DT_CTRL, SMART_LOCK_TIMEOUT, "at the lock, not the no-lock fallback")
 
   def test_on_throttle_takeover_waits_for_gas_clear(self):
     self.make_gate()
