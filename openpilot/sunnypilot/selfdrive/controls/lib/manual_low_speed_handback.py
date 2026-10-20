@@ -141,7 +141,8 @@ class LowSpeedHandback:
       self.standstill_timer = 0.
       if v_ego > STANDSTILL_MOVING:
         self.resolved = False
-    urgent = urgency is not None and not self.resolved
+    # Task 14 A3: FCW / stock AEB are honored even after a standstill resolution (a creep after it must not ignore them)
+    urgent = urgency is not None and (urgency in UNCONDITIONAL or not self.resolved)
     if not enabled:
       self.active = False
       self.timer = 0.

@@ -18,6 +18,25 @@ TRIP = [f"{T}/test_rule5.py::TestRule5Tripwire"]
 LATCH = [f"{T}/test_manual_low_speed_handback.py::TestTask14Latch"]
 
 
+# Task 14 A3: "FCW is never resolved at a stop" now has two layers (no standstill timer under FCW; FCW urgent even
+# when resolved). The old bug removes both, so this mutation does too - one contiguous block of update().
+_FCW_LAYERS = "\n".join([
+  '    if self.active and urgency is not None and urgency not in UNCONDITIONAL and v_ego < STANDSTILL_SPEED:',
+  '      self.standstill_timer += DT_CTRL',
+  '      if self.standstill_timer >= STANDSTILL_RESOLVE - 1e-6 and not self.resolved:',
+  '        self.resolved = True',
+  '        cloudlog.event("manual_low_speed_handback_standstill", process=self.process, urgency=urgency)',
+  '    else:',
+  '      self.standstill_timer = 0.',
+  '      if v_ego > STANDSTILL_MOVING:',
+  '        self.resolved = False',
+  '    # Task 14 A3: FCW / stock AEB are honored even after a standstill resolution (a creep after it must not ignore them)',
+  '    urgent = urgency is not None and (urgency in UNCONDITIONAL or not self.resolved)',
+])
+_FCW_NO_LAYERS = _FCW_LAYERS.replace("urgency not in UNCONDITIONAL and ", "").replace(
+  "(urgency in UNCONDITIONAL or not self.resolved)", "not self.resolved")
+
+
 def m(mid, finding, file, old, new, tests):
   return {"id": mid, "finding": finding, "file": file, "old": old, "new": new, "tests": tests}
 
@@ -146,8 +165,7 @@ MUTATIONS = [
     "        self.resolved = True\n", "        self.resolved = False\n", HB),
   m("t13_a1_no_imminent_latch", "T13 A1", f"{SP}/lib/manual_low_speed_handback.py",
     "      self.lead_latched = True\n", "      pass\n", HB),
-  m("t13_a1_fcw_resolved", "T13 A1", f"{SP}/lib/manual_low_speed_handback.py",
-    "urgency not in UNCONDITIONAL and ", "", HB),
+  m("t13_a1_fcw_resolved", "T13 A1 / T14 A3 W1-N3", f"{SP}/lib/manual_low_speed_handback.py", _FCW_LAYERS, _FCW_NO_LAYERS, HB),
   m("t13_a2_margin_tied_to_ceiling", "T13 A2 N-2 N3", f"{SP}/lib/no_service_brake.py",
     '               MAX_OVERSPEED_MARGIN, ceiling - PULSE_MIN_BAND)', '               ceiling)', NSB),
   m("t13_a3_odbc_parser_counter", "T13 A3 review2 N2", "opendbc_repo/opendbc/car/honda/carstate.py",
@@ -175,4 +193,7 @@ MUTATIONS = [
   m("t14_a2_latch_from_reason_only", "T14 A2 W1-N2", f"{SP}/lib/manual_low_speed_handback.py",
     "    if self.active and (lead_imminent or urgency == \"lead_imminent\") and not self.lead_latched:",
     "    if self.active and urgency == \"lead_imminent\" and not self.lead_latched:", LATCH),
+  m("t14_a3_fcw_resolved_away", "T14 A3 W1-N3", f"{SP}/lib/manual_low_speed_handback.py",
+    "    urgent = urgency is not None and (urgency in UNCONDITIONAL or not self.resolved)",
+    "    urgent = urgency is not None and not self.resolved", LATCH),
 ]

@@ -584,7 +584,8 @@ class TestTask13HandbackCarveOut(OpenpilotTestCase):
 
 class TestTask14Latch(OpenpilotTestCase):
   """Task 14 [W1-N1..N4, N8]: the imminent-lead latch sets on the imminence test itself (not on whichever reason
-  handback_urgency returns), releases once no lead is still closing within reach,. End states asserted, not just the ramp."""
+  handback_urgency returns), releases once no lead is still closing within reach, FCW survives a standstill
+  resolution. End states asserted, not just the ramp."""
   def setUp(self):
     super().setUp()
     set_params(NonAdaptiveLongitudinal=False)
@@ -658,3 +659,17 @@ class TestTask14Latch(OpenpilotTestCase):
     for i in range(round(5. / DT_CTRL)):
       hb2.update(True, 1.5, -1.0, None, lead_holding=(i % 20 != 0))
     self.assertTrue(hb2.lead_latched)
+
+  def test_fcw_after_standstill_resolution(self):
+    # [W1-N3] resolved at a standstill on a latched lead, then the car creeps and FCW arrives: braking at the limit
+    CP, _ = make_cp()
+    hb = LowSpeedHandback(CP, Params())
+    hb.update(True, 2.0, -1.0, None, lead_imminent=True, lead_holding=True)
+    for _ in range(round((STANDSTILL_RESOLVE + 0.1) / DT_CTRL)):
+      hb.update(True, 0., -1.0, None, lead_holding=True)
+    self.assertTrue(hb.resolved and not hb.urgent, "precondition: resolved")
+    hb.update(True, 0.3, -0.5, "fcw", lead_holding=True)   # creeping < 0.5 m/s: still "resolved"
+    self.assertTrue(hb.resolved)
+    self.assertTrue(hb.urgent, "FCW is never resolved away")
+    self.assertEqual(hb.limit_accel((ACCEL_MIN, ACCEL_MAX))[0], ACCEL_MIN)
+    self.assertFalse(hb.ramp_done)
