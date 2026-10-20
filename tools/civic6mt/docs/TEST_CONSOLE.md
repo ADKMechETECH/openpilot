@@ -65,8 +65,8 @@ guard caught everything. `isolation` mode: a fault injected into every console f
 at 0 diffs with the console reporting INERT, and selfdrived with `test_consoled` reported dead must match it alive while
 a non-ignored dead process must not. Results below, "Task 13 run".)* Task 12 D5: `tests/test_ui_smoke.py` renders the whole UI (every session
 page, tapping every switch / pill / ARM / how, the phase view, detail pages, the chip) with well-formed and malformed
-files, onroad and offroad: nothing raises and the guard swallows nothing. `tools/civic6mt/mutate_devtest.py`: 45
-console mutations (D1–D5 + Task 13 B1–B4), all caught.
+files, onroad and offroad: nothing raises and the guard swallows nothing. `tools/civic6mt/mutate_devtest.py`: 48
+console mutations (D1–D5 + Task 13 B1–B4 + Task 14 C1), all caught.
 
 **Task 13 run (2026-10-19, PC):** `replay` 0 diffs controlsd + plannerd on all 4 segments, console fed the published
 state and clean (armed, 0 errors, not inert); `isolation` (HONDA) OK — fault on every console frame: controlsd / plannerd 0
@@ -225,8 +225,9 @@ start), `TestConsoleBackground` (bool), `TestConsoleStartButton` (string), `Test
   but E0b only captured — with a seed 20 % low on coast decel and zero service braking C1 still PASSed. Now E0b's
   completion **fits** a per-gear correction (mean of `aEgo − seed` over its flat coasts, ≥ 300 samples per gear, saved in
   `results.json` as `coast_fit`); C1 / NSB1 / E1 score against seed + correction (weighted by the samples' inferred gears)
-  and stay **CAPTURED (provisional) until a fit exists for every gear**; a sample with no fitted estimate (gear 0) is
-  unknown, never "clean". The **sent accel is part of the verdict**: C1 PASS needs the request seen on the bus (missing
+  and stay **CAPTURED (provisional) until a fit exists for the gear(s) the test's own samples used** (Task 14 C1: per
+  gear — E0b fits each gear once that gear's own 10 s is in, whether or not E0b is complete, so one sparse gear no longer
+  blocks verdicts in the others); a sample with no fitted estimate (gear 0) is unknown, never "clean". The **sent accel is part of the verdict**: C1 PASS needs the request seen on the bus (missing
   from the bus = FAIL; tap not live = CAPTURED); NSB1 / E1 FAIL on a sent accel past the floor / coast target and stay
   CAPTURED while it isn't seen. The brake-assist bit stays reported (on this Civic it's the idle-stop bit). A command
   that breaks the NSB floor still FAILs at once. The raw rows are kept to re-score; re-arming E0b replaces the fit.
