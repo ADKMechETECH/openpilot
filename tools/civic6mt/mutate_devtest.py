@@ -161,6 +161,9 @@ MUTATIONS = [
   m("t14_c1_undone_gear_counts", "T14 C1", R, ' and (e.get("done") is True or v1):', ":", T13),
   m("t13_b3_inert_chip_vanishes", "T13 B3", "openpilot/selfdrive/ui/sunnypilot/mici/onroad/test_console_chip.py",
     "  if st.get(\"inert\"):\n", "  if False:\n", T13),
+  # --- Task 15 -----------------------------------------------------------------------------------------------------
+  m("t15_s2_bite_from_debounce_end", "T15 (bite-lag floor)", f"{TC}/analyzers.py",
+    "          self.t_match = self._match_cand\n", "          self.t_match = None\n"),
 ]
 
 

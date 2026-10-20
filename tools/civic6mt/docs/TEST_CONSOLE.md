@@ -280,8 +280,8 @@ Applies to: `HONDA_CIVIC_2022` with a manual transmission (a CVT Civic gets no p
 | `vehicle_speed` | `v_ego` | `v_ego` | — | carState.vEgo |
 | `gas` | `gas` | `gas` | — | carState.gasPressed (POWERTRAIN_DATA.PEDAL_GAS) |
 | `brake` | `brake` | `brake` | — | carState.brakePressed |
-| `clutch_coupled` | `clutch` | `clutch` | — | carState.deprecated.clutchPressed = GEARBOX_ALT_2.GEAR_MT == 0 (0x1DD), inverted; also the ratio lock |
-| `engine_rpm` | `rpm` | `rpm` | — | carState.deprecated.engineRpm (ENGINE_DATA.ENGINE_RPM) |
+| `clutch_coupled` | `clutch` | `clutch` | — | carState.deprecated.clutchPressed (GAS_PEDAL_2 clutch-up switch, GEAR_MT 0, phantom gear), inverted; also the ratio lock |
+| `engine_rpm` | `rpm` | `rpm` | — | carState.deprecated.engineRpm (POWERTRAIN_DATA.ENGINE_RPM) |
 | `gear` | `gear` | `gear` | — | inferred: rpm / wheel speed vs the seed ratios (engine_brake_model.infer_gear, +-8 %) |
 | `gear_raw` | `gear_raw` | `gear_mt` | GEAR_MT | GEARBOX_ALT_2.GEAR_MT (0x1DD, bus 0): 0 clutch/neutral, 1-6, 14 reverse (raw tap) |
 | `gas_raw` | `gas_raw` | `pedal_gas` | PEDAL_GAS | POWERTRAIN_DATA.PEDAL_GAS (0x17C, raw tap) |
@@ -321,7 +321,7 @@ The plan re-cut into ~30-minute outings. Every test belongs to exactly one sessi
 | ID | Session | Kind | Test | Conditions (+ expected toggles) | Goal | Pass criterion | Prereqs |
 |---|---|---|---|---|---|---|---|
 | S1 | 1 | telemetry ★ | GEAR_MT decode | manual transmission, GEAR_MT tap live | 2 s rolling per GEAR_MT 1–6, 5 s stopped, reverse seen | every gear 1-6 agrees with the RPM/speed ratio >= 95% of rolling samples; reverse reads 14 | — |
-| S2 | 2 | telemetry ★ | GEAR_MT lag | manual transmission, GEAR_MT tap live, speed > 3 m/s | 10 shift | p90 bite lag <= REENGAGE_DELAY (0.5 s) | S1 |
+| S2 | 2 | telemetry ★ | GEAR_MT lag | manual transmission, GEAR_MT tap live, speed > 3 m/s | 10 shift | p90 bite lag <= REENGAGE_DELAY (0.15 s) | S1 |
 | S3 | 2 | telemetry ★ | Engine RPM sanity | manual transmission, speed > 3 m/s, GEAR_MT 1-6, clutch engaged, steady speed | 60 s | no false RPM flares (> 1500 rpm/s while steady in gear) | — |
 | S4 | 2 | telemetry ★ | Gas-lift to clutch | manual transmission, speed > 3 m/s | 10 shift [after gas] | p90 lift->clutch <= GAS_RELEASE_WINDOW (0.6 s) | S1 |
 | S5 | 2 | telemetry ★ | Rev-match trace | manual transmission, GEAR_MT tap live, speed > 3 m/s | 5 shift [blip] | GEAR_MT stays 0 through every blip and the gate never leaves 'shifting' during it | S1 |

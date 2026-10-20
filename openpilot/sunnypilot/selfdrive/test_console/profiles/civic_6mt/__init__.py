@@ -24,11 +24,11 @@ def applies(CP) -> bool:
 
 
 def _clutch(CS) -> bool:
-  return bool(CS.deprecated.clutchPressed)    # Phase 1: GEAR_MT == 0 (clutch pedal down, or neutral)
+  return bool(CS.deprecated.clutchPressed)    # drivetrain decoupled: clutch pedal off its top switch, GEAR_MT 0, or a phantom gear (Task 15)
 
 
 def _rpm(CS) -> float:
-  return float(CS.deprecated.engineRpm)        # Phase 1: ENGINE_DATA.ENGINE_RPM
+  return float(CS.deprecated.engineRpm)        # POWERTRAIN_DATA.ENGINE_RPM (Task 15: ENGINE_DATA's is 0 on the car)
 
 
 SIGNALS = SignalMap(
@@ -44,8 +44,8 @@ SIGNALS = SignalMap(
     "vehicle_speed": "carState.vEgo",
     "gas": "carState.gasPressed (POWERTRAIN_DATA.PEDAL_GAS)",
     "brake": "carState.brakePressed",
-    "clutch_coupled": "carState.deprecated.clutchPressed = GEARBOX_ALT_2.GEAR_MT == 0 (0x1DD), inverted; also the ratio lock",
-    "engine_rpm": "carState.deprecated.engineRpm (ENGINE_DATA.ENGINE_RPM)",
+    "clutch_coupled": "carState.deprecated.clutchPressed (GAS_PEDAL_2 clutch-up switch, GEAR_MT 0, phantom gear), inverted; also the ratio lock",
+    "engine_rpm": "carState.deprecated.engineRpm (POWERTRAIN_DATA.ENGINE_RPM)",
     "gear": "inferred: rpm / wheel speed vs the seed ratios (engine_brake_model.infer_gear, +-8 %)",
     "gear_raw": "GEARBOX_ALT_2.GEAR_MT (0x1DD, bus 0): 0 clutch/neutral, 1-6, 14 reverse (raw tap)",
     "gas_raw": "POWERTRAIN_DATA.PEDAL_GAS (0x17C, raw tap)",

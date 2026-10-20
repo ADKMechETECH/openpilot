@@ -368,7 +368,9 @@ class TestSegments(OpenpilotTestCase):
 
 class TestShifts(OpenpilotTestCase):
   def test_bite_lag(self):
-    for lag, want in ((0.3, PASS), (0.8, FAIL)):
+    # the rule is p90 bite lag <= REENGAGE_DELAY (0.15 s since Task 15; Stage 1 measured 0.00-0.07 s on the car)
+    for lag, want in ((0.05, PASS), (0.3, FAIL), (0.8, FAIL)):   # 0.05: the car's 0.00-0.07 s; the console's rpm filter
+                                                               # reads a short lag ~0.06 s long (still <= 0.15)
       a = make_analyzer(TESTS_BY_ID["S2"], ctx())
       sim = Sim(gear_raw=2, v_ego=10.)
       feed(a, sim.run(1.))

@@ -307,6 +307,7 @@ class ShiftDetector:
     self.gas_prev = False
     self.gate_prev = ""
     self.t_close_cand: float | None = None
+    self._match_cand: float | None = None
     self.t_match: float | None = None
     self.jerk = JerkFilter()
     self.false_flares = 0
@@ -443,13 +444,20 @@ class ShiftDetector:
           self.t_close_cand = s.t
           self._gear_at_close = gear_now(s, pt)
           self._gas_at_close = s.gas
+          self._match_cand = None
+        # Task 15: track the ratio lock through the close debounce too - a gearbox that reports the gear only once the
+        # drivetrain is locked would otherwise read every bite as >= CLOSE_DEBOUNCE
+        if _coupled(s.ratio, gear_now(s, pt), pt):
+          self._match_cand = s.t if self._match_cand is None else self._match_cand
+        else:
+          self._match_cand = None
         if s.t - self.t_close_cand >= self.CLOSE_DEBOUNCE:
           ep["t_close"] = self.t_close_cand
           ep["dur"] = ep["t_close"] - ep["t_open"]
           ep["gear_after"] = self._gear_at_close if s.gear_raw >= 0 else 0
           ep["close_gas"] = self._gas_at_close
           self.t_close_cand = None
-          self.t_match = None
+          self.t_match = self._match_cand
           self.jerk = JerkFilter()
           self.state = "post"
           self.last_gear = ep["gear_after"] or self.last_gear
