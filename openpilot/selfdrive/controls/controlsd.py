@@ -121,7 +121,8 @@ class Controls(ControlsExt):
     # longitudinal stays active so braking always passes)
     self.update_sp_state(self.sm, CC.enabled, self.LoC.long_control_state != LongCtrlState.off)
     # Manual transmission low-speed handback: ramp to 0, then no longitudinal until selfdrived disengages
-    handback_done = self.update_low_speed_handback(CC.enabled, CS.vEgo, self.LoC.last_output_accel, self.sm)
+    handback_done = self.update_low_speed_handback(CC.enabled, CS.vEgo, self.LoC.last_output_accel, self.sm,
+                                                   self.calibrated_pose)
     CC.longActive = CC.enabled and not any(e.overrideLongitudinal for e in self.sm['onroadEvents']) and \
                     (self.CP.openpilotLongitudinalControl or not self.CP_SP.pcmCruiseSpeed) and not handback_done
 

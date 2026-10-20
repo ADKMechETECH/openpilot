@@ -32,7 +32,8 @@ An imminent lead latches (as openpilot brakes, the lead soon stops looking immin
 car rolling a few metres behind a stopped car). Task 14: the latch SETS on the imminence test itself, whatever reason is
 returned (A2: a hard-braking / FCW approach used to hide it), and it RELEASES once no lead is still closing within the
 imminent test + HANDBACK_RELEASE_MARGIN for LATCH_RELEASE s (A1: a lead that drove off used to leave openpilot engaged,
-frozen, never handing back) - then the handback completes as if the lead had never been there.
+frozen, never handing back) - then the handback completes as if the lead had never been there. The kinematics include a
+downhill grade (A4).
 Standstill resolution (Task 13 A1): openpilot never holds a manual at a stop. If the car has stood still for
 STANDSTILL_RESOLVE seconds while urgent, the handback goes ahead anyway — the braking side ramps to 0 over the ramp
 time and openpilot disengages; the driver / Auto Brake Hold / hill-hold hold the car, as after any handback. If the car

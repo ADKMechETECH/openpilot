@@ -156,11 +156,12 @@ MUTATIONS = [
   m("b5_odbc_integra_rpm", "B5 B-M7", "opendbc_repo/opendbc/car/honda/carstate.py",
     "        if self.CP.carFingerprint == CAR.ACURA_INTEGRA:\n", "        if False:\n", ODBC),
   # --- Task 13 (verification fix-ups) -------------------------------------------------------------------------------
-  m("t13_a1_broad_urgency", "T13 A1 N-1", f"{SP}/controlsd_ext.py",
-    "urgency = handback_urgency(self.urgency, sm['radarState'], v_ego, hb.reaction_time) if hb.available else None",
-    "urgency = self.urgency if hb.available else None", HB + R5),
-  m("t13_a1_imminent_ignored", "T13 A1", f"{SP}/lib/braking_urgency.py",
-    "    reason = handback_lead_reason(lead, v_ego, reaction)\n", "    reason = None\n", HB + R5),
+  m("t13_a1_broad_urgency", "T13 A1 N-1", f"{SP}/controlsd_ext.py",   # re-pointed in Task 14 (the call moved)
+    "      urgency = handback_urgency(self.urgency, radar, v_ego, reaction, a_down)\n",
+    "      urgency = self.urgency\n", HB + R5),
+  m("t13_a1_imminent_ignored", "T13 A1", f"{SP}/lib/braking_urgency.py",   # re-pointed in Task 14 (own function now)
+    "  return any(handback_lead_reason(lead, v_ego, reaction, a_down) is not None for lead in (radar.leadOne, radar.leadTwo))",
+    "  return False", HB + R5),
   m("t13_a1_no_standstill_resolution", "T13 A1 review2 N6", f"{SP}/lib/manual_low_speed_handback.py",
     "        self.resolved = True\n", "        self.resolved = False\n", HB),
   m("t13_a1_no_imminent_latch", "T13 A1", f"{SP}/lib/manual_low_speed_handback.py",
@@ -196,4 +197,8 @@ MUTATIONS = [
   m("t14_a3_fcw_resolved_away", "T14 A3 W1-N3", f"{SP}/lib/manual_low_speed_handback.py",
     "    urgent = urgency is not None and (urgency in UNCONDITIONAL or not self.resolved)",
     "    urgent = urgency is not None and not self.resolved", LATCH),
+  m("t14_a4_grade_ignored", "T14 A4 W1-N4", f"{SP}/lib/braking_urgency.py",
+    "  return max(-G * math.sin(pitch), 0.)\n", "  return 0.\n", LATCH),
+  m("t14_a4_uphill_relaxes", "T14 A4", f"{SP}/lib/braking_urgency.py",
+    "  return max(-G * math.sin(pitch), 0.)\n", "  return -G * math.sin(pitch)\n", LATCH),
 ]

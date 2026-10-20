@@ -7,6 +7,8 @@ Manual low-speed handback, closed loop. Each frame mirrors the two processes:
 with LongitudinalPlanner (20 Hz) and a car that tracks the command. A lead's gap is never clamped: contact fails a test.
 Default params: handback at 2.24 m/s, 0.5 s ramp.
 """
+import math
+
 import numpy as np
 
 from opendbc.car import structs
@@ -28,7 +30,7 @@ from openpilot.sunnypilot.selfdrive.controls.lib.manual_low_speed_handback impor
   STANDSTILL_SPEED
 from openpilot.sunnypilot.selfdrive.controls.lib.braking_urgency import HANDBACK_DRIVER_DECEL, HANDBACK_DRIVER_REACTION, \
   HANDBACK_MARGIN, handback_lead_reason, handback_urgency
-from openpilot.sunnypilot.selfdrive.controls.lib.tests.manual_sim import Ext, FakeSM, make_cp, set_params
+from openpilot.sunnypilot.selfdrive.controls.lib.tests.manual_sim import Ext, FakeSM, Pose, make_cp, set_params
 
 TransmissionType = structs.CarParams.TransmissionType
 State = log.SelfdriveState.OpenpilotState
@@ -38,7 +40,7 @@ HANDBACK_ALERT = "manualLowSpeedHandback/warning"
 
 
 class Sim:
-  def __init__(self, CP, CP_SP, speed, lead=None, grade=0., v_set=20.):
+  def __init__(self, CP, CP_SP, speed, lead=None, grade=0., v_set=20., pitch=None):
     self.CP = CP
     self.planner = LongitudinalPlanner(CP, CP_SP, init_v=speed)
     self.loc = LongControl(CP, CP_SP)
@@ -50,6 +52,14 @@ class Sim:
     self.enabled = True
     self.AM = AlertManager()
     self.speed, self.a_ego, self.distance, self.grade, self.v_set = speed, 0., 0., grade, v_set
+    # ONE way to put a slope on the car: `grade` is a raw additive accel (m/s^2, the older uphill tests), `pitch` (rad,
+    # negative = downhill) is the calibrated pose controlsd sees AND gravity on the car (Task 14 A4). Both at once would
+    # count the slope twice.
+    if pitch is not None and grade != 0.:
+      raise ValueError("Sim: give the slope as grade (m/s^2) or pitch (rad), not both")
+    self.pitch = pitch
+    self.tracks_request = False  # True: while openpilot is active the car's brake controller delivers the requested decel
+                                 # whatever the grade (the VSA tracking assumption, Task 11); gravity acts once handed back
     self.lead = lead  # dict(pos, v, decel) or None
     self.driver_brake = 0.  # m/s^2 the driver applies once openpilot hands back
     self.driver_reaction = 0.  # s after longitudinal stops before the driver brakes
@@ -144,7 +154,8 @@ class Sim:
     sm['longitudinalPlan'] = self.plan
     sm['longitudinalPlanSP'] = messaging.new_message('longitudinalPlanSP').longitudinalPlanSP
     self.ext.update_sp_state(sm, self.enabled, self.loc.long_control_state != LongCtrlState.off)
-    handback_done = self.ext.update_low_speed_handback(self.enabled, CS.vEgo, self.loc.last_output_accel, sm)
+    pose = Pose(self.pitch) if self.pitch is not None else None
+    handback_done = self.ext.update_low_speed_handback(self.enabled, CS.vEgo, self.loc.last_output_accel, sm, pose)
     self.long_active = self.enabled and not handback_done
     if not self.long_active:
       self.loc.reset()
@@ -160,7 +171,8 @@ class Sim:
     # a stopped car
     self._released = self._released + DT_CTRL if not self.long_active else 0.
     a = cmd if self.long_active else (-self.driver_brake if self._released > self.driver_reaction else 0.)
-    self.a_ego = a + self.grade
+    gravity = -9.81 * math.sin(self.pitch) if self.pitch is not None else 0.
+    self.a_ego = a + self.grade + (0. if self.tracks_request and self.long_active else gravity)
     self.speed = max(self.speed + self.a_ego * DT_CTRL, 0.)
     self.distance += self.speed * DT_CTRL
     if self.lead:
@@ -585,7 +597,7 @@ class TestTask13HandbackCarveOut(OpenpilotTestCase):
 class TestTask14Latch(OpenpilotTestCase):
   """Task 14 [W1-N1..N4, N8]: the imminent-lead latch sets on the imminence test itself (not on whichever reason
   handback_urgency returns), releases once no lead is still closing within reach, FCW survives a standstill
-  resolution. End states asserted, not just the ramp."""
+  resolution, and a downhill grade enlarges the imminent distance. End states asserted, not just the ramp."""
   def setUp(self):
     super().setUp()
     set_params(NonAdaptiveLongitudinal=False)
@@ -673,3 +685,57 @@ class TestTask14Latch(OpenpilotTestCase):
     self.assertTrue(hb.urgent, "FCW is never resolved away")
     self.assertEqual(hb.limit_accel((ACCEL_MIN, ACCEL_MAX))[0], ACCEL_MIN)
     self.assertFalse(hb.ramp_done)
+
+  def test_grade_enlarges_the_imminent_distance(self):
+    # [W1-N4] a stopped car at a gap that is NOT imminent on the flat but is on a -6 % grade
+    import math as m
+    from openpilot.sunnypilot.selfdrive.controls.lib.braking_urgency import grade_accel
+    r = DEFAULT_RAMP_TIME + DISENGAGE_MARGIN + HANDBACK_DRIVER_REACTION
+    v = DEFAULT_HANDBACK_SPEED
+    lead = messaging.new_message('radarState').radarState.leadOne
+    lead.present, lead.vRel, lead.vLead = True, -v, 0.
+    down, up = grade_accel(-m.atan(0.06)), grade_accel(m.atan(0.06))
+    self.assertGreater(down, 0.5)
+    self.assertEqual(up, 0., "uphill never makes it less conservative than the flat")
+    self.assertEqual(grade_accel(None), 0., "no pose = level")
+    flat_edge = next(d / 10. for d in range(20, 400) if handback_lead_reason(_with(lead, d / 10.), v, r) is None)
+    down_edge = next(d / 10. for d in range(20, 400) if handback_lead_reason(_with(lead, d / 10.), v, r, down) is None)
+    self.assertGreater(down_edge, flat_edge + 1.0, f"flat {flat_edge} m vs -6 % {down_edge} m")
+    self.assertIsNotNone(handback_lead_reason(_with(lead, 30.), v, r, 1.9), "a grade that leaves < 0.3 m/s^2: imminent")
+
+  def test_downhill_approach_keeps_a_gap(self):
+    # [W1-N4] -6 % grade, a stopped car at various distances: the driver (2 m/s^2 brake against gravity, 1.5 s after the
+    # handback) always stops short - openpilot keeps braking when the grade makes it imminent
+    import math as m
+    for gap in (6., 8., 10., 12., 14., 16., 19., 22., 26., 30.):
+      with self.subTest(gap=gap):
+        CP, CP_SP = make_cp()
+        sim = Sim(CP, CP_SP, speed=3., lead={"pos": gap, "v": 0., "decel": 0.}, v_set=10., pitch=-m.atan(0.06))
+        sim.driver_brake, sim.driver_reaction = HANDBACK_DRIVER_DECEL, HANDBACK_DRIVER_REACTION
+        # the post-handback margin is the question here, so openpilot's own braking is delivered as requested (this
+        # sim's planner + PID don't compensate a grade at all; the real car's VSA tracks the requested decel)
+        sim.tracks_request = True
+        log = sim.run(30.)
+        self.assertFalse(sim.contact, gap)
+        self.assertGreater(min(l["gap"] for l in log), 0.5, gap)
+
+
+def _with(lead, d):
+  lead.dRel = d
+  return lead
+
+
+class TestSimPlant(OpenpilotTestCase):
+  def test_slope_counted_once(self):
+    # the plant adds exactly -g sin(pitch) on top of openpilot's command (no second grade term), and refuses both knobs
+    CP, CP_SP = make_cp()
+    with self.assertRaises(ValueError):
+      Sim(CP, CP_SP, speed=3., grade=-1.0, pitch=-0.06)
+    sim = Sim(CP, CP_SP, speed=3., v_set=10., pitch=-0.06)
+    for _ in range(50):
+      r = sim.step()
+      self.assertAlmostEqual(sim.a_ego - r["cmd"], -9.81 * math.sin(-0.06), places=9)
+    sim.tracks_request = True
+    for _ in range(50):
+      r = sim.step()
+      self.assertAlmostEqual(sim.a_ego - r["cmd"], 0., places=9)
