@@ -62,7 +62,8 @@ class TestB1CoastFit(OpenpilotTestCase):
 
   def test_complete_without_a_fit_is_not_calibrated(self):
     for results in ({"E0b": {"complete": True, "status": "CAPTURED"}},                     # the Task 12 meaning
-                    {"E0b": {**e0b_capture(), "complete": False}},                         # fit, but not complete
+                    {"E0b": {"complete": False, "coast_fit": {"version": 2, "gears": {str(g): {"bias": 0., "n": 1000}
+                                                                       for g in range(1, 7)}}}},   # a gear not "done"
                     {"E0b": {"complete": True, "coast_fit": {"gears": {"1": {"bias": 0., "n": 1000}}}}},  # some gears
                     {"E0b": {"complete": True, "coast_fit": {"gears": {str(g): {"bias": 0., "n": FIT_MIN_SAMPLES - 1}
                                                                        for g in range(1, 7)}}}},      # too few samples
@@ -298,3 +299,60 @@ class TestB4GuardStreak(OpenpilotTestCase):
       g.run("drain", lambda: None)
       g.run("frame", boom)
     self.assertTrue(g.inert, "a frame step failing every frame must go inert")
+
+
+
+class TestC1PerGearFit(OpenpilotTestCase):
+  """Task 14 C1 [N13-1]: the PASS gate is the fit for the gear(s) the test's own samples used, not all six."""
+
+  def e0b_sparse(self, sparse=5):
+    """E0b on the plant: every gear's 10 s except `sparse`, which gets 2 s - E0b never completes."""
+    c = ctx()
+    a = make_analyzer(TESTS_BY_ID["E0b"], c)
+    for g in range(1, 7):
+      sim = Sim(gear_raw=g, v_ego=25., a_coast=SEED[g], a_ego=SEED[g] * TRUE_SCALE, pitch=0.)
+      feed(a, sim.run(2. if g == sparse else 10.5), ok=True)
+    self.assertFalse(a.complete, "precondition: E0b incomplete (one sparse gear)")
+    status, detail = a.result()
+    return sanitize_results(json.loads(json.dumps({"E0b": {**a.data, "status": status, "complete": a.complete}})))["E0b"]
+
+  def test_fits_the_done_gears_only(self):
+    fit = coast_fit(with_results(ctx(), {"E0b": self.e0b_sparse()}))
+    self.assertEqual(sorted(fit), [1, 2, 3, 4, 6], "gear 5 (sparse) has no fit")
+
+  def test_c1_passes_in_a_fitted_gear_while_another_is_sparse(self):
+    results = {"E0b": self.e0b_sparse(5)}
+    status, detail = run_c1(with_results(ctx(), results), -1.6, -1.6, gear=3)
+    self.assertEqual(status, PASS, detail)   # Task 13: CAPTURED (all six required)
+
+  def test_c1_in_the_unfit_gear_stays_captured(self):
+    results = {"E0b": self.e0b_sparse(5)}
+    status, detail = run_c1(with_results(ctx(), results), -1.6, -1.6, gear=5)
+    self.assertEqual(status, CAPTURED, detail)
+    self.assertIn("gear(s) [5]", detail)
+    # and the finding's zero-service-braking case still never PASSes in a fitted gear
+    status, _ = run_c1(with_results(ctx(), results), SEED[3] * TRUE_SCALE, SEED[3] - 0.2, gear=3)
+    self.assertNotEqual(status, PASS)
+
+  def test_nsb1_and_e1_per_gear(self):
+    results = {"E0b": self.e0b_sparse(5)}
+    for gear, want in ((6, PASS), (5, CAPTURED)):
+      with self.subTest(gear=gear):
+        c = with_results(ctx(), results)
+        a = make_analyzer(TESTS_BY_ID["NSB1"], c)
+        sim = Sim(gear_raw=gear, v_ego=25., a_coast=SEED[gear], a_ego=SEED[gear] * TRUE_SCALE, accel_out=-0.3, accel_sent=-0.3)
+        feed(a, sim.run(31., v_ego=25.), ok=True)
+        c.nsb_floor = 0.0
+        feed(a, sim.run(31., v_ego=25., accel_out=0.0, accel_sent=0.0), ok=True)
+        self.assertEqual(a.result()[0], want, a.result())
+    for gear, want in ((4, PASS), (5, CAPTURED)):
+      with self.subTest(e1_gear=gear):
+        a = make_analyzer(TESTS_BY_ID["E1"], with_results(ctx(EngineBrakePreferred=True), results))
+        sim = Sim(long_active=True, gear_raw=gear, a_coast=SEED[gear], accel_sent=0.0)
+        for _ in range(5):
+          sim.events = [("engine_brake_preferred", {"active": True, "gear": gear})]
+          samples = list(sim.run(2., accel_out=0.0, a_ego=SEED[gear] * TRUE_SCALE))
+          sim.events = [("engine_brake_preferred", {"active": False, "reason": "idle"})]
+          samples += sim.run(0.5)
+          feed(a, samples)
+        self.assertEqual(a.result()[0], want, a.result())

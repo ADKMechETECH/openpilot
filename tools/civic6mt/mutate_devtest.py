@@ -18,6 +18,58 @@ SMOKE = [f"{TC}/tests/test_ui_smoke.py"]
 T13 = [f"{TC}/tests/test_task13_console.py"]
 
 
+# Task 14 C1 added a per-gear gate in front of the fitted estimate: the old D3 / B1 bugs remove both layers now
+_C1_LAYERS = "\n".join([
+  '  coast = seed + fit_offset(a)',
+  '  want = cmd - coast',
+  '  ratio = (acc - coast) / want if math.isfinite(coast) and want < -0.05 else math.nan',
+  '  detail = (f"delivered {_fmt(ratio * 100, 0)}% of the braking beyond coasting (cmd {cmd:.2f}, a_ego {acc:.2f}, " +',
+  '            f"coast fit {_fmt(coast)}, seed {_fmt(seed)}); {_assist_sent(a)}")',
+  "  used = set(a.gear_counts())   # Task 14 C1: gate on this test's own gears",
+  '  if not coast_calibrated(a.ctx, used):',
+  '    return CAPTURED, detail + _unfit(a, used)',
+  '',
+])
+_C1_NO_LAYERS = "\n".join([
+  '  coast = seed',
+  '  want = cmd - coast',
+  '  ratio = (acc - coast) / want if math.isfinite(coast) and want < -0.05 else math.nan',
+  '  detail = (f"delivered {_fmt(ratio * 100, 0)}% of the braking beyond coasting (cmd {cmd:.2f}, a_ego {acc:.2f}, " +',
+  '            f"coast fit {_fmt(coast)}, seed {_fmt(seed)}); {_assist_sent(a)}")',
+  '',
+])
+_NSB1_LAYERS = "\n".join([
+  '    known &= math.isfinite(exc)   # a gear without a fit (or no rpm) -> no coast estimate -> unknown, never "clean"',
+  '    parts.append(f"floor {key}: min out {out_min:.2f}, min sent {_fmt(sent_min)}, excess vs fit {_fmt(exc)} " +',
+  '                 f"{\'✓\' if good_cmd and good_coast else \'×\'}")',
+  '  if not parts:',
+  '    return None, ""',
+  '  detail = "; ".join(parts) + f"; {_assist_sent(a)}"',
+  '  if not cmd_ok:',
+  '    return FAIL, detail',
+  '  # Task 12 D3 [D-11] / Task 13 B1: "stayed off the brakes" is judged from a_ego vs the FIT coast model, and needs the',
+  '  # sent accel seen on the bus - provisional (CAPTURED) until both exist',
+  "  used = set(a.gear_counts())   # Task 14 C1: gate on this test's own gears",
+  '  if not coast_calibrated(a.ctx, used):',
+  '    return (CAPTURED if a.complete else None), detail + _unfit(a, used)',
+  '',
+])
+_NSB1_NO_LAYERS = "\n".join([
+  '    known &= True   # a gear without a fit (or no rpm) -> no coast estimate -> unknown, never "clean"',
+  '    parts.append(f"floor {key}: min out {out_min:.2f}, min sent {_fmt(sent_min)}, excess vs fit {_fmt(exc)} " +',
+  '                 f"{\'✓\' if good_cmd and good_coast else \'×\'}")',
+  '  if not parts:',
+  '    return None, ""',
+  '  detail = "; ".join(parts) + f"; {_assist_sent(a)}"',
+  '  if not cmd_ok:',
+  '    return FAIL, detail',
+  '  # Task 12 D3 [D-11] / Task 13 B1: "stayed off the brakes" is judged from a_ego vs the FIT coast model, and needs the',
+  '  # sent accel seen on the bus - provisional (CAPTURED) until both exist',
+  "  used = set(a.gear_counts())   # Task 14 C1: gate on this test's own gears",
+  '',
+])
+
+
 def m(mid, finding, file, old, new, tests=T):
   return {"id": mid, "finding": finding, "file": file, "old": old, "new": new, "tests": tests}
 
@@ -42,18 +94,7 @@ MUTATIONS = [
     "    return (None if status == PASS and not self.complete else status), detail", "    return status, detail"),
   m("d3_c1_raw_ratio", "D3 D-03", R, "  ratio = (acc - coast) / want if math.isfinite(coast) and want < -0.05 else math.nan",
     "  ratio = acc / cmd if cmd < -1e-3 else math.nan"),
-  # D-03 since Task 13 B1 has two layers (no fit -> CAPTURED, and no fit -> no coast estimate); the old bug is both gone
-  m("d3_c1_uncalibrated_pass", "D3 D-03 / T13 B1", R, '''  coast = seed + fit_offset(a)
-  want = cmd - coast
-  ratio = (acc - coast) / want if math.isfinite(coast) and want < -0.05 else math.nan
-  detail = (f"delivered {_fmt(ratio * 100, 0)}% of the braking beyond coasting (cmd {cmd:.2f}, a_ego {acc:.2f}, " +
-            f"coast fit {_fmt(coast)}, seed {_fmt(seed)}); {_assist_sent(a)}")
-  if not coast_calibrated(a.ctx):
-    return CAPTURED, detail + f" [provisional: coast model not fit ({COAST_CAL_TEST})]"''', '''  coast = seed
-  want = cmd - coast
-  ratio = (acc - coast) / want if math.isfinite(coast) and want < -0.05 else math.nan
-  detail = (f"delivered {_fmt(ratio * 100, 0)}% of the braking beyond coasting (cmd {cmd:.2f}, a_ego {acc:.2f}, " +
-            f"coast fit {_fmt(coast)}, seed {_fmt(seed)}); {_assist_sent(a)}")''', T + T13),
+  m("d3_c1_uncalibrated_pass", "D3 D-03 / T13 B1 / T14 C1", R, _C1_LAYERS, _C1_NO_LAYERS, T + T13),
   m("d3_s5_reopen_not_leak", "D3 D-04", f"{TC}/analyzers.py",
     '        ep["reopened"] = s.t - ep["t_close"] <= self.REOPEN_LEAK', '        ep["reopened"] = False'),
   m("d3_s5_close_gas_ok", "D3 D-04", f"{TC}/analyzers.py", '          ep["close_gas"] = self._gas_at_close', '          ep["close_gas"] = False'),
@@ -91,10 +132,10 @@ MUTATIONS = [
   m("t13_b1_sent_unseen_passes", "T13 B1", R,
     '  if not math.isfinite(sent):\n    return CAPTURED, detail + " [sent accel not seen',
     '  if False:\n    return CAPTURED, detail + " [sent accel not seen', T13),
-  m("t13_b1_nsb_nan_is_clean", "T13 B1", R, "    known &= math.isfinite(exc)", "    known &= True", T13),
+  m("t13_b1_nsb_nan_is_clean", "T13 B1 / T14 C1", R, _NSB1_LAYERS, _NSB1_NO_LAYERS, T13),
   m("t13_b1_ebp_sent_ignored", "T13 B1", R,
     '          e.get("sent_min", math.nan) < a.ctx.ebp_coast_target - 0.01]', '          False]', T13),
-  m("t13_b1_fit_not_saved", "T13 B1", R, '    a.data["coast_fit"] = {"version": 1, "gears": gears}\n', "", T13),
+  m("t13_b1_fit_not_saved", "T13 B1", R, '      a.data["coast_fit"] = {"version": 2, "gears": gears}\n', "", T13),
   m("t13_b2_pre_blip_unlinked", "T13 B2 D-04", f"{TC}/analyzers.py", '               "leak": self._leak_pending}',
     '               "leak": None}'),
   m("t13_b2_gas_at_release_is_leak", "T13 B2 D-04", R,
@@ -112,6 +153,12 @@ MUTATIONS = [
     "  if st.get(\"errors\"):\n", "  if False:\n", T13),
   m("t13_b4_guard_global_streak", "T13 B4", f"{TC}/guard.py", "      self.consecutive[site] = 0\n",
     "      self.consecutive = dict.fromkeys(self.consecutive, 0)\n", T13),
+  m("t14_c1_all_six_gears", "T14 C1 N13-1", R,
+    "  return fit is not None and (gears is None or (bool(gears) and all(g in fit for g in gears)))",
+    "  return fit is not None and len(fit) == 6", T13),
+  m("t14_c1_fit_only_when_complete", "T14 C1 N13-1", R, "      if a._live(g)[0] >= a.seconds and n >= FIT_MIN_SAMPLES",
+    "      if a.complete and n >= FIT_MIN_SAMPLES", T13),
+  m("t14_c1_undone_gear_counts", "T14 C1", R, ' and (e.get("done") is True or v1):', ":", T13),
   m("t13_b3_inert_chip_vanishes", "T13 B3", "openpilot/selfdrive/ui/sunnypilot/mici/onroad/test_console_chip.py",
     "  if st.get(\"inert\"):\n", "  if False:\n", T13),
 ]

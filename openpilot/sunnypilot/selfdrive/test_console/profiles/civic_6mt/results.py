@@ -29,26 +29,35 @@ COVERAGE_MIN = 0.8           # S2: share of shifts per gear whose bite was actua
 
 
 def coast_fit(ctx) -> dict[int, float] | None:
-  """Task 13 B1 [D-03, D-12]: the per-gear coast-model correction (a_ego - seed, m/s^2) FIT from the completed E0b
-  capture — not merely "E0b complete" (finishing E0b only captures; nothing refit the seed). None until every gear has a
-  usable fit; then the braking rules judge against seed + correction instead of the seed."""
+  """Task 13 B1 [D-03, D-12]: the per-gear coast-model correction (a_ego - seed, m/s^2) FIT from the E0b capture — not
+  merely "E0b complete" (finishing E0b only captures; nothing refit the seed). Task 14 C1 [N13-1]: per gear - the gears
+  whose own E0b capture is done and has a usable fit; None if there is none. (It used to need all six, so one sparse gear
+  blocked every braking verdict.) The rules gate on the gears their own samples used (coast_calibrated)."""
   entry = ctx.results.get(COAST_CAL_TEST, {})
-  fit = entry.get("coast_fit") if entry.get("complete") else None
+  fit = entry.get("coast_fit")
   gears = fit.get("gears") if isinstance(fit, dict) else None
   if not isinstance(gears, dict):
     return None
+  v1 = fit.get("version") == 1 and entry.get("complete")   # Task 13 files: written only on completion = every gear done
   out = {}
   for g in range(1, len(GEAR_RATIOS) + 1):
     e = gears.get(str(g))
-    if not isinstance(e, dict) or not isinstance(e.get("bias"), (int, float)) or not math.isfinite(e["bias"]) or \
-       not isinstance(e.get("n"), (int, float)) or e["n"] < FIT_MIN_SAMPLES:
-      return None
-    out[g] = float(e["bias"])
-  return out
+    if isinstance(e, dict) and isinstance(e.get("bias"), (int, float)) and math.isfinite(e["bias"]) and \
+       isinstance(e.get("n"), (int, float)) and e["n"] >= FIT_MIN_SAMPLES and (e.get("done") is True or v1):
+      out[g] = float(e["bias"])
+  return out or None
 
 
-def coast_calibrated(ctx) -> bool:
-  return coast_fit(ctx) is not None
+def coast_calibrated(ctx, gears=None) -> bool:
+  """A usable fit for every gear in `gears` (the gears a test's samples used; gear 0 never has one), or any fit at all."""
+  fit = coast_fit(ctx)
+  return fit is not None and (gears is None or (bool(gears) and all(g in fit for g in gears)))
+
+
+def _unfit(a, fit_gears) -> str:
+  fit = coast_fit(a.ctx) or {}
+  missing = sorted(g for g in fit_gears if g not in fit)
+  return f" [provisional: coast model not fit ({COAST_CAL_TEST}) for gear(s) {missing or 'any'}]"
 
 
 def fit_offset(a, key=None) -> float:
@@ -87,8 +96,9 @@ def r_brake_strength(a: SegmentAnalyzer):
   ratio = (acc - coast) / want if math.isfinite(coast) and want < -0.05 else math.nan
   detail = (f"delivered {_fmt(ratio * 100, 0)}% of the braking beyond coasting (cmd {cmd:.2f}, a_ego {acc:.2f}, " +
             f"coast fit {_fmt(coast)}, seed {_fmt(seed)}); {_assist_sent(a)}")
-  if not coast_calibrated(a.ctx):
-    return CAPTURED, detail + f" [provisional: coast model not fit ({COAST_CAL_TEST})]"
+  used = set(a.gear_counts())   # Task 14 C1: gate on this test's own gears
+  if not coast_calibrated(a.ctx, used):
+    return CAPTURED, detail + _unfit(a, used)
   if not math.isfinite(sent):
     return CAPTURED, detail + " [sent accel not seen: can't confirm the request reached the bus]"
   if sent > cmd + SENT_TOL:
@@ -310,8 +320,9 @@ def r_nsb_floor(a: SegmentAnalyzer):
     return FAIL, detail
   # Task 12 D3 [D-11] / Task 13 B1: "stayed off the brakes" is judged from a_ego vs the FIT coast model, and needs the
   # sent accel seen on the bus - provisional (CAPTURED) until both exist
-  if not coast_calibrated(a.ctx):
-    return (CAPTURED if a.complete else None), detail + f" [provisional: coast model not fit ({COAST_CAL_TEST})]"
+  used = set(a.gear_counts())   # Task 14 C1: gate on this test's own gears
+  if not coast_calibrated(a.ctx, used):
+    return (CAPTURED if a.complete else None), detail + _unfit(a, used)
   if not sent_ok:
     return (CAPTURED if a.complete else None), detail + " [sent accel not seen on the bus]"
   if coast_ok and not known:
@@ -428,15 +439,17 @@ def r_coast_fit(a: SegmentAnalyzer):
       continue
     parts.append(f"g{g} a {a.pooled('a_ego', g):.2f} (model {_fmt(a.pooled('a_coast', g))}, pitch {a.pooled('pitch', g):+.3f})")
   a.data.pop("coast_fit", None)
-  if a.spec.id == COAST_CAL_TEST and a.complete:
+  if a.spec.id == COAST_CAL_TEST:
+    # Task 14 C1: fit each gear whose own capture is done (its seconds collected), not only when every gear is
     gears = {}
     for g in a.keys:
       n = sum(seg.cnts.get("excess", 0) for seg in a.by_key(g))
       bias = a.pooled("excess", g)
-      if n >= FIT_MIN_SAMPLES and math.isfinite(bias):
-        gears[str(g)] = {"bias": round(bias, 4), "n": n}
-    a.data["coast_fit"] = {"version": 1, "gears": gears}
-    parts.append("fit " + " ".join(f"g{g} {v['bias']:+.2f}" for g, v in gears.items()))
+      if a._live(g)[0] >= a.seconds and n >= FIT_MIN_SAMPLES and math.isfinite(bias):
+        gears[str(g)] = {"bias": round(bias, 4), "n": n, "done": True}
+    if gears:
+      a.data["coast_fit"] = {"version": 2, "gears": gears}
+      parts.append("fit " + " ".join(f"g{g} {v['bias']:+.2f}" for g, v in gears.items()))
   return (CAPTURED, "; ".join(parts)) if parts else (None, "")
 
 
