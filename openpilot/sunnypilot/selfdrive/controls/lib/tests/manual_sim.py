@@ -143,11 +143,12 @@ def controls_frame(ext, sm, loc, enabled, gas_pressed, last_cmd_hint=None):
 
 
 class ManualCarSim:
-  def __init__(self, speed=20., gear=4, v_set=None, plant="open", grade=0., slip=0.3, lead=None, rpm_hold=1, **params):
+  def __init__(self, speed=20., gear=4, v_set=None, plant="open", grade=0., slip=0.3, lead=None, rpm_hold=1,
+               transmission=TransmissionType.manual, **params):
     from openpilot.selfdrive.controls.lib.longitudinal_planner import LongitudinalPlanner
     params.setdefault("ClutchShiftGate", True)
     self.params = set_params(**params)
-    self.CP, self.CP_SP = make_cp()
+    self.CP, self.CP_SP = make_cp(transmission)   # automatic: the same car model, for "automatics unchanged" checks
     self.planner = LongitudinalPlanner(self.CP, self.CP_SP, init_v=speed)
     self.ext = Ext(self.CP, self.params)
     self.loc = LongControl(self.CP, self.CP_SP)
