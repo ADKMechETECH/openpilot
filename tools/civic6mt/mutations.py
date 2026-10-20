@@ -17,6 +17,7 @@ CSIG = [f"{T}/test_task13_clutch_signal.py"]
 TRIP = [f"{T}/test_rule5.py::TestRule5Tripwire"]
 FORCED = [f"{T}/test_non_adaptive_longitudinal.py::TestForcedMpcPlanner"]   # no acados needed
 LATCH = [f"{T}/test_manual_low_speed_handback.py::TestTask14Latch"]
+SEED = [f"{T}/test_gas_override_seed.py"]
 
 
 # Task 14 A3: "FCW is never resolved at a stop" now has two layers (no standstill timer under FCW; FCW urgent even
@@ -227,4 +228,17 @@ MUTATIONS = [
     " and self.since_decoupled >= FLARE_HOLDOFF - 1e-6:", ":", GATE),
   m("t15_gate_gear_change_no_restart", "T15 settle delay", f"{SP}/lib/clutch_shift_gate.py",
     "    elif self.state == GateState.reengaging and gear_raw != self.reengage_gear:", "    elif False:", GATE),
+  # --- Task 16 (Stage 2 on-car: gas-override surge; engine-brake coast target) --------------------------------------
+  m("t16_seed_stock", "T16 gas-override surge", f"{SP}/lib/longitudinal_planner.py",
+    "    return min(a_ego, 0.) if self.manual and self.gas_override_reset else a_ego\n", "    return a_ego\n", SEED),
+  m("t16_flag_lost_at_lift", "T16 gas-override surge", f"{SP}/lib/longitudinal_planner.py",
+    "    if not reset_state:\n      self.gas_override_reset = False\n",
+    "    if not reset_state or not sm['carState'].gasPressed:\n      self.gas_override_reset = False\n", SEED),
+  m("t16_all_transmissions", "T16 gas-override surge", f"{SP}/lib/longitudinal_planner.py",
+    "if self.manual and self.gas_override_reset else", "if self.gas_override_reset else", SEED),
+  m("t16_stock_planner_unwired", "T16 gas-override surge", "openpilot/selfdrive/controls/lib/longitudinal_planner.py",
+    "np.clip(LongitudinalPlannerSP.reset_accel(self, sm['carState'].aEgo), ACCEL_MIN, ACCEL_MAX)",
+    "np.clip(sm['carState'].aEgo, ACCEL_MIN, ACCEL_MAX)", SEED),
+  m("t16_coast_target_zero", "T16 C2 coast target", f"{SP}/lib/engine_brake_preferred.py",
+    "DEFAULT_COAST_TARGET = -0.2 ", "DEFAULT_COAST_TARGET = 0.0 ", EBP),
 ]
