@@ -15,6 +15,7 @@ EV = ["openpilot/sunnypilot/selfdrive/car/tests/test_clutch_gate_events.py"]
 ODBC = ["opendbc_repo/opendbc/car/honda/tests/test_manual_carstate.py"]
 CSIG = [f"{T}/test_task13_clutch_signal.py"]
 TRIP = [f"{T}/test_rule5.py::TestRule5Tripwire"]
+FORCED = [f"{T}/test_non_adaptive_longitudinal.py::TestForcedMpcPlanner"]   # no acados needed
 LATCH = [f"{T}/test_manual_low_speed_handback.py::TestTask14Latch"]
 
 
@@ -164,8 +165,8 @@ MUTATIONS = [
     "  return False", HB + R5),
   m("t13_a1_no_standstill_resolution", "T13 A1 review2 N6", f"{SP}/lib/manual_low_speed_handback.py",
     "        self.resolved = True\n", "        self.resolved = False\n", HB),
-  m("t13_a1_no_imminent_latch", "T13 A1", f"{SP}/lib/manual_low_speed_handback.py",
-    "      self.lead_latched = True\n", "      pass\n", HB),
+  m("t13_a1_no_imminent_latch", "T13 A1 / T14 W1-N8", f"{SP}/lib/manual_low_speed_handback.py",
+    "      self.lead_latched = True\n", "      pass\n", LATCH),
   m("t13_a1_fcw_resolved", "T13 A1 / T14 A3 W1-N3", f"{SP}/lib/manual_low_speed_handback.py", _FCW_LAYERS, _FCW_NO_LAYERS, HB),
   m("t13_a2_margin_tied_to_ceiling", "T13 A2 N-2 N3", f"{SP}/lib/no_service_brake.py",
     '               MAX_OVERSPEED_MARGIN, ceiling - PULSE_MIN_BAND)', '               ceiling)', NSB),
@@ -201,4 +202,8 @@ MUTATIONS = [
     "  return max(-G * math.sin(pitch), 0.)\n", "  return 0.\n", LATCH),
   m("t14_a4_uphill_relaxes", "T14 A4", f"{SP}/lib/braking_urgency.py",
     "  return max(-G * math.sin(pitch), 0.)\n", "  return -G * math.sin(pitch)\n", LATCH),
+  m("t14_b1_no_threat_forced", "T14 B1 W2", f"{SP}/lib/longitudinal_planner.py",
+    "      reason = reason or collision_threat(lead, v_ego)", "      reason = reason", FORCED),
+  m("t14_b1_no_cruise_reseed_forced", "T14 B1 W2", "openpilot/selfdrive/controls/lib/longitudinal_planner.py",
+    "      self.a_cruise = min(self.a_cruise, float(self.output_a_target))", "      pass", FORCED),
 ]

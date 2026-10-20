@@ -3,6 +3,8 @@ Non-adaptive (set-speed only) longitudinal: with the NonAdaptiveLongitudinal tog
 holds the set speed and does not slow for leads, while the MPC (and so FCW) keeps running. With it OFF (default),
 behavior is unchanged.
 """
+import numpy as np
+
 from openpilot.common.params import Params
 from openpilot.common.test import OpenpilotTestCase
 from openpilot.selfdrive.controls.lib.longitudinal_planner import LongitudinalPlanner, LongitudinalPlanSource
@@ -286,3 +288,66 @@ class TestNonAdaptiveCollisionBraking(OpenpilotTestCase):
     self.assertTrue(sim.ext.lead_visible(FakeSM({'longitudinalPlan': sim.plan, 'longitudinalPlanSP': sim.plan_sp})))
     sim = a1_sim("closed", 25., (37.5, 25.), v_set=25., NonAdaptiveLongitudinal=False).run(1.)
     self.assertTrue(sim.ext.lead_visible(FakeSM({'longitudinalPlan': sim.plan, 'longitudinalPlanSP': sim.plan_sp})))
+
+
+class ForcedMpc:
+  """Stand-in for LongitudinalMpc with a forced output (Task 14 B1): the planner's candidate selection, the collision
+  re-admit and the cruise re-seed are pinned without the acados solver - so the A1 mutations are caught by any CI run."""
+
+  def __init__(self, accel: float = 0.):
+    from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import T_IDXS
+    self.T = np.asarray(T_IDXS)
+    self.accel, self.crash_cnt, self.solve_time, self.v0 = accel, 0, 0., 0.
+    self.source = LongitudinalPlanSource.lead0
+    self.update(None)
+
+  def set_weights(self, *a, **kw):
+    pass
+
+  def set_cur_state(self, v, a):
+    self.v0 = float(v)
+
+  def update(self, radarstate, *a, **kw):
+    self.a_solution = np.full(len(self.T), self.accel)
+    self.v_solution = np.maximum(self.v0 + self.accel * self.T, 0.)
+    self.j_solution = np.zeros(len(self.T) - 1)
+
+
+class TestForcedMpcPlanner(OpenpilotTestCase):
+  """Task 14 B1 [W2]: non-adaptive collision braking at planner level with a forced MPC candidate."""
+
+  def _sim(self, mpc_accel, lead):
+    from openpilot.sunnypilot.selfdrive.controls.lib.tests.manual_sim import ManualCarSim
+    sim = ManualCarSim(speed=18., gear=6, v_set=20., NonAdaptiveLongitudinal=True, ClutchShiftGate=False, lead=lead)
+    sim.planner.mpc = ForcedMpc(mpc_accel)
+    return sim
+
+  def test_collision_threat_readmits_a_mild_mpc(self):
+    # a lead inside the 6 s TTC window while the (forced) MPC asks only -0.6 (milder than MPC_NEEDED_DECEL): only
+    # collision_threat() can re-admit the MPC (a1_no_threat removes it)
+    sim = self._sim(-0.6, (25., 13.))   # 25 m ahead at 13 m/s, ego 18: closing 5 m/s, TTC 5 s
+    sim.run(1.)
+    self.assertTrue(sim.plan_sp.features.collisionBraking)
+    self.assertEqual(sim.plan_sp.features.collisionReason, "lead_ttc")
+    self.assertAlmostEqual(sim.plan.aTarget, -0.6, delta=0.05, msg="the MPC's braking is the plan")
+    # control: no threat (the lead far away) -> the set-speed plan, not the MPC
+    far = self._sim(-0.6, (200., 18.))
+    far.run(1.)
+    self.assertFalse(far.plan_sp.features.collisionBraking)
+    self.assertGreater(far.plan.aTarget, 0., "set speed above: the cruise candidate accelerates")
+
+  def test_cruise_resumes_from_the_collision_braking_without_a_step(self):
+    # the threat clears, the 2 s dwell ends, the MPC is dropped: the cruise candidate continues from the collision
+    # braking (a1_no_cruise_reseed leaves it at its pre-threat value -> a step of ~+1.5 m/s^2 in one plan)
+    sim = self._sim(-1.5, (25., 13.))
+    sim.run(2.)
+    self.assertTrue(sim.plan_sp.features.collisionBraking)
+    sim.lead = None   # threat gone; the forced MPC keeps asking -1.5 during the dwell
+    targets = []
+    for _ in range(round(5. / 0.05)):
+      sim.run(0.05)
+      targets.append(sim.plan.aTarget)
+    self.assertFalse(sim.plan_sp.features.collisionBraking, "precondition: the dwell ended")
+    steps = [b - a for a, b in zip(targets, targets[1:], strict=False)]
+    self.assertLess(max(steps), 0.3, f"no step up when the MPC is dropped (max {max(steps):.2f} m/s^2 per plan)")
+    self.assertGreater(targets[-1], -0.5, "and it does climb back toward the set-speed plan")
