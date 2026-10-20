@@ -117,8 +117,12 @@ lead braking < −1 m/s², closing ≥ 1 m/s at any distance).
   closing ≥ 1 m/s at any distance, so ordinary stop-and-go held a manual engaged at a standstill. `handback_urgency()`
   keeps FCW, stock AEB, forceDecel (aborts), a hard (< −1.5) plan request and invalid/stale inputs; drops `stopping` and
   the broad lead reasons; adds one kinematic lead test (`lead_imminent`: a driver braking at 2 m/s² only after ramp +
-  0.1 s + 1.5 s reaction couldn't stop 2 m short). An imminent lead latches until the stop; **standstill resolution**:
-  stopped 0.5 s while urgent → the handback completes anyway (FCW / stock AEB excepted; FCW can't fire at a standstill).
+  0.1 s + 1.5 s reaction couldn't stop 2 m short; since Task 14 A4 a downhill grade from the calibrated pose enlarges
+  it, uphill / no pose = level). **The latch (as fixed in Task 14):** it SETS on that imminence test itself, whatever
+  reason `handback_urgency` returns (A2 — FCW / hard_decel used to hide it); it HOLDS while some lead is still closing
+  within the test + 2 m; it RELEASES 0.5 s after none is (A1 — a lead that drove off used to leave openpilot engaged and
+  frozen), and the handback then completes as if the lead had never been there. **Standstill resolution:** stopped 0.5 s
+  while urgent → the handback completes anyway; FCW / stock AEB are never resolved away, also after a resolution (A3).
 - **Enforcement:** `tests/test_rule5.py` — the matrix (12 limiting states × 13 injected reasons, closed loop, one frame;
   the handback's `HANDBACK_CONTINUES` set is asserted NOT to freeze it) and an AST tripwire that fails if a function raises
   a lower accel limit / writes `longActive` without calling the predicate and acting on it (Task 13 C2: a taint pass —
@@ -755,12 +759,46 @@ then the feature → dev-test merge of the docs mirror.
     frame step failing every frame — a persistently broken console never went inert on the car (the B3 claim). Now per
     site. And the first isolation selfdrived check couldn't fail: `replay_process`'s migration rewrites every
     `managerState` to "all running", erasing the injected dead process (control 0 diffs) — the tool now injects after it.
-- **Wrap-up:** pushed opendbc `434871715`, feature `06175554f` + the docs re-mirror, dev-test `436121e59` + its re-mirror
-  merge (one way, feature → dev-test); bundles regenerated (8th regen, `backups/README.md`), Dropbox copies + `docs/`
+- **Wrap-up:** pushed opendbc `434871715`, feature `f96bb93af`, dev-test `cf3d8d82d` (merges one way, feature → dev-test;
+  the fork's `.gitignore` ignores `CLAUDE.md`, so the mirror is force-added — `06175554f` had silently missed it; the fork
+  copy lags this wrap-up line only); bundles regenerated (8th regen, `backups/README.md`), Dropbox copies + `docs/`
   re-mirrored. No environment change (`recovery/` unchanged). Nothing flashed; nothing merged toward any base.
 - **New on-car unknowns:** how often a 0x1DD counter/checksum fault drops `clutchSignalValid` on the real bus; whether the
   handback's imminent-lead thresholds (2 m/s², 1.5 s, 2 m) match this driver's stops; the E0b per-gear additive fit may
   need an rpm term once real coasts are logged.
+
+**Task 14 — handback latch fixes + verification follow-ups** (brief `.../CommaAI/prompts/task14-handback-latch-fixes.md`;
+a three-reviewer, execution-based verification of Task 13 confirmed the standstill-hold regression gone and A2/A3/C2/the
+console fixed, and found the Task 13 imminent-lead latch defective both ways). Feature `09f209292` A2, `390a3a9b5` A1,
+`f8274b1be` A3, `267c8fe8f` A4, `4346060a0` B1, `87472bfbb` W1-N7; dev-test merge `ef161db38`, `ea9bfb2c8` C1.
+- **A1 [W1-N1] latch releases when the lead is gone:** held only while a lead is closing within the imminent test + 2 m;
+  0.5 s without → released, handback completes in ramp + margin. Repro (Task 13): a latched slow lead pulls away → still
+  engaged, rolling 0.6–1.2 m/s after 60 s.
+- **A2 [W1-N2] latch sets independently of the returned reason:** `handback_lead_imminent()` every frame. Repro: FCW held
+  until 0.6–1.0 m/s → Task 13 ramped at 0.58–0.96 m/s, 3.7–4.3 m behind a stopped car (one contact, no driver in that sim).
+- **A3 [W1-N3]:** FCW / stock AEB urgent even after a standstill resolution.
+- **A4 [W1-N4]:** a downhill grade (calibrated pose) lengthens the imminent distance; uphill / no pose = level. The
+  discriminating proof is the unit test — closed-loop sweeps are identical with and without it.
+- **B1 [W1-N8, W2]:** `t13_a1_no_imminent_latch` now fails the hard-braking latch test (and the Task 13 latched test);
+  `ForcedMpc` stand-in pins the non-adaptive re-admit and cruise re-seed at planner level (`t14_b1_*_forced` run only that
+  class — no solver). **C1 [N13-1]** (dev-test): the coast-fit gate is per gear (E0b fits each gear once its own 10 s is
+  in; verdicts gate on their own gears). **W1-N7:** the tripwire recognises `np.clip(limits[0], …)`.
+- **Found while verifying (owner questions answered):** the handback test plant does NOT double-count grade (exactly one
+  −g·sin(pitch) term — measured, and the `grade` / `pitch` knobs are now exclusive and pinned). On that correct plant the
+  downhill contact survives — and it is **not** the handback or the non-adaptive cap: identical in all four of manual /
+  automatic × adaptive / non-adaptive. It is braking authority (Open questions: "Downhill braking authority"); A4 changes
+  neither outcome (48/48 force plant, 2/48 tracking plant, on and off). Not fixed here (authority change, needs C1 data).
+- **Manifest hygiene:** `t13_a1_broad_urgency` / `t13_a1_imminent_ignored` had gone stale with A2 (fixed in A4's commit);
+  `t13_a1_fcw_resolved`, `d3_c1_uncalibrated_pass`, `t13_b1_nsb_nan_is_clean` met a second protective layer and now remove
+  both (the actual bug); every pattern in both manifests is checked to match exactly once.
+- **Run (PC, 2026-10-19):** OFF replays vs the Task 13 tip `f96bb93af`: plannerd + controlsd **0 diffs on all 4 CI
+  segments**. Feature CORE **883 passed** (+ the pre-existing `test_default_chestnut` failure), WIDE 2196 passed; dev-test
+  CORE **1010 passed** (same 1), WIDE 2196. **`mutate.py` 70/70, `mutate_devtest.py` 48/48.** Console: replay 0 diffs on
+  all 4 segments (console clean), isolation OK, offline OK, equiv every armed test captured, render PASS; clutch / engine-
+  brake replays PASS.
+- **Wrap-up:** pushed; bundles regenerated (9th regen); docs re-mirrored (fork copies + Dropbox). Nothing flashed;
+  nothing merged toward any base. **The low-speed handback is ready for stop-and-go-with-traffic testing** (after the
+  empty-lot handback and Phase 0 signals); the downhill braking question is C1's.
 
 ## Test console architecture (core + vehicle profile)
 The on-car test console is a **vehicle-agnostic core** — capture state machine, detectors/analyzers, the registry/session
@@ -781,7 +819,7 @@ Task 10 Step 1 and implemented by the rest of Task 10.)
   low-speed, empty road first, ready to take over.
 
 ## On-car verification checklist (before the first road test)
-All features (Phases 1–3, Tasks 2–6, 8, 11–13) are SIM/TEST-ONLY. Nothing below has been observed on the real car.
+All features (Phases 1–3, Tasks 2–6, 8, 11–14) are SIM/TEST-ONLY. Nothing below has been observed on the real car.
 **Run this list through the Task 7/9/10 test console** (flash `civic-6mt-dev-test`; Settings → dev test opens the session
 view — work through sessions 1→11 + the Cal card): every item below is a registry test
 with live conditions, capture and a pass rule — S1–S7, D1, C1–C2, G1–G4, N1–N2, NSB1–NSB2, H1–H4, E0a–E3, GA1, A7
@@ -811,7 +849,9 @@ Behavior — empty road, low speed, ready to take over, one toggle at a time:
       shows "Shift gate off" if it isn't. `GEAR_MT` values other than 0–6/14 ever seen? (they count as decoupled).
       **(Task 13 A3)** it now also drops on a bad 0x1DD counter (for as long as the counter score is non-zero) or checksum
       (100 ms): how often does that happen on the real bus? Occasional single-frame drops are expected; frequent ones
-      would make the gate / EBP / GearAware flicker inert.
+      would make the gate / EBP / GearAware flicker inert. **(Task 14, W1-N6)** the check also needs the 2-bit counter to
+      step by exactly 1 every frame at > 4 Hz; any other pattern on the real car (e.g. a counter that steps by 2, or a
+      slow message) leaves those features permanently inert (fail-safe) — confirm in cabana.
 - [ ] **(Task 12) `ClutchShiftGateCoastAccel` vs C2:** 0.0 is right only if `ACCEL_COMMAND` 0 coasts; if 0 holds
       speed (PCM adds throttle), a small negative cap may be needed — and then whether that uses the service brakes.
 - [ ] Clutch gate on real up- and downshifts: coasts through the shift, no RPM flare, smooth resume, no
@@ -862,6 +902,16 @@ Behavior — empty road, low speed, ready to take over, one toggle at a time:
       to a stop and holds it there. With a genuinely close car (`lead_imminent`: a driver braking at 2 m/s² after the ramp +
       1.5 s couldn't stop 2 m short) it brakes to the stop, then hands back 0.5 s after standstill
       (`manual_low_speed_handback_standstill` cloudlog). Do the thresholds match how this driver actually stops?
+- [ ] **(Task 14) Handback latch in stop-and-go:** a slow car close ahead that then drives off → openpilot hands back
+      within ~1 s of it pulling away (`manual_low_speed_handback_latch_release`), not engaged-and-rolling; a hard stop
+      behind a car (FCW or hard braking) → it brakes to the stop and only then hands back.
+- [ ] **(Task 14, W1-N5) Standstill resolution on a slope:** after openpilot brakes a manual to a stop for a close car,
+      the resolution releases the brakes 0.5 s later. On a −6 % grade in the sim the car (clutch in) rolled into the lead
+      during the modelled 1.5 s driver reaction. Does Honda Auto Brake Hold engage after an *openpilot* stop without a
+      driver brake press? Test it on a gentle slope first, foot over the brake; it decides whether this needs code.
+- [ ] **(Task 14, open finding) Downhill braking authority — part of C1:** command a steady −1.0 m/s² on a ~6 % descent:
+      is −1.0 actually delivered (the VSA tracks the request), or does gravity eat it? Above 3 m/s openpilot sends the
+      plan's accel uncompensated (see Open questions). Wide margin, empty road.
 - [ ] **Auto Brake Hold / hill-hold assumption:** confirm the car's Auto Brake Hold and automatic hill-hold
       hold the car at a stop and prevent rollback after openpilot hands back — **especially on a hill**.
 - [ ] **GEAR_MT in neutral while rolling:** what it reads when coasting in neutral (clutch out) with openpilot
@@ -915,6 +965,13 @@ Task 6 (engine-brake features) — only after the items above, toggles one at a 
   forcing an ACC disengage) is dev-only. Side effect of the half-landed #802: the alpha-long toggle
   flipped *while onroad* applies on the next drive. See `docs/FORK-RESILIENCE.md`.
   When the comma arrives, install the fork's **`civic-6mt-dev-test`** branch (feature + Task 7 test console) and confirm it.
+- **Downhill braking authority (Task 14 finding, beyond the handback):** in the sims openpilot cannot stop for a stopped
+  car on a 3–6 % descent in ANY mode (manual / automatic, adaptive / non-adaptive, handback or not) when the car's brake
+  delivers force rather than tracking the requested decel: openpilot's own loop has no grade term on this car (`kiV = 0`)
+  and the Honda Bosch path sends `ACCEL_COMMAND` = the plan's accel uncompensated above 3 m/s (`hill_brake` feeds only the
+  gas side; MVL's braking-only `brake_pid` closes the loop below 3 m/s). With a brake that tracks the request the same
+  sweeps are clean. So downhill braking rests entirely on the VSA tracking `ACCEL_COMMAND` — unverified (C1, now with a
+  grade). Not changed in code: adding grade to the braking command is an authority change that needs on-car data.
 - Whether to include PR #2050's radarless brake-strength fix or intentionally run with weak/no openpilot
   braking for the "coast downhill" behavior. (Braking authority itself is the negative `ACCEL_COMMAND`,
   not `0x1BE` — corrected 2026-10-16.)
