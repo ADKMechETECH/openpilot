@@ -343,13 +343,21 @@ def _functions(path):
       yield f.name, f, None
 
 
+def _is_lower_limit(node) -> bool:
+  return isinstance(node, ast.Subscript) and isinstance(node.slice, ast.Constant) and node.slice.value == 0 and \
+         "limits" in ast.unparse(node.value)
+
+
 def _raises_lower_limit(fn) -> bool:
   for node in ast.walk(fn):
     if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "max" and node.args:
-      first = node.args[0]
-      if isinstance(first, ast.Subscript) and isinstance(first.slice, ast.Constant) and first.slice.value == 0 and \
-         "limits" in ast.unparse(first.value):
+      if _is_lower_limit(node.args[0]):
         return True
+    # Task 14 W1-N7: np.clip(limits[0], lo, hi) / clip(...) raises it too
+    if isinstance(node, ast.Call) and node.args and _is_lower_limit(node.args[0]) and \
+       ((isinstance(node.func, ast.Attribute) and node.func.attr == "clip") or
+        (isinstance(node.func, ast.Name) and node.func.id == "clip")):
+      return True
     if isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "lo" for t in node.targets) and \
        isinstance(node.value, ast.Call) and isinstance(node.value.func, ast.Name) and node.value.func.id == "max":
       return True
@@ -516,6 +524,19 @@ class Feature:
   def limit_accel(self, accel_limits):
     lo = max(accel_limits[0], -0.3) if self.active else accel_limits[0]
     return lo, accel_limits[1]
+''',
+  "np_clip.py": '''
+import numpy as np
+def limit_accel(accel_limits, urgency=None):
+  """clamps via np.clip; mentions braking_urgency in the docstring only"""
+  return float(np.clip(accel_limits[0], -0.3, 0.)), accel_limits[1]
+''',
+  "ok_np_clip.py": '''
+import numpy as np
+def limit_accel(accel_limits, urgency):
+  if urgency is not None:
+    return accel_limits
+  return float(np.clip(accel_limits[0], -0.3, 0.)), accel_limits[1]
 ''',
   "long_active.py": '''
 def state_control(CC, urgency):
