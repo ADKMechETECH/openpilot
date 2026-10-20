@@ -1026,7 +1026,7 @@ class TestTask12Verdicts(OpenpilotTestCase):
     feed(a, sim.run(1.))
     for i in range(10):
       g_from, g_to = (2, 3) if i % 2 == 0 else (3, 2)
-      out = shift(sim, g_from, g_to, bite_lag=0.3)
+      out = shift(sim, g_from, g_to, bite_lag=0.05)   # Task 15: a lag the 0.15 s bound passes, so only coverage blocks
       if g_to == 3:
         target = engine_rpm_at(3, 10.) * 1.10
         out = [replace_rpm(s, target) if s.gear_raw == 3 and not s.clutch else s for s in out]
@@ -1035,6 +1035,7 @@ class TestTask12Verdicts(OpenpilotTestCase):
     status, detail = a.result()
     self.assertNotEqual(status, PASS, detail)
     self.assertIn("measured per gear", detail)
+    self.assertIn("measured in gear(s) [3]", detail, "blocked by coverage, not by the lag bound")
 
   def test_n1_says_fcw_not_exercised(self):
     a = make_analyzer(TESTS_BY_ID["N1"], ctx(NonAdaptiveLongitudinal=True))
