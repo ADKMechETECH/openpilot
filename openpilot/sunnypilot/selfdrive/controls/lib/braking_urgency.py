@@ -54,6 +54,7 @@ HANDBACK_REASONS = ("invalid_plan", "invalid_radar", "force_decel", "fcw", "stoc
 HANDBACK_DRIVER_REACTION = 1.5       # s: from the handback prompt to the driver braking (on top of ramp + margin)
 HANDBACK_DRIVER_DECEL = 2.0          # m/s^2: a moderate driver stop
 HANDBACK_MARGIN = 2.0                # m: the driver's stop must end at least this far short of the lead
+HANDBACK_RELEASE_MARGIN = 2.0        # m: Task 14 A1 - a latched lead stays "holding" until it is this much past imminent
 
 
 def lead_reason(lead, v_ego: float, ttc_limit: float = LEAD_TTC, closing_limit: float = LEAD_CLOSING) -> str | None:
@@ -87,13 +88,13 @@ def collision_threat(lead, v_ego: float) -> str | None:
   return reason if reason in COLLISION_REASONS else None
 
 
-def handback_lead_reason(lead, v_ego: float, reaction: float) -> str | None:
+def handback_lead_reason(lead, v_ego: float, reaction: float, extra: float = 0.) -> str | None:
   """'lead_imminent' if a driver braking at HANDBACK_DRIVER_DECEL after `reaction` s could not stop HANDBACK_MARGIN
-  short of this lead: with the lead holding its speed (closing kinematics), or braking to a stop at its current
+  (+ extra) short of this lead: with the lead holding its speed (closing kinematics), or braking to a stop at its current
   decel."""
   if not lead.present:
     return None
-  room = lead.dRel - HANDBACK_MARGIN
+  room = lead.dRel - HANDBACK_MARGIN - extra
   closing = -lead.vRel
   if closing > 0. and closing * reaction + closing ** 2 / (2. * HANDBACK_DRIVER_DECEL) > room:
     return "lead_imminent"
@@ -109,6 +110,14 @@ def handback_lead_imminent(radar, v_ego: float, reaction: float) -> bool:
   """Task 14 A2: the imminent-lead test on its own, whatever reason handback_urgency() returns (FCW / hard_decel used to
   hide it, so the latch never set during a hard-braking approach)."""
   return any(handback_lead_reason(lead, v_ego, reaction) is not None for lead in (radar.leadOne, radar.leadTwo))
+
+
+def handback_lead_holding(radar, v_ego: float, reaction: float) -> bool:
+  """Task 14 A1: a latched lead still holds the braking while some lead is closing (vRel < 0) and still within the
+  imminent test plus HANDBACK_RELEASE_MARGIN. No lead, or every lead opening or well clear -> release (debounced)."""
+  return any(lead.present and lead.vRel < 0. and
+             handback_lead_reason(lead, v_ego, reaction, HANDBACK_RELEASE_MARGIN) is not None
+             for lead in (radar.leadOne, radar.leadTwo))
 
 
 def handback_urgency(urgency: str | None, radar, v_ego: float, reaction: float) -> str | None:

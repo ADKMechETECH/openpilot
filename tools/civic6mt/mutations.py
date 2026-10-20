@@ -167,6 +167,11 @@ MUTATIONS = [
     "    if self.urgency is not None:\n      self.no_service_brake_pulse.floor = None\n      return accel_limits\n",
     "    self.no_service_brake_pulse.floor = self.no_service_brake_pulse.floor  # urgency\n", TRIP),
   # --- Task 14 (handback latch) ------------------------------------------------------------------------------------
+  m("t14_a1_latch_never_releases", "T14 A1 W1-N1", f"{SP}/lib/manual_low_speed_handback.py",
+    "      self.release_timer = 0. if (lead_holding or lead_imminent) else self.release_timer + DT_CTRL\n",
+    "      self.release_timer = 0.\n", LATCH),
+  m("t14_a1_release_on_any_gap", "T14 A1", f"{SP}/lib/manual_low_speed_handback.py",
+    "LATCH_RELEASE = 0.5 ", "LATCH_RELEASE = 0.0 ", LATCH),
   m("t14_a2_latch_from_reason_only", "T14 A2 W1-N2", f"{SP}/lib/manual_low_speed_handback.py",
     "    if self.active and (lead_imminent or urgency == \"lead_imminent\") and not self.lead_latched:",
     "    if self.active and urgency == \"lead_imminent\" and not self.lead_latched:", LATCH),

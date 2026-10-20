@@ -30,8 +30,9 @@ reaction could not stop 2 m short of it. While that holds, the braking side stay
 clock stops (the car may brake to a stop); the handback finishes, re-seeded from the current command, once it clears.
 An imminent lead latches (as openpilot brakes, the lead soon stops looking imminent — handing back then would leave the
 car rolling a few metres behind a stopped car). Task 14: the latch SETS on the imminence test itself, whatever reason is
-returned (A2: a hard-braking / FCW approach used to hide it); it holds until
-the stop (standstill resolution).
+returned (A2: a hard-braking / FCW approach used to hide it), and it RELEASES once no lead is still closing within the
+imminent test + HANDBACK_RELEASE_MARGIN for LATCH_RELEASE s (A1: a lead that drove off used to leave openpilot engaged,
+frozen, never handing back) - then the handback completes as if the lead had never been there.
 Standstill resolution (Task 13 A1): openpilot never holds a manual at a stop. If the car has stood still for
 STANDSTILL_RESOLVE seconds while urgent, the handback goes ahead anyway — the braking side ramps to 0 over the ramp
 time and openpilot disengages; the driver / Auto Brake Hold / hill-hold hold the car, as after any handback. If the car
@@ -68,6 +69,7 @@ STANDSTILL_SPEED = 0.1         # m/s: below this the car is stopped (standstill 
 STANDSTILL_MOVING = 0.5        # m/s: moving again above this -> urgency counts again
 STANDSTILL_RESOLVE = 0.5       # s stopped while urgent -> hand back anyway (never hold a manual at a stop)
 UNCONDITIONAL = ("fcw", "stock_aeb")  # never resolved at a stop (FCW can't fire at a standstill anyway: planner gate)
+LATCH_RELEASE = 0.5            # s with no lead still closing within reach before the imminent-lead latch lets go
 
 
 def _read_float(params: Params, key: str, default: float, lo: float, hi: float) -> float:
@@ -101,7 +103,8 @@ class LowSpeedHandback:
     self.urgent = False
     self.standstill_timer = 0.
     self.resolved = False  # standstill resolution: stopped while urgent -> hand back anyway
-    self.lead_latched = False  # an imminent lead was seen: braking stays until the stop (then standstill resolution)
+    self.lead_latched = False  # an imminent lead was seen: braking stays until it stops closing within reach
+    self.release_timer = 0.
 
   @property
   def reaction_time(self) -> float:
@@ -114,15 +117,21 @@ class LowSpeedHandback:
       self._requested = read_handback_params(self.params)
 
   def update(self, enabled: bool, v_ego: float, last_accel: float = 0., urgency: str | None = None,
-             force_decel: bool = False, lead_imminent: bool = False) -> None:
+             force_decel: bool = False, lead_imminent: bool = False, lead_holding: bool = False) -> None:
     """Call every controlsd frame. last_accel: the accel command sent on the previous frame; urgency: the handback's
     carve-out, braking_urgency.handback_urgency() (Task 13 A1) — not the broad braking_urgency() set.
-    lead_imminent: braking_urgency.handback_lead_imminent() - the latch's set condition, independent of which reason
-    `urgency` is (Task 14 A2)."""
+    lead_imminent / lead_holding: braking_urgency.handback_lead_imminent() / handback_lead_holding() - the latch's set
+    and keep conditions, independent of which reason `urgency` is (Task 14 A1/A2)."""
     if not self.available:
       return
+    if self.lead_latched:
+      self.release_timer = 0. if (lead_holding or lead_imminent) else self.release_timer + DT_CTRL
+      if self.release_timer >= LATCH_RELEASE - 1e-6:
+        self.lead_latched = False
+        self.release_timer = 0.
+        cloudlog.event("manual_low_speed_handback_latch_release", process=self.process, v_ego=v_ego)
     if self.lead_latched and urgency is None:
-      urgency = "lead_imminent"  # an imminent lead holds the braking until the stop: never hand back mid-stop
+      urgency = "lead_imminent"  # an imminent lead holds the braking while it is still closing within reach
     if self.active and urgency is not None and urgency not in UNCONDITIONAL and v_ego < STANDSTILL_SPEED:
       self.standstill_timer += DT_CTRL
       if self.standstill_timer >= STANDSTILL_RESOLVE - 1e-6 and not self.resolved:
@@ -163,6 +172,7 @@ class LowSpeedHandback:
     self.urgent = urgent and self.active
     if self.active and (lead_imminent or urgency == "lead_imminent") and not self.lead_latched:
       self.lead_latched = True
+      self.release_timer = 0.
 
   @property
   def ramp_done(self) -> bool:

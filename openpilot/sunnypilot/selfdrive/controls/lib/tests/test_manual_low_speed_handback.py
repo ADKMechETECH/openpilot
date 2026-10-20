@@ -583,8 +583,8 @@ class TestTask13HandbackCarveOut(OpenpilotTestCase):
 
 
 class TestTask14Latch(OpenpilotTestCase):
-  """Task 14 [W1-N2, N8]: the imminent-lead latch sets on the imminence test itself (not on whichever reason
-  handback_urgency returns). End states asserted, not just the ramp."""
+  """Task 14 [W1-N1..N4, N8]: the imminent-lead latch sets on the imminence test itself (not on whichever reason
+  handback_urgency returns), releases once no lead is still closing within reach,. End states asserted, not just the ramp."""
   def setUp(self):
     super().setUp()
     set_params(NonAdaptiveLongitudinal=False)
@@ -611,3 +611,50 @@ class TestTask14Latch(OpenpilotTestCase):
         self.assertLessEqual(start["speed"], 0.3, "the ramp must not start while still rolling toward the stopped car")
         self.assertFalse(sim.contact)
         self.assertFalse(log[-1]["enabled"], "then it hands back (standstill resolution), not a held stop")
+
+  def test_latched_lead_drives_off_hands_back(self):
+    # [W1-N1] latched on a slow, close lead; the lead then drives off while the car still rolls. Task 13: latched for
+    # good - engaged, frozen ramp, no throttle, never handing back (60 s). Now: release, then the normal handback.
+    from openpilot.sunnypilot.selfdrive.controls.lib.manual_low_speed_handback import LATCH_RELEASE
+    for v0, gap, v_lead, t_go in ((2.6, 5.0, 1.0, 0.8), (2.4, 4.5, 0.5, 1.0)):
+      with self.subTest(v0=v0, gap=gap, v_lead=v_lead):
+        CP, CP_SP = make_cp()
+        sim = Sim(CP, CP_SP, speed=v0, lead={"pos": gap, "v": v_lead, "decel": 0.})
+        log = sim.run(t_go)
+        self.assertTrue(log[-1]["hb_latched"], "precondition: latched on the imminent lead")
+        self.assertGreater(sim.speed, 0.5, "precondition: still rolling when the lead leaves")
+        sim.lead["decel"] = -1.5   # the lead pulls away
+        log = sim.run(60.)
+        release = first(log, lambda l: not l["hb_latched"])
+        off = first(log, lambda l: not l["enabled"])
+        self.assertIsNotNone(release, "the latch must release")
+        self.assertIsNotNone(off, "the handback must complete")
+        self.assertLessEqual((off - release) * DT_CTRL, DEFAULT_RAMP_TIME + DISENGAGE_MARGIN + 2 * DT_CTRL,
+                             "completes within ramp + margin of the release")
+        self.assertFalse(any(l["enabled"] for l in log[off:]), "end state: handed back for the rest of the run")
+        self.assertGreaterEqual(release * DT_CTRL, LATCH_RELEASE - DT_CTRL, "debounced")
+        self.assertFalse(sim.contact)
+
+  def test_latch_open_loop(self):
+    # the latch alone: set by the imminence test with FCW as the returned reason; held while a lead is closing within
+    # reach; released LATCH_RELEASE after it isn't; then ramp + margin -> disengage
+    from openpilot.sunnypilot.selfdrive.controls.lib.manual_low_speed_handback import LATCH_RELEASE
+    CP, _ = make_cp()
+    hb = LowSpeedHandback(CP, Params())
+    hb.update(True, 2.0, -1.0, "fcw", lead_imminent=True, lead_holding=True)
+    self.assertTrue(hb.active and hb.lead_latched and hb.urgent)
+    for _ in range(round(30. / DT_CTRL)):   # still closing within reach: held, however long
+      hb.update(True, 1.5, -1.0, None, lead_imminent=False, lead_holding=True)
+    self.assertTrue(hb.urgent and not hb.ramp_done)
+    n = 0
+    while not hb.disengage_due:
+      hb.update(True, 1.5, -0.5, None, lead_imminent=False, lead_holding=False)
+      n += 1
+      self.assertLess(n, 500)
+    self.assertAlmostEqual(n * DT_CTRL, LATCH_RELEASE + DEFAULT_RAMP_TIME + DISENGAGE_MARGIN, delta=3 * DT_CTRL)
+    # a momentary gap in "holding" (radar chatter) doesn't release it
+    hb2 = LowSpeedHandback(CP, Params())
+    hb2.update(True, 2.0, -1.0, None, lead_imminent=True, lead_holding=True)
+    for i in range(round(5. / DT_CTRL)):
+      hb2.update(True, 1.5, -1.0, None, lead_holding=(i % 20 != 0))
+    self.assertTrue(hb2.lead_latched)
