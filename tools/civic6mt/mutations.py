@@ -15,6 +15,7 @@ EV = ["openpilot/sunnypilot/selfdrive/car/tests/test_clutch_gate_events.py"]
 ODBC = ["opendbc_repo/opendbc/car/honda/tests/test_manual_carstate.py"]
 CSIG = [f"{T}/test_task13_clutch_signal.py"]
 TRIP = [f"{T}/test_rule5.py::TestRule5Tripwire"]
+LATCH = [f"{T}/test_manual_low_speed_handback.py::TestTask14Latch"]
 
 
 def m(mid, finding, file, old, new, tests):
@@ -165,4 +166,8 @@ MUTATIONS = [
   m("t13_c2_tripwire_nsb_gate", "T13 C2 review2 N4", f"{SP}/controlsd_ext.py",
     "    if self.urgency is not None:\n      self.no_service_brake_pulse.floor = None\n      return accel_limits\n",
     "    self.no_service_brake_pulse.floor = self.no_service_brake_pulse.floor  # urgency\n", TRIP),
+  # --- Task 14 (handback latch) ------------------------------------------------------------------------------------
+  m("t14_a2_latch_from_reason_only", "T14 A2 W1-N2", f"{SP}/lib/manual_low_speed_handback.py",
+    "    if self.active and (lead_imminent or urgency == \"lead_imminent\") and not self.lead_latched:",
+    "    if self.active and urgency == \"lead_imminent\" and not self.lead_latched:", LATCH),
 ]

@@ -20,7 +20,8 @@ from openpilot.sunnypilot import PARAMS_UPDATE_PERIOD
 from openpilot.sunnypilot.livedelay.helpers import get_lat_delay
 from openpilot.sunnypilot.modeld_v2.modeld_base import ModelStateBase
 from openpilot.sunnypilot.selfdrive.controls.lib.blinker_pause_lateral import BlinkerPauseLateral
-from openpilot.sunnypilot.selfdrive.controls.lib.braking_urgency import controls_urgency, force_decel_from, handback_urgency
+from openpilot.sunnypilot.selfdrive.controls.lib.braking_urgency import controls_urgency, force_decel_from, \
+  handback_lead_imminent, handback_urgency
 from openpilot.sunnypilot.selfdrive.controls.lib.clutch_reengage import TakeoverRamp, takeover_seed
 from openpilot.sunnypilot.selfdrive.controls.lib.clutch_shift_gate import ClutchShiftGate
 from openpilot.sunnypilot.selfdrive.controls.lib.engine_brake_preferred import EngineBrakePreferred
@@ -168,10 +169,16 @@ class ControlsExt(ModelStateBase):
   def update_low_speed_handback(self, enabled: bool, v_ego: float, last_accel: float, sm: messaging.SubMaster) -> bool:
     """Manual transmission: returns True once the low-speed handback ramp is done (longitudinal must stop). Rule 5,
     narrowed (Task 13 A1): it doesn't complete while handback_urgency() (FCW, stock AEB, a hard request, invalid inputs,
-    an imminent lead) holds — until the car has stood still a moment; forceDecel blocks / aborts it."""
+    an imminent lead) holds — until the car has stood still a moment; forceDecel blocks / aborts it. Task 14 A2: the lead
+    latch's set test runs on its own."""
     hb = self.low_speed_handback
-    urgency = handback_urgency(self.urgency, sm['radarState'], v_ego, hb.reaction_time) if hb.available else None
-    hb.update(enabled, v_ego, last_accel, urgency, force_decel_from(sm))
+    imminent = False
+    urgency = None
+    if hb.available:
+      radar, reaction = sm['radarState'], hb.reaction_time
+      urgency = handback_urgency(self.urgency, radar, v_ego, reaction)
+      imminent = handback_lead_imminent(radar, v_ego, reaction)
+    hb.update(enabled, v_ego, last_accel, urgency, force_decel_from(sm), imminent)
     return self.low_speed_handback.ramp_done
 
   def lead_visible(self, sm: messaging.SubMaster) -> bool:

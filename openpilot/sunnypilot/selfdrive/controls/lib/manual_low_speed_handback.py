@@ -28,8 +28,10 @@ ordinary approach to slow or stopped traffic hands back at the handback speed ex
 only when it is imminent: a driver who brakes at a moderate 2 m/s^2 only after the ramp, the margin and a 1.5 s
 reaction could not stop 2 m short of it. While that holds, the braking side stays at the incoming limit and the ramp
 clock stops (the car may brake to a stop); the handback finishes, re-seeded from the current command, once it clears.
-An imminent lead latches until the stop (as openpilot brakes, the lead soon stops looking imminent — handing back then
-would leave the car rolling a few metres behind a stopped car).
+An imminent lead latches (as openpilot brakes, the lead soon stops looking imminent — handing back then would leave the
+car rolling a few metres behind a stopped car). Task 14: the latch SETS on the imminence test itself, whatever reason is
+returned (A2: a hard-braking / FCW approach used to hide it); it holds until
+the stop (standstill resolution).
 Standstill resolution (Task 13 A1): openpilot never holds a manual at a stop. If the car has stood still for
 STANDSTILL_RESOLVE seconds while urgent, the handback goes ahead anyway — the braking side ramps to 0 over the ramp
 time and openpilot disengages; the driver / Auto Brake Hold / hill-hold hold the car, as after any handback. If the car
@@ -112,9 +114,11 @@ class LowSpeedHandback:
       self._requested = read_handback_params(self.params)
 
   def update(self, enabled: bool, v_ego: float, last_accel: float = 0., urgency: str | None = None,
-             force_decel: bool = False) -> None:
+             force_decel: bool = False, lead_imminent: bool = False) -> None:
     """Call every controlsd frame. last_accel: the accel command sent on the previous frame; urgency: the handback's
-    carve-out, braking_urgency.handback_urgency() (Task 13 A1) — not the broad braking_urgency() set."""
+    carve-out, braking_urgency.handback_urgency() (Task 13 A1) — not the broad braking_urgency() set.
+    lead_imminent: braking_urgency.handback_lead_imminent() - the latch's set condition, independent of which reason
+    `urgency` is (Task 14 A2)."""
     if not self.available:
       return
     if self.lead_latched and urgency is None:
@@ -157,7 +161,7 @@ class LowSpeedHandback:
         self.accel_start = last_accel
       self.timer += DT_CTRL
     self.urgent = urgent and self.active
-    if self.active and urgency == "lead_imminent":
+    if self.active and (lead_imminent or urgency == "lead_imminent") and not self.lead_latched:
       self.lead_latched = True
 
   @property

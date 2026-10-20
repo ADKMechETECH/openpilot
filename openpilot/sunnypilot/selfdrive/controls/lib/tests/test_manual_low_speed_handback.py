@@ -171,7 +171,8 @@ class Sim:
            "long_active": self.long_active, "state": self.long_state, "handback": self.ext.low_speed_handback.active,
            "events": set(events.names), "allow_brake": self.plan.allowBrake, "fcw": self.plan.fcw, "limits": limits,
            "events_sp": set(events_sp.names), "alert": self.AM.current_alert, "urgency": self.ext.urgency,
-           "hb_urgent": self.ext.low_speed_handback.urgent,
+           "hb_urgent": self.ext.low_speed_handback.urgent, "hb_timer": self.ext.low_speed_handback.timer,
+           "hb_latched": self.ext.low_speed_handback.lead_latched,
            "gap": (self.lead["pos"] - self.distance) if self.lead else None,
            "alert_types": list(self.state.current_alert_types), "collision": self.planner.collision_hold > 0.}
     self.frame += 1
@@ -579,3 +580,34 @@ class TestTask13HandbackCarveOut(OpenpilotTestCase):
       self.assertIsNone(handback_urgency(reason, radar, v, r), reason)
     radar.leadOne = lead(4., -v, 0.)
     self.assertEqual(handback_urgency(None, radar, v, r), "lead_imminent")
+
+
+class TestTask14Latch(OpenpilotTestCase):
+  """Task 14 [W1-N2, N8]: the imminent-lead latch sets on the imminence test itself (not on whichever reason
+  handback_urgency returns). End states asserted, not just the ramp."""
+  def setUp(self):
+    super().setUp()
+    set_params(NonAdaptiveLongitudinal=False)
+
+  def _ramp_start(self, log):
+    i = first(log, lambda l: l["handback"] and l["hb_timer"] > 0.)
+    return None if i is None else log[i]
+
+  def test_hard_braking_approach_latches_and_holds_to_the_stop(self):
+    # [W1-N2] FCW (the broad reason, returned first) held while the car is above v_off, approaching a stopped car that
+    # is imminent at the handback speed. Task 13: no latch (FCW hid lead_imminent); when FCW cleared at 0.6-1.0 m/s the
+    # instantaneous test was already clear and the ramp ran a few metres behind the stopped car (one run: contact).
+    for v0, gap, v_off in ((3.0, 7.0, 0.8), (3.5, 8.0, 1.0), (2.8, 6.5, 0.6)):
+      with self.subTest(v0=v0, gap=gap, v_off=v_off):
+        CP, CP_SP = make_cp()
+        sim = Sim(CP, CP_SP, speed=v0, lead={"pos": gap, "v": 0., "decel": 0.})
+        log = []
+        for _ in range(round(10. / DT_CTRL)):
+          sim.fcw = sim.speed > v_off
+          log.append(sim.step())
+        self.assertTrue(any(l["fcw"] and l["hb_latched"] for l in log), "the latch sets while FCW is the reason")
+        start = self._ramp_start(log)
+        self.assertIsNotNone(start)
+        self.assertLessEqual(start["speed"], 0.3, "the ramp must not start while still rolling toward the stopped car")
+        self.assertFalse(sim.contact)
+        self.assertFalse(log[-1]["enabled"], "then it hands back (standstill resolution), not a held stop")

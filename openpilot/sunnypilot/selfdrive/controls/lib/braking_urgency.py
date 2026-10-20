@@ -88,8 +88,9 @@ def collision_threat(lead, v_ego: float) -> str | None:
 
 
 def handback_lead_reason(lead, v_ego: float, reaction: float) -> str | None:
-  """'lead_imminent' if a driver braking at HANDBACK_DRIVER_DECEL after `reaction` s could not stop HANDBACK_MARGIN short
-  of this lead: with the lead holding its speed (closing kinematics), or braking to a stop at its current decel."""
+  """'lead_imminent' if a driver braking at HANDBACK_DRIVER_DECEL after `reaction` s could not stop HANDBACK_MARGIN
+  short of this lead: with the lead holding its speed (closing kinematics), or braking to a stop at its current
+  decel."""
   if not lead.present:
     return None
   room = lead.dRel - HANDBACK_MARGIN
@@ -104,17 +105,20 @@ def handback_lead_reason(lead, v_ego: float, reaction: float) -> str | None:
   return None
 
 
+def handback_lead_imminent(radar, v_ego: float, reaction: float) -> bool:
+  """Task 14 A2: the imminent-lead test on its own, whatever reason handback_urgency() returns (FCW / hard_decel used to
+  hide it, so the latch never set during a hard-braking approach)."""
+  return any(handback_lead_reason(lead, v_ego, reaction) is not None for lead in (radar.leadOne, radar.leadTwo))
+
+
 def handback_urgency(urgency: str | None, radar, v_ego: float, reaction: float) -> str | None:
   """The handback's carve-out (Task 13 A1), from this frame's braking_urgency() reason: the non-lead reasons in
-  HANDBACK_REASONS pass through; "stopping" and the broad lead reasons do not; an imminent lead (handback_lead_reason)
-  always counts. forceDecel is in the set, but the handback aborts on it before it looks at urgency."""
+  HANDBACK_REASONS pass through (and take precedence, so FCW / stock AEB keep their unconditional handling); "stopping"
+  and the broad lead reasons do not; an imminent lead always counts. forceDecel is in the set, but the handback aborts
+  on it before it looks at urgency. The latch uses handback_lead_imminent() separately (Task 14 A2)."""
   if urgency in HANDBACK_REASONS:
     return urgency
-  for lead in (radar.leadOne, radar.leadTwo):
-    reason = handback_lead_reason(lead, v_ego, reaction)
-    if reason is not None:
-      return reason
-  return None
+  return "lead_imminent" if handback_lead_imminent(radar, v_ego, reaction) else None
 
 
 def braking_urgency(*, plan_ok: bool, radar_ok: bool, force_decel: bool, fcw: bool, stock_aeb: bool, should_stop: bool,
