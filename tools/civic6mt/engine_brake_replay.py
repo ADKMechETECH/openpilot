@@ -80,12 +80,15 @@ cfg = next(c for c in CONFIGS if c.proc_name == "controlsd")
 cfg = dataclasses.replace(cfg, pubs=cfg.pubs + ["radarState", "carStateSP"])
 
 
-def run_controlsd(msgs, on):
-  out = replay_process(cfg, msgs, custom_params={"EngineBrakePreferred": True} if on else None, disable_progress=True)
+def run_controlsd(msgs, on, coast_target=None):
+  params = {"EngineBrakePreferred": True} if on else {}
+  if coast_target is not None:
+    params["EngineBrakeCoastTarget"] = coast_target
+  out = replay_process(cfg, msgs, custom_params=params or None, disable_progress=True)
   return [m.carControl for m in out if m.which() == "carControl"]
 
 
-base, off, on = run_controlsd(base_msgs, False), run_controlsd(rpm_msgs, False), run_controlsd(rpm_msgs, True)
+base, off = run_controlsd(base_msgs, False), run_controlsd(rpm_msgs, False)
 same_off = [a.actuators.accel for a in base] == [a.actuators.accel for a in off]
 print(f"controlsd: RPM injection, toggle OFF: {'identical' if same_off else 'DIFFERS'} ({len(off)} frames)")
 ok &= same_off
@@ -104,7 +107,7 @@ for m in rpm_msgs:
     plans.append(ctx[0])
     radars.append(ctx[1])
     states.append(ctx[2])
-n = min(len(on), len(plans))
+n = min(len(off), len(plans))
 
 
 def urgent(i):
@@ -118,18 +121,22 @@ def urgent(i):
     lead_urgent(radar.leadTwo, cs.vEgo, DEFAULT_LEAD_TTC, DEFAULT_LEAD_CLOSING)
 
 
-clamped = [i for i in range(n) if on[i].longActive and on[i].actuators.accel == DEFAULT_COAST_TARGET and
-           plans[i] is not None and plans[i].aTarget < 0.]
-diff = [i for i in range(n) if on[i].actuators.accel != off[i].actuators.accel]
-neg_off = [i for i in range(n) if off[i].longActive and off[i].actuators.accel < 0.]
-bad = [i for i in clamped if any(urgent(j) for j in range(max(i - 2, 0), min(i + 3, n)))]
-first_diff_is_clamp = not diff or diff[0] in clamped
-print(f"controlsd ON: long-active frames {sum(c.longActive for c in on)}, OFF brake-range frames {len(neg_off)}, " +
-      f"clamped frames {len(clamped)}, differing frames {len(diff)}")
-print(f"  first difference is a clamp: {first_diff_is_clamp}; clamped frames during urgency: {len(bad)}")
-print(f"  min accel OFF {min(c.actuators.accel for c in off):.2f}, ON {min(c.actuators.accel for c in on):.2f}; " +
-      f"gears seen {sorted(Counter(gear_for(s.vEgo) for s in states if s).items())}")
-ok &= first_diff_is_clamp and not bad
+# Task 16: the default coast target is -0.2 (Stage 2 C2), which this segment's gentle trims rarely go below, so the same
+# check also runs at 0.0 (the Task 6 setting) - that run must clamp something, or the proof would be vacuous
+for target, label, must_clamp in ((DEFAULT_COAST_TARGET, f"default {DEFAULT_COAST_TARGET:+.1f}", False), (0.0, "target 0.0", True)):
+  on = run_controlsd(rpm_msgs, True, None if target == DEFAULT_COAST_TARGET else target)
+  clamped = [i for i in range(n) if on[i].longActive and on[i].actuators.accel == target and
+             plans[i] is not None and plans[i].aTarget < target]
+  diff = [i for i in range(n) if on[i].actuators.accel != off[i].actuators.accel]
+  neg_off = [i for i in range(n) if off[i].longActive and off[i].actuators.accel < 0.]
+  bad = [i for i in clamped if any(urgent(j) for j in range(max(i - 2, 0), min(i + 3, n)))]
+  first_diff_is_clamp = not diff or diff[0] in clamped
+  print(f"controlsd ON ({label}): long-active frames {sum(c.longActive for c in on)}, OFF brake-range frames {len(neg_off)}, " +
+        f"clamped frames {len(clamped)}, differing frames {len(diff)}")
+  print(f"  first difference is a clamp: {first_diff_is_clamp}; clamped frames during urgency: {len(bad)}")
+  print(f"  min accel OFF {min(c.actuators.accel for c in off):.2f}, ON {min(c.actuators.accel for c in on):.2f}; " +
+        f"gears seen {sorted(Counter(gear_for(s.vEgo) for s in states if s).items())}")
+  ok &= first_diff_is_clamp and not bad and (len(clamped) > 0 or not must_clamp)
 
 # --- plannerd --------------------------------------------------------------------------------------------------------
 pcfg = next(c for c in CONFIGS if c.proc_name == "plannerd")
