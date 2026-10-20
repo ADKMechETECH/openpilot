@@ -64,7 +64,10 @@ LongCtrlState = structs.CarControl.Actuators.LongControlState
 # TODO(on-car): tune all of these by feel — and road-validate the lead-approach hand-off with wide margin first.
 DEFAULT_HARD_FLOOR = -1.5          # m/s^2: demand steeper than this always goes to the brakes
 HARD_FLOOR_RANGE = (-2.0, -0.3)
-DEFAULT_COAST_TARGET = 0.0         # m/s^2: lowest command while suppressing (small negative = less "freewheel" feel)
+# Stage 2 C2 (2026-10-20, on-car): ACCEL_COMMAND 0 holds ~zero axle torque (the car rolls, NO engine braking); a small
+# negative closes the throttle (fuel cut: engine braking, -0.17 gave -0.38 in 3rd); the brakes join only past the gear's
+# engine braking (~-0.5 in 3rd). So the coast target that actually engine-brakes is a small negative, not 0.
+DEFAULT_COAST_TARGET = -0.2        # m/s^2: lowest command while suppressing - closed throttle, still short of the brakes
 COAST_TARGET_RANGE = (-0.3, 0.0)
 DEFAULT_LEAD_TTC = 6.0             # s
 LEAD_TTC_RANGE = (3.0, 15.0)
