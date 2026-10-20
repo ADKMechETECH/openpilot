@@ -815,7 +815,7 @@ console fixed, and found the Task 13 imminent-lead latch defective both ways). F
 **Task 15 — first pass from Stage 1 on-car data** (brief: the owner's Task 15 message, 2026-10-20; data:
 `docs/stage1-findings-2026-10-20.md`, route `00000002--6c1a3bb7d4`). Goal: the fork ready for Stage 2 (op-long ON, every
 custom feature OFF). opendbc `ec94b772a` (1), `d5af6598b` (2), `0ca828dde` (3); feature `dc4d4eec2` (schema + bump),
-`2729be830` (4), `83f8e6173` (tools). Every custom toggle still defaults OFF; non-adaptive untouched (Stage 4).
+`2729be830` (4), `83f8e6173` (tools), `34604c568` (docs). **Not pushed** (owner to OK); nothing flashed. Every custom toggle still defaults OFF; non-adaptive untouched (Stage 4).
 - **1 RPM source (blocker):** every Bosch-radarless manual reads `POWERTRAIN_DATA.ENGINE_RPM` (0x17C) — `ENGINE_DATA`'s
   is 0 on the car. Before this the ratio lock, flare backstop, EBP and GearAware were inert on the car.
 - **2 clutch pedal switches:** `GAS_PEDAL_2` (0x130) `CLUTCH_PEDAL_UP` (bit 50, opens as the pedal starts to move) /
@@ -851,7 +851,16 @@ custom feature OFF). opendbc `ec94b772a` (1), `d5af6598b` (2), `0ca828dde` (3); 
   `b5_odbc_integra_rpm`) — **`mutate.py` 79/79**. Self-referenced replays, every toggle OFF, vs the Task 14 tip
   `4329294f2`: **controlsd, plannerd and card 0 diffs on all 4 CI segments** (card added because it runs the opendbc
   carstate; the CI segments are automatics, so the manual branch is exercised only by the route replay above).
-- **New on-car unknowns:** cold idle must stay < 1100 rpm (phantom guard); the pedal switch bits confirmed with the pedal
+- **Dev-test** (merge `f953cf842`, then `243747467` console follow-ups, `42fded473` S2 coverage test): S2's bite tracking started
+  only after the 0.15 s clutch-close debounce, so a drivetrain already locked when the gear is reported (this car) read
+  ≥ 0.16 s and **S2 could never pass against the new 0.15 s bound** — the lock is now tracked through the debounce
+  (mutation `t15_s2_bite_from_debounce_end`); profile rpm / clutch source labels; S2 / G4 text 0.15 s. Found by the
+  sweep: `d3_s2_no_coverage` had gone vacuous (its "good" gear's 0.3 s lag now fails the bound by itself) — re-pinned.
+  Dev-test CORE **1029 passed** (+ the same 1), WIDE 2209; `test_console_replay` 0 diffs controlsd + plannerd on all 4
+  segments (console armed, 0 errors), isolation OK, offline OK, equiv every armed test captured, render PASS;
+  **`mutate_devtest.py` 49/49**.
+- **New on-car unknowns:** cold idle must stay < 1100 rpm (phantom guard); S2 on the car reads the console's rpm-based
+  lock, which may lag the real bite by a frame or two (Stage 1 analysis: 0.00–0.07 s); the pedal switch bits confirmed with the pedal
   moved slowly in cabana; does a 0.15 s resume feel abrupt (the takeover ramp still rate-limits it); `NEUTRAL_CONFIRM`
   vs real slow releases (pedal up 0.5–1.2 s before GEAR_MT reported was seen — those go through coastTimeout briefly, no
   throttle either way).
