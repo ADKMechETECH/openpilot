@@ -15,6 +15,27 @@ EV = ["openpilot/sunnypilot/selfdrive/car/tests/test_clutch_gate_events.py"]
 ODBC = ["opendbc_repo/opendbc/car/honda/tests/test_manual_carstate.py"]
 CSIG = [f"{T}/test_task13_clutch_signal.py"]
 TRIP = [f"{T}/test_rule5.py::TestRule5Tripwire"]
+FORCED = [f"{T}/test_non_adaptive_longitudinal.py::TestForcedMpcPlanner"]   # no acados needed
+LATCH = [f"{T}/test_manual_low_speed_handback.py::TestTask14Latch"]
+
+
+# Task 14 A3: "FCW is never resolved at a stop" now has two layers (no standstill timer under FCW; FCW urgent even
+# when resolved). The old bug removes both, so this mutation does too - one contiguous block of update().
+_FCW_LAYERS = "\n".join([
+  '    if self.active and urgency is not None and urgency not in UNCONDITIONAL and v_ego < STANDSTILL_SPEED:',
+  '      self.standstill_timer += DT_CTRL',
+  '      if self.standstill_timer >= STANDSTILL_RESOLVE - 1e-6 and not self.resolved:',
+  '        self.resolved = True',
+  '        cloudlog.event("manual_low_speed_handback_standstill", process=self.process, urgency=urgency)',
+  '    else:',
+  '      self.standstill_timer = 0.',
+  '      if v_ego > STANDSTILL_MOVING:',
+  '        self.resolved = False',
+  '    # Task 14 A3: FCW / stock AEB are honored even after a standstill resolution (a creep after it must not ignore them)',
+  '    urgent = urgency is not None and (urgency in UNCONDITIONAL or not self.resolved)',
+])
+_FCW_NO_LAYERS = _FCW_LAYERS.replace("urgency not in UNCONDITIONAL and ", "").replace(
+  "(urgency in UNCONDITIONAL or not self.resolved)", "not self.resolved")
 
 
 def m(mid, finding, file, old, new, tests):
@@ -136,17 +157,17 @@ MUTATIONS = [
   m("b5_odbc_integra_rpm", "B5 B-M7", "opendbc_repo/opendbc/car/honda/carstate.py",
     "        if self.CP.carFingerprint == CAR.ACURA_INTEGRA:\n", "        if False:\n", ODBC),
   # --- Task 13 (verification fix-ups) -------------------------------------------------------------------------------
-  m("t13_a1_broad_urgency", "T13 A1 N-1", f"{SP}/controlsd_ext.py",
-    "urgency = handback_urgency(self.urgency, sm['radarState'], v_ego, hb.reaction_time) if hb.available else None",
-    "urgency = self.urgency if hb.available else None", HB + R5),
-  m("t13_a1_imminent_ignored", "T13 A1", f"{SP}/lib/braking_urgency.py",
-    "    reason = handback_lead_reason(lead, v_ego, reaction)\n", "    reason = None\n", HB + R5),
+  m("t13_a1_broad_urgency", "T13 A1 N-1", f"{SP}/controlsd_ext.py",   # re-pointed in Task 14 (the call moved)
+    "      urgency = handback_urgency(self.urgency, radar, v_ego, reaction, a_down)\n",
+    "      urgency = self.urgency\n", HB + R5),
+  m("t13_a1_imminent_ignored", "T13 A1", f"{SP}/lib/braking_urgency.py",   # re-pointed in Task 14 (own function now)
+    "  return any(handback_lead_reason(lead, v_ego, reaction, a_down) is not None for lead in (radar.leadOne, radar.leadTwo))",
+    "  return False", HB + R5),
   m("t13_a1_no_standstill_resolution", "T13 A1 review2 N6", f"{SP}/lib/manual_low_speed_handback.py",
     "        self.resolved = True\n", "        self.resolved = False\n", HB),
-  m("t13_a1_no_imminent_latch", "T13 A1", f"{SP}/lib/manual_low_speed_handback.py",
-    "      self.lead_latched = True\n", "      pass\n", HB),
-  m("t13_a1_fcw_resolved", "T13 A1", f"{SP}/lib/manual_low_speed_handback.py",
-    "urgency not in UNCONDITIONAL and ", "", HB),
+  m("t13_a1_no_imminent_latch", "T13 A1 / T14 W1-N8", f"{SP}/lib/manual_low_speed_handback.py",
+    "      self.lead_latched = True\n", "      pass\n", LATCH),
+  m("t13_a1_fcw_resolved", "T13 A1 / T14 A3 W1-N3", f"{SP}/lib/manual_low_speed_handback.py", _FCW_LAYERS, _FCW_NO_LAYERS, HB),
   m("t13_a2_margin_tied_to_ceiling", "T13 A2 N-2 N3", f"{SP}/lib/no_service_brake.py",
     '               MAX_OVERSPEED_MARGIN, ceiling - PULSE_MIN_BAND)', '               ceiling)', NSB),
   m("t13_a3_odbc_parser_counter", "T13 A3 review2 N2", "opendbc_repo/opendbc/car/honda/carstate.py",
@@ -165,4 +186,24 @@ MUTATIONS = [
   m("t13_c2_tripwire_nsb_gate", "T13 C2 review2 N4", f"{SP}/controlsd_ext.py",
     "    if self.urgency is not None:\n      self.no_service_brake_pulse.floor = None\n      return accel_limits\n",
     "    self.no_service_brake_pulse.floor = self.no_service_brake_pulse.floor  # urgency\n", TRIP),
+  # --- Task 14 (handback latch) ------------------------------------------------------------------------------------
+  m("t14_a1_latch_never_releases", "T14 A1 W1-N1", f"{SP}/lib/manual_low_speed_handback.py",
+    "      self.release_timer = 0. if (lead_holding or lead_imminent) else self.release_timer + DT_CTRL\n",
+    "      self.release_timer = 0.\n", LATCH),
+  m("t14_a1_release_on_any_gap", "T14 A1", f"{SP}/lib/manual_low_speed_handback.py",
+    "LATCH_RELEASE = 0.5 ", "LATCH_RELEASE = 0.0 ", LATCH),
+  m("t14_a2_latch_from_reason_only", "T14 A2 W1-N2", f"{SP}/lib/manual_low_speed_handback.py",
+    "    if self.active and (lead_imminent or urgency == \"lead_imminent\") and not self.lead_latched:",
+    "    if self.active and urgency == \"lead_imminent\" and not self.lead_latched:", LATCH),
+  m("t14_a3_fcw_resolved_away", "T14 A3 W1-N3", f"{SP}/lib/manual_low_speed_handback.py",
+    "    urgent = urgency is not None and (urgency in UNCONDITIONAL or not self.resolved)",
+    "    urgent = urgency is not None and not self.resolved", LATCH),
+  m("t14_a4_grade_ignored", "T14 A4 W1-N4", f"{SP}/lib/braking_urgency.py",
+    "  return max(-G * math.sin(pitch), 0.)\n", "  return 0.\n", LATCH),
+  m("t14_a4_uphill_relaxes", "T14 A4", f"{SP}/lib/braking_urgency.py",
+    "  return max(-G * math.sin(pitch), 0.)\n", "  return -G * math.sin(pitch)\n", LATCH),
+  m("t14_b1_no_threat_forced", "T14 B1 W2", f"{SP}/lib/longitudinal_planner.py",
+    "      reason = reason or collision_threat(lead, v_ego)", "      reason = reason", FORCED),
+  m("t14_b1_no_cruise_reseed_forced", "T14 B1 W2", "openpilot/selfdrive/controls/lib/longitudinal_planner.py",
+    "      self.a_cruise = min(self.a_cruise, float(self.output_a_target))", "      pass", FORCED),
 ]

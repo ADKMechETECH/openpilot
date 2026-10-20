@@ -54,6 +54,9 @@ HANDBACK_REASONS = ("invalid_plan", "invalid_radar", "force_decel", "fcw", "stoc
 HANDBACK_DRIVER_REACTION = 1.5       # s: from the handback prompt to the driver braking (on top of ramp + margin)
 HANDBACK_DRIVER_DECEL = 2.0          # m/s^2: a moderate driver stop
 HANDBACK_MARGIN = 2.0                # m: the driver's stop must end at least this far short of the lead
+HANDBACK_MIN_DECEL = 0.3             # m/s^2: a grade that leaves the driver less than this can't be planned on -> imminent
+HANDBACK_RELEASE_MARGIN = 2.0        # m: Task 14 A1 - a latched lead stays "holding" until it is this much past imminent
+G = 9.81
 
 
 def lead_reason(lead, v_ego: float, ttc_limit: float = LEAD_TTC, closing_limit: float = LEAD_CLOSING) -> str | None:
@@ -87,34 +90,63 @@ def collision_threat(lead, v_ego: float) -> str | None:
   return reason if reason in COLLISION_REASONS else None
 
 
-def handback_lead_reason(lead, v_ego: float, reaction: float) -> str | None:
-  """'lead_imminent' if a driver braking at HANDBACK_DRIVER_DECEL after `reaction` s could not stop HANDBACK_MARGIN short
-  of this lead: with the lead holding its speed (closing kinematics), or braking to a stop at its current decel."""
+def grade_accel(pitch: float | None) -> float:
+  """m/s^2 gravity adds along the road going DOWNHILL (>= 0); uphill and an unknown pitch count as level (Task 14 A4:
+  never less conservative than the flat-road test)."""
+  if pitch is None or not math.isfinite(pitch):
+    return 0.
+  return max(-G * math.sin(pitch), 0.)
+
+
+def _stop_distance(v: float, reaction: float, a_down: float) -> float:
+  """Distance a driver needs from speed v: `reaction` s with no brake (gravity a_down adds speed), then braking at
+  HANDBACK_DRIVER_DECEL less the grade. inf if the grade leaves less than HANDBACK_MIN_DECEL."""
+  decel = HANDBACK_DRIVER_DECEL - a_down
+  if decel < HANDBACK_MIN_DECEL:
+    return math.inf
+  v_r = v + a_down * reaction
+  return v * reaction + 0.5 * a_down * reaction ** 2 + v_r ** 2 / (2. * decel)
+
+
+def handback_lead_reason(lead, v_ego: float, reaction: float, a_down: float = 0., extra: float = 0.) -> str | None:
+  """'lead_imminent' if a driver braking at HANDBACK_DRIVER_DECEL after `reaction` s could not stop HANDBACK_MARGIN
+  (+ extra) short of this lead: with the lead holding its speed (closing kinematics), or braking to a stop at its current
+  decel. a_down: grade_accel() - a downhill adds speed during the reaction and takes away braking (Task 14 A4)."""
   if not lead.present:
     return None
-  room = lead.dRel - HANDBACK_MARGIN
+  room = lead.dRel - HANDBACK_MARGIN - extra
   closing = -lead.vRel
-  if closing > 0. and closing * reaction + closing ** 2 / (2. * HANDBACK_DRIVER_DECEL) > room:
+  if closing > 0. and _stop_distance(closing, reaction, a_down) > room:
     return "lead_imminent"
   if lead.aLeadK < -0.1:
     lead_stop = max(lead.vLead, 0.) ** 2 / (2. * -lead.aLeadK)
-    v = max(v_ego, 0.)
-    if v * reaction + v ** 2 / (2. * HANDBACK_DRIVER_DECEL) > room + lead_stop:
+    if _stop_distance(max(v_ego, 0.), reaction, a_down) > room + lead_stop:
       return "lead_imminent"
   return None
 
 
-def handback_urgency(urgency: str | None, radar, v_ego: float, reaction: float) -> str | None:
+def handback_lead_imminent(radar, v_ego: float, reaction: float, a_down: float = 0.) -> bool:
+  """Task 14 A2: the imminent-lead test on its own, whatever reason handback_urgency() returns (FCW / hard_decel used to
+  hide it, so the latch never set during a hard-braking approach)."""
+  return any(handback_lead_reason(lead, v_ego, reaction, a_down) is not None for lead in (radar.leadOne, radar.leadTwo))
+
+
+def handback_lead_holding(radar, v_ego: float, reaction: float, a_down: float = 0.) -> bool:
+  """Task 14 A1: a latched lead still holds the braking while some lead is closing (vRel < 0) and still within the
+  imminent test plus HANDBACK_RELEASE_MARGIN. No lead, or every lead opening or well clear -> release (debounced)."""
+  return any(lead.present and lead.vRel < 0. and
+             handback_lead_reason(lead, v_ego, reaction, a_down, HANDBACK_RELEASE_MARGIN) is not None
+             for lead in (radar.leadOne, radar.leadTwo))
+
+
+def handback_urgency(urgency: str | None, radar, v_ego: float, reaction: float, a_down: float = 0.) -> str | None:
   """The handback's carve-out (Task 13 A1), from this frame's braking_urgency() reason: the non-lead reasons in
-  HANDBACK_REASONS pass through; "stopping" and the broad lead reasons do not; an imminent lead (handback_lead_reason)
-  always counts. forceDecel is in the set, but the handback aborts on it before it looks at urgency."""
+  HANDBACK_REASONS pass through (and take precedence, so FCW / stock AEB keep their unconditional handling); "stopping"
+  and the broad lead reasons do not; an imminent lead always counts. forceDecel is in the set, but the handback aborts
+  on it before it looks at urgency. The latch uses handback_lead_imminent() separately (Task 14 A2)."""
   if urgency in HANDBACK_REASONS:
     return urgency
-  for lead in (radar.leadOne, radar.leadTwo):
-    reason = handback_lead_reason(lead, v_ego, reaction)
-    if reason is not None:
-      return reason
-  return None
+  return "lead_imminent" if handback_lead_imminent(radar, v_ego, reaction, a_down) else None
 
 
 def braking_urgency(*, plan_ok: bool, radar_ok: bool, force_decel: bool, fcw: bool, stock_aeb: bool, should_stop: bool,

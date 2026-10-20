@@ -122,7 +122,7 @@ def controls_frame(ext, sm, loc, enabled, gas_pressed, last_cmd_hint=None):
   """One controlsd frame (the same sequence controlsd.state_control runs). Returns (long_active, limits, cmd)."""
   CS = sm['carState']
   ext.update_sp_state(sm, enabled, loc.long_control_state != LongCtrlState.off)
-  handback_done = ext.update_low_speed_handback(enabled, CS.vEgo, loc.last_output_accel, sm)
+  handback_done = ext.update_low_speed_handback(enabled, CS.vEgo, loc.last_output_accel, sm, sm.get('_pose'))
   # stock gasPressedOverride; selfdrived drops it only while the gate says it is paused and the clutch is in (A2.6)
   gate = ext.clutch_shift_gate
   override = gas_pressed and not (gate.paused and CS.deprecated.clutchPressed)

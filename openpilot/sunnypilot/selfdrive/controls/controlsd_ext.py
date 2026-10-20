@@ -20,7 +20,8 @@ from openpilot.sunnypilot import PARAMS_UPDATE_PERIOD
 from openpilot.sunnypilot.livedelay.helpers import get_lat_delay
 from openpilot.sunnypilot.modeld_v2.modeld_base import ModelStateBase
 from openpilot.sunnypilot.selfdrive.controls.lib.blinker_pause_lateral import BlinkerPauseLateral
-from openpilot.sunnypilot.selfdrive.controls.lib.braking_urgency import controls_urgency, force_decel_from, handback_urgency
+from openpilot.sunnypilot.selfdrive.controls.lib.braking_urgency import controls_urgency, force_decel_from, grade_accel, \
+  handback_lead_holding, handback_lead_imminent, handback_urgency
 from openpilot.sunnypilot.selfdrive.controls.lib.clutch_reengage import TakeoverRamp, takeover_seed
 from openpilot.sunnypilot.selfdrive.controls.lib.clutch_shift_gate import ClutchShiftGate
 from openpilot.sunnypilot.selfdrive.controls.lib.engine_brake_preferred import EngineBrakePreferred
@@ -165,13 +166,23 @@ class ControlsExt(ModelStateBase):
     self.clutch_takeover.post_update(LoC.last_output_accel, pid.p + pid.i + pid.d + pid.f,
                                      LoC.long_control_state == LongCtrlState.pid)
 
-  def update_low_speed_handback(self, enabled: bool, v_ego: float, last_accel: float, sm: messaging.SubMaster) -> bool:
+  def update_low_speed_handback(self, enabled: bool, v_ego: float, last_accel: float, sm: messaging.SubMaster,
+                                calibrated_pose=None) -> bool:
     """Manual transmission: returns True once the low-speed handback ramp is done (longitudinal must stop). Rule 5,
     narrowed (Task 13 A1): it doesn't complete while handback_urgency() (FCW, stock AEB, a hard request, invalid inputs,
-    an imminent lead) holds — until the car has stood still a moment; forceDecel blocks / aborts it."""
+    an imminent lead) holds — until the car has stood still a moment; forceDecel blocks / aborts it. Task 14: the lead
+    latch's set / keep tests run on their own (A1/A2), and a downhill grade from the calibrated pose counts (A4; no
+    pose = level)."""
     hb = self.low_speed_handback
-    urgency = handback_urgency(self.urgency, sm['radarState'], v_ego, hb.reaction_time) if hb.available else None
-    hb.update(enabled, v_ego, last_accel, urgency, force_decel_from(sm))
+    imminent = holding = False
+    urgency = None
+    if hb.available:
+      pitch = float(calibrated_pose.orientation.xyz[1]) if calibrated_pose is not None else None
+      radar, a_down, reaction = sm['radarState'], grade_accel(pitch), hb.reaction_time
+      urgency = handback_urgency(self.urgency, radar, v_ego, reaction, a_down)
+      imminent = handback_lead_imminent(radar, v_ego, reaction, a_down)
+      holding = handback_lead_holding(radar, v_ego, reaction, a_down)
+    hb.update(enabled, v_ego, last_accel, urgency, force_decel_from(sm), imminent, holding)
     return self.low_speed_handback.ramp_done
 
   def lead_visible(self, sm: messaging.SubMaster) -> bool:
