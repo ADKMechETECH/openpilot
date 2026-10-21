@@ -4,7 +4,8 @@ Copyright (c) 2021-, Haibin Wen, sunnypilot, and a number of other contributors.
 This file is part of sunnypilot and is licensed under the MIT License.
 See the LICENSE.md file in the root directory for more details.
 
-EngineBrakePreferred (manual transmission + openpilot longitudinal, toggle default OFF) - Task 17: a per-gear clamp on
+EngineBrakePreferred (manual transmission + openpilot longitudinal, toggle default ON since Stage 3 - owner, 2026-10-21;
+read with its registered default: Params.get_bool ignores it) - Task 17: a per-gear clamp on
 openpilot's decel request so the car slows on engine braking and the service brakes stay off.
 
 Why a clamp works on this car (Stage 2, on-car): the radarless Civic sends one ACCEL_COMMAND and the car splits it
@@ -139,7 +140,7 @@ class EngineBrakePreferred:
 
   def read_params(self) -> None:
     # 1 Hz; applied by _latch() only while openpilot is disengaged (Task 12 B3)
-    self._enabled_requested = self.available and self.params.get_bool("EngineBrakePreferred")
+    self._enabled_requested = self.available and bool(self.params.get("EngineBrakePreferred", return_default=True))
     self._requested = (_read_float(self.params, "EngineBrakeHardFloor", DEFAULT_HARD_FLOOR, HARD_FLOOR_RANGE),
                        _read_float(self.params, "EngineBrakeLeadTtc", DEFAULT_LEAD_TTC, LEAD_TTC_RANGE),
                        _read_float(self.params, "EngineBrakeLeadClosingSpeed", DEFAULT_LEAD_CLOSING, LEAD_CLOSING_RANGE))

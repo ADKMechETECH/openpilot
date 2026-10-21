@@ -53,10 +53,13 @@ def make_cp(transmission=TransmissionType.manual, op_long=True):
 
 
 def set_params(**params):
-  """Every feature param back to its default, then these (blocking writes: read back right away)."""
+  """Every feature param back to its default, then these (blocking writes: read back right away). EngineBrakePreferred
+  defaults ON on the car since Stage 3; the closed-loop tests keep their OFF baseline unless they ask for it (its own
+  tests cover the default)."""
   p = Params()
   for k in FEATURE_KEYS:
     p.remove(k)
+  params = {"EngineBrakePreferred": False, **params}
   for k, v in params.items():
     if isinstance(v, bool):
       p.put_bool(k, v, block=True)
