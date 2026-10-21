@@ -120,26 +120,37 @@ session page, the phase view and a detail page render pixel-identical. The Civic
 
 ## Using it — the session view (default)
 
-Settings → **dev test** opens the **session home**: a 4×3 grid of the ~30-minute sessions (table below) plus the
-**Calibration** card. Each tile is **done ✓** (green), **current** (blue; the recommended next one has a white ring) or
-**locked** (grey, "after 3, Cal" — the sessions recommended first; a hint, never a block), with "n/m tests" and any
-FAIL count. The Calibration card shows background progress (E0c/E0a/E0b fill on any drive with background telemetry
-on). **phases ▶** (top right) opens the original phase-grouped list (secondary view; background-telemetry and
-start-press settings live there).
+Task 16 rebuilt these screens for the car: they are the **stock mici settings components** (a sideways-scrolling row of
+`Big*` cards, the same 402×180 cards as stock's settings), **one thing per card**, white text on dark, 44 px titles and
+32 px values (nothing under 24 px). Swipe sideways through a page's cards; the back gesture returns, as in stock settings.
+Read it at a stoplight, not while driving.
 
-Tap a tile → its **session page** (swipe left/right, or tap the ◀ ▶ edges; dots at the bottom right show where you are):
-- header: `id • name`, the one-line objective, and **ready ✓** / **set N** (required toggles vs their current values);
-- **switches**: one chip per required toggle (green ● = as required, orange ● = needs setting; a tap sets it to the
-  requirement — a tap on a satisfied one does nothing, Task 12 D2; writes only while disengaged and stopped) plus
-  offered extras in grey (sessions 5/6: `ClutchReengageSmart` and the gas-release
-  hint for the A/B; session 8: the NSB floor 0.3 ↔ 0.0 and the overspeed mode `maintain` ↔ `pulse`, Task 11). `op long` has a grey outline: shown, not settable here;
-- the session's **tests as pills** (✓ PASS/CAPTURED, × FAIL, • partial, ○ armed, ● recording; `?` = optional); the
-  selected one shows its progress and live conditions (failing first), **ARM / ARMED**, and **how ▶** (the per-test
-  detail page from Task 7);
-- the **start-button chip**: "ARM G2, then triple-press gap to START" → "armed • …" → **STOP • ● REC** + progress while
-  capturing → PAUSED / PASS / FAIL / CAPTURED.
-- Taps fire only when press and release land on the same target with < 20 px of movement (a dismiss swipe that ends on
-  a switch does nothing — Task 12 D-09).
+Settings → **dev test** opens the **session home**:
+- a status card (live / offroad, the armed test and its state, the next recommended session);
+- **one card per session** (the ~30-minute sessions, table below, and **Calibration**): `id  name`, then `✓ done`,
+  `n/m tests` (+ FAIL count), `after 3, Cal` (the sessions recommended first; a hint, never a block) or the calibration
+  progress; the recommended next one starts with `▶ next`;
+- **phase view** — the original phase-grouped list (background telemetry and start-press settings live there).
+
+Tap a session card → its **session page**:
+- the session's name and its toggle status in words (`✓ toggles ready` / `2 toggles to set`; onroad: "set them
+  disengaged + stopped"), then the **objective** on its own card;
+- **one card per toggle**: the name, the stock on/off switch (a value card for multi-value settings: tap = the next
+  choice — session 8's NSB floor 0.3 ↔ 0.0 and overspeed mode `maintain` ↔ `pulse`), and a line saying the current
+  value and what the session needs (`now ON • needs OFF`, `now OFF • ✓ ready`, `now OFF • optional`). A tap sets it
+  to the requirement; a tap on a satisfied one does nothing and says `already set` (Task 12 D2); writes happen only
+  while disengaged and stopped — a refusal is shown on the card. `op long` is shown but not settable here (Developer);
+  the switch always shows the Param's real value;
+- **one card per test**: `id  name` and its state (`✓ PASS`, `× FAIL`, `✓ captured`, `• partial n/m`, `○ armed`,
+  `● REC` + progress). Tap → the **test detail page**: the ARM switch, live status, conditions (failing first), result,
+  the start button, prereqs, how-to cards and the pass rule;
+- the **start-button status** in large monospace: "ARM G2, then triple-press gap to START" → "armed • …" →
+  **STOP • ● REC** + progress while capturing → PAUSED / PASS / FAIL / CAPTURED.
+- A swipe never fires a card (stock's scroller invalidates touches while it scrolls — Task 12 D-09, now checked on the
+  real widgets with a real swipe).
+
+The **onroad chip** (only while a test is armed and the daemon is live; never over an alert) is 28 px monospace on an
+opaque background.
 
 ## Using it — the phase view (Task 7, secondary)
 
