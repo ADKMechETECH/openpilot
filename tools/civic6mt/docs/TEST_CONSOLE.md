@@ -394,7 +394,7 @@ The plan re-cut into ~30-minute outings. Every test belongs to exactly one sessi
 | E0c | Cal | telemetry ★ | Accel sweep per gear | manual transmission, speed > 3 m/s, on the gas, clutch engaged, accelerating | 3 s per gear 1, 2, 3, 4, 5, 6 | every gear's measured ratio within 3% of the seed (inference tolerance is 8%) | S1, S3 |
 | E0a | Cal | telemetry ★ | Downhill coast per gear | manual transmission, speed > 3 m/s, in gear (rpm/speed), clutch engaged, off gas & brake, op not on long, downhill | 6 s per gear 1, 2, 3, 4, 5, 6 | characterization (CAPTURED) | E0c |
 | E0b | Cal | telemetry ★ | Flat coast per gear | manual transmission, speed > 3 m/s, in gear (rpm/speed), clutch engaged, off gas & brake, op not on long, flat road | 10 s per gear 1, 2, 3, 4, 5, 6 | characterization (CAPTURED) | E0c |
-| E1 | 10 | feature | EBP gentle trims | manual transmission, op long (alpha) on, op long active, no lead, flat road + EngineBrakePreferred ON | 5 ebp suppress | no capacity release; command held at the coast target; no service-brake decel | E0a, E0b, E0c, C2 |
+| E1 | 10 | feature | EBP set-speed drops | manual transmission, op long (alpha) on, op long active, no lead, flat road + EngineBrakePreferred ON | 5 ebp suppress | command never below the clamp floor; no service-brake decel (vs the fit coast model) | E0a, E0b, E0c, C2 |
 | E2 | 10 | feature (optional) | EBP lead hand-off | manual transmission, op long (alpha) on, op long active, lead car | 2 lead approach (ebp_on ≥ 1, ebp_off ≥ 1) | min gap with EBP ON >= OFF - 2 m, and no FCW | E1 |
 | E3 | 10 | feature | EBP downhill | manual transmission, op long (alpha) on, op long active, downhill + EngineBrakePreferred ON | 30 s | never more than 3.6 m/s over set speed | E1 |
 
