@@ -883,8 +883,16 @@ the target), `f5dc25587` (HUD contrast); dev-test merges `2c87fe532`, `215d315e3
   join past the gear's engine braking (≈ −0.5 in 3rd), which is EBP's separate credited estimate. EBP stays default OFF.
   Tests that hardcoded 0.0 now key on `DEFAULT_COAST_TARGET`; the two backstop tests (capacity, lockout) pin 0.0, their
   worst case; `engine_brake_replay` runs EBP at the default (0 clamps on its segment) AND at 0.0 (must clamp: 53, as in
-  Task 6). **Known gap:** the EBP test plant is force-additive (cmd + engine braking) — Stage 2 showed small negatives
-  don't add brakes; rework the plant before Stage 4 EBP validation. Found by the full CORE run (the Rule 5 matrix's EBP
+  Task 6). **The EBP test plant now models the measured car** (feature `b10830106`): 0 = zero torque (road load only), a
+  negative request = closed throttle, the car slows at the stronger of true engine braking and the request, brakes only for
+  the difference; the old force-additive model is kept as a labelled synthetic car for the two backstop-mechanism tests.
+  **FINDING: on the measured car EngineBrakePreferred changes no outcome** — brake use, speed and gap identical ON vs OFF in
+  every scenario, even with a 5x over-estimated model — because the car already engine-brakes first (the Task 6 caveat
+  "if the car already uses fuel-cut for small negative requests, the feature is unnecessary", now confirmed). Pinned by
+  `TestMeasuredCarFinding`. Recommendation: drop session 10 from Stage 4 (owner decision). **Implication for NSB (not
+  changed):** downhill, any negative request the engine can't meet is braked to (the VSA tracks it), so floor −0.3 brakes
+  gently on a steep grade, and floor 0.0 is a zero-torque roll (no engine braking) — Stage 4 NSB should be tested with
+  that in mind. Found by the full CORE run (the Rule 5 matrix's EBP
   state and the B3 lockout test failed their preconditions); the 36 EBP / R5 / latch / Task 16 mutations re-run clean.
 - **3 UI (dev-test):** the session view was custom-drawn (14–28 px text, 24–42 px targets). Rebuilt on the **stock mici
   settings components** (NavScroller + `Big*` cards at stock size 402×180, 44 px titles / 32 px values, nothing < 24 px,
