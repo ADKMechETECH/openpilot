@@ -267,11 +267,27 @@ class TestTable(OpenpilotTestCase):
 
 
 class TestEngineBrakePreferred(OpenpilotTestCase):
-  def test_defaults_off(self):
+  def test_defaults_on(self):
+    # Stage 3 (owner, 2026-10-21): ON by default. Params.get_bool ignores registered defaults, so an unset key must
+    # still latch the clamp on - in controlsd and in plannerd's learner (which logs engaged frames only while it's on)
     p = Params()
     p.remove("EngineBrakePreferred")
-    self.assertFalse(p.get_bool("EngineBrakePreferred"))
+    self.assertTrue(p.get("EngineBrakePreferred", return_default=True))
     self.assertAlmostEqual(p.get("EngineBrakeHardFloor", return_default=True), -1.5)
+    CP = make_cp()[0]
+    ebp = EngineBrakePreferred(CP, p)
+    ebp.read_params()
+    ebp._latch()
+    self.assertTrue(ebp.enabled, "an unset key latches ON")
+    p.put_bool("EngineBrakePreferred", False, block=True)
+    ebp.read_params()
+    ebp._latch()
+    self.assertFalse(ebp.enabled, "OFF when the driver turns it off")
+    automatic = EngineBrakePreferred(make_cp(TransmissionType.automatic)[0], p)
+    p.remove("EngineBrakePreferred")
+    automatic.read_params()
+    automatic._latch()
+    self.assertFalse(automatic.enabled, "default ON is still manual-only")
 
   def test_set_speed_drop_slows_on_engine_braking_without_brakes(self):
     for non_adaptive in (False, True):

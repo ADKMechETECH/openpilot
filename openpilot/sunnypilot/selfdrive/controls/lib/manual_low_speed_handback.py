@@ -21,6 +21,14 @@ Sequence, once engaged and below the handback speed (latched until disengaged):
 Engaging below the handback speed (+ hysteresis) is refused (stock belowEngageSpeed, with manualLowSpeedNoEntry as the
 text), so openpilot can't be engaged at a standstill and pull away.
 
+Gear-aware speed (Stage 3, 2026-10-21): the handback speed is max(ManualLowSpeedHandbackSpeed, GEAR_HANDBACK_SPEED of
+the gear GEAR_MT reports) - so the engine is still at ~1000 rpm when it is handed back. On the car, 5 mph in 2nd is
+575 rpm: below idle, the ECU's idle control pushed +150 Nm of axle torque (creep) until the clutch went in. 1st and
+4th-6th use the setting (owner decision: in 4th-6th the driver clutches or downshifts long before 5 mph; a ~1000 rpm
+point there would be 18-26 mph and take lateral with it on Honda). Clutch in / neutral / no clutch signal = the setting.
+Applied before the latch only; once handing back, a gear change doesn't undo it. The published handbackSpeed is the
+current gear-aware value, so selfdrived's engage refusal and its "Drive Above N mph" text follow the gear too.
+
 Emergency braking is never handed back (Task 12 A3, Rule 5), but only a real emergency counts (Task 13 A1): the
 handback uses braking_urgency.handback_urgency(), not the broad reason set. FCW, stock AEB, a hard (< -1.5 m/s^2) plan
 request and invalid/stale inputs pass through; the plan's "stopping" request and the broad lead reasons do not — an
@@ -60,6 +68,8 @@ TransmissionType = car.CarParams.TransmissionType
 # TODO(on-car): tune the handback speed and ramp for a smooth, non-jerky handoff in 1st gear. 5 mph in 1st is near
 #  idle, so the right point may be a bit higher; hand off while still rolling in gear at a reasonable RPM.
 DEFAULT_HANDBACK_SPEED = 2.24  # m/s (~5 mph)
+# m/s per GEAR_MT gear: ~1000 rpm (Stage 1 ratios: 2nd 257.7, 3rd 168.7 rpm per m/s). Not in the table = the setting.
+GEAR_HANDBACK_SPEED = {2: 8.7 * 0.44704, 3: 13.0 * 0.44704}
 MIN_HANDBACK_SPEED = 1.5       # m/s, floor so the param can't be tuned into braking to a stop / launching
 MAX_HANDBACK_SPEED = 8.0       # m/s
 DEFAULT_RAMP_TIME = 0.5        # s, accel command ramps to 0 over this before the disengage
@@ -106,6 +116,7 @@ class LowSpeedHandback:
     self.resolved = False  # standstill resolution: stopped while urgent -> hand back anyway
     self.lead_latched = False  # an imminent lead was seen: braking stays until it stops closing within reach
     self.release_timer = 0.
+    self.gear = 0              # GEAR_MT this frame (0 = clutch in / neutral / unknown)
 
   @property
   def reaction_time(self) -> float:
@@ -117,14 +128,21 @@ class LowSpeedHandback:
     if self.available:
       self._requested = read_handback_params(self.params)
 
+  @property
+  def threshold(self) -> float:
+    """The handback speed now: the setting, raised to the current gear's GEAR_HANDBACK_SPEED."""
+    return max(self.speed, GEAR_HANDBACK_SPEED.get(self.gear, 0.))
+
   def update(self, enabled: bool, v_ego: float, last_accel: float = 0., urgency: str | None = None,
-             force_decel: bool = False, lead_imminent: bool = False, lead_holding: bool = False) -> None:
+             force_decel: bool = False, lead_imminent: bool = False, lead_holding: bool = False, gear: int = 0) -> None:
     """Call every controlsd frame. last_accel: the accel command sent on the previous frame; urgency: the handback's
     carve-out, braking_urgency.handback_urgency() (Task 13 A1) — not the broad braking_urgency() set.
     lead_imminent / lead_holding: braking_urgency.handback_lead_imminent() / handback_lead_holding() - the latch's set
-    and keep conditions, independent of which reason `urgency` is (Task 14 A1/A2)."""
+    and keep conditions, independent of which reason `urgency` is (Task 14 A1/A2). gear: GEAR_MT while the clutch
+    signal is alive, else 0."""
     if not self.available:
       return
+    self.gear = gear
     if self.lead_latched:
       self.release_timer = 0. if (lead_holding or lead_imminent) else self.release_timer + DT_CTRL
       if self.release_timer >= LATCH_RELEASE - 1e-6:
@@ -158,12 +176,12 @@ class LowSpeedHandback:
       self.resolved = False
       self.lead_latched = False
     elif not self.active:
-      if v_ego < self.speed:
+      if v_ego < self.threshold:
         self.active = True
         self.timer = 0.
         self.accel_start = last_accel
         cloudlog.event("manual_low_speed_handback", process=self.process, v_ego=v_ego, accel=last_accel,
-                       speed=self.speed, ramp=self.ramp_time, urgency=urgency or "")
+                       speed=self.threshold, gear=self.gear, ramp=self.ramp_time, urgency=urgency or "")
     elif urgent:
       pass                  # the ramp clock stops: braking stays available
     else:
@@ -197,4 +215,4 @@ class LowSpeedHandback:
     return lo, max(hi, lo)
 
   def below_engage_speed(self, v_ego: float) -> bool:
-    return self.available and v_ego < self.speed + ENGAGE_HYSTERESIS
+    return self.available and v_ego < self.threshold + ENGAGE_HYSTERESIS

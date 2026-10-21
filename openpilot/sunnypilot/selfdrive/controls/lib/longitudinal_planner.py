@@ -104,7 +104,7 @@ class LongitudinalPlannerSP:
     if self.eb_learner.available:
       engaged = self._engaged(sm)
       if self._non_adaptive_frame % int(1. / DT_MDL) == 0:
-        self._ebp_requested = self._params.get_bool("EngineBrakePreferred")
+        self._ebp_requested = bool(self._params.get("EngineBrakePreferred", return_default=True))   # default ON
       if not engaged:
         self._ebp_on = self._ebp_requested   # latched like controlsd's (Task 12 B3)
       cc = sm['carControl']

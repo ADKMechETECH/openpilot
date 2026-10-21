@@ -27,7 +27,8 @@ from openpilot.selfdrive.selfdrived.state import StateMachine
 from openpilot.sunnypilot.selfdrive.car.car_specific import CarSpecificEventsSP
 from openpilot.sunnypilot.selfdrive.controls.lib.manual_low_speed_handback import LowSpeedHandback, \
   DEFAULT_HANDBACK_SPEED, DEFAULT_RAMP_TIME, DISENGAGE_MARGIN, MIN_HANDBACK_SPEED, ENGAGE_HYSTERESIS, STANDSTILL_RESOLVE, \
-  STANDSTILL_SPEED
+  STANDSTILL_SPEED, GEAR_HANDBACK_SPEED
+from openpilot.sunnypilot.selfdrive.controls.lib.engine_brake_model import engine_rpm_at
 from openpilot.sunnypilot.selfdrive.controls.lib.braking_urgency import HANDBACK_DRIVER_DECEL, HANDBACK_DRIVER_REACTION, \
   HANDBACK_MARGIN, handback_lead_reason, handback_urgency
 from openpilot.sunnypilot.selfdrive.controls.lib.tests.manual_sim import Ext, FakeSM, Pose, make_cp, set_params
@@ -52,6 +53,9 @@ class Sim:
     self.enabled = True
     self.AM = AlertManager()
     self.speed, self.a_ego, self.distance, self.grade, self.v_set = speed, 0., 0., grade, v_set
+    # GEAR_MT the car reports: 1st by default - its gear-aware handback speed IS the setting, so the generic handback
+    # tests keep their 2.24 m/s; TestGearAwareSpeed sets 2nd / 3rd (Stage 3)
+    self.gear = 1
     # ONE way to put a slope on the car: `grade` is a raw additive accel (m/s^2, the older uphill tests), `pitch` (rad,
     # negative = downhill) is the calibrated pose controlsd sees AND gravity on the car (Task 14 A4). Both at once would
     # count the slope twice.
@@ -104,7 +108,7 @@ class Sim:
     dm = messaging.new_message('driverMonitoringState').driverMonitoringState
     dm.noResponseForceDecel = self.force_decel
     sp = messaging.new_message('carStateSP').carStateSP
-    sp.clutchSignalValid, sp.gearRaw = True, 2
+    sp.clutchSignalValid, sp.gearRaw = True, self.gear
     return {'carState': CS, 'radarState': self._radar(), 'selfdriveState': sd, 'driverMonitoringState': dm, 'carStateSP': sp}
 
   def _plan(self, CS):
@@ -739,3 +743,74 @@ class TestSimPlant(OpenpilotTestCase):
     for _ in range(50):
       r = sim.step()
       self.assertAlmostEqual(sim.a_ego - r["cmd"], 0., places=9)
+
+
+class TestGearAwareSpeed(OpenpilotTestCase):
+  """Stage 3 (2026-10-21): the handback speed follows GEAR_MT so the engine is still ~1000 rpm when it is handed back
+  (5 mph in 2nd was 575 rpm on the car: the ECU's idle control pushed +150 Nm until the clutch went in)."""
+  def setUp(self):
+    set_params()
+
+  def _handback_speed(self, gear, start=8.):
+    CP, CP_SP = make_cp()
+    sim = Sim(CP, CP_SP, speed=start, grade=-3.0, v_set=10.)   # up a hill openpilot can't hold: slows past every threshold
+    sim.gear = gear
+    log = sim.run(12.)
+    k = first(log, lambda l: l["handback"])
+    self.assertIsNotNone(k, f"gear {gear}: no handback")
+    return log[k - 1]["v_in"], log[k]["v_in"], sim    # the speed controlsd saw that frame
+
+  def test_threshold_per_gear(self):
+    expect = {0: DEFAULT_HANDBACK_SPEED, 1: DEFAULT_HANDBACK_SPEED, 2: 8.7 * 0.44704, 3: 13.0 * 0.44704,
+              4: DEFAULT_HANDBACK_SPEED, 5: DEFAULT_HANDBACK_SPEED, 6: DEFAULT_HANDBACK_SPEED}
+    for gear, v in expect.items():
+      with self.subTest(gear=gear):
+        before, at, sim = self._handback_speed(gear)
+        self.assertGreaterEqual(before, v - 1e-6)
+        self.assertLess(at, v)
+        self.assertAlmostEqual(sim.ml.handbackSpeed, v, places=5, msg="published: the engage refusal follows it")
+    self.assertEqual(set(GEAR_HANDBACK_SPEED), {2, 3}, "1st and 4th-6th use the setting (owner, 2026-10-21)")
+    for g, v in GEAR_HANDBACK_SPEED.items():
+      self.assertAlmostEqual(engine_rpm_at(g, v), 1000., delta=30., msg=f"~1000 rpm in gear {g}")
+
+  def test_setting_above_the_gear_value_wins(self):
+    set_params(ManualLowSpeedHandbackSpeed=4.5)
+    before, at, _ = self._handback_speed(2, start=7.)
+    self.assertGreaterEqual(before, 4.5 - 1e-6)
+    self.assertLess(at, 4.5)
+
+  def test_no_clutch_signal_uses_the_setting(self):
+    CP, _ = make_cp()
+    hb = LowSpeedHandback(CP, Params())
+    hb.update(True, 3.0, gear=0)          # controlsd passes 0 without a live clutch signal
+    self.assertFalse(hb.active)
+    self.assertAlmostEqual(hb.threshold, DEFAULT_HANDBACK_SPEED)
+
+  def test_latched_handback_is_not_undone_by_a_gear_change(self):
+    CP, _ = make_cp()
+    hb = LowSpeedHandback(CP, Params())
+    hb.update(True, 3.5, gear=2)
+    self.assertTrue(hb.active)
+    for _ in range(10):
+      hb.update(True, 3.5, gear=0)        # clutch in
+    self.assertTrue(hb.active)
+
+  def test_engage_refused_below_the_gear_speed(self):
+    CP, CP_SP = make_cp()
+    v = GEAR_HANDBACK_SPEED[3] + ENGAGE_HYSTERESIS - 0.3      # above the setting + hysteresis, below 3rd's
+    sim = Sim(CP, CP_SP, speed=v, v_set=v)
+    sim.gear = 3
+    sim.state.state, sim.enabled = State.disabled, False
+    sim.run(0.2)
+    sim.enable_request = True
+    sim.step()
+    sim.enable_request = False
+    log = sim.run(0.5)
+    self.assertFalse(any(l["enabled"] for l in log), "engaging in 3rd below 13 mph + hysteresis is refused")
+    self.assertIn("manualLowSpeedNoEntry/noEntry", [l["alert"].alert_type for l in log if l["alert"].alert_type])
+    sim.gear = 4                                               # same speed in 4th: the setting -> engageable
+    sim.run(0.2)
+    sim.enable_request = True
+    sim.step()
+    sim.enable_request = False
+    self.assertTrue(sim.run(0.5)[-1]["enabled"])

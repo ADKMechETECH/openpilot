@@ -442,7 +442,7 @@ struct CarControlSP @0xa5cd762cd951a455 {
     handbackActive @9 :Bool;       # the low-speed handback ramp is running (prompt)
     handbackRampDone @10 :Bool;
     handbackDisengage @11 :Bool;   # selfdrived: disengage now (speedTooLow)
-    handbackSpeed @12 :Float32;    # latched handback threshold (selfdrived refuses engagement below it + hysteresis)
+    handbackSpeed @12 :Float32;    # handback threshold now: latched setting, raised per gear (selfdrived refuses engagement below it + hysteresis)
     handbackRamp @13 :Float32;     # latched
     handbackAvailable @14 :Bool;
     nsbEnabled @15 :Bool;          # latched (controlsd side)

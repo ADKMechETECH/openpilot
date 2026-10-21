@@ -152,7 +152,9 @@ class TestB3LatchOnEngagement(OpenpilotTestCase):
             "gaa": pl.gear_aware_accel.enabled, "pub_features": (sim.plan_sp.features.nonAdaptive, sim.plan_sp.features.gearAware),
             "gate": (ext.clutch_shift_gate.enabled, ext.clutch_shift_gate.gas_release_hint),
             "handback": (ext.low_speed_handback.speed, ext.low_speed_handback.ramp_time),
-            "pub_ml": (ml.gateEnabled, ml.ebpEnabled, ml.nsbEnabled, round(ml.handbackSpeed, 3), round(ml.handbackRamp, 3))}
+            # handbackSpeed is published gear-aware since Stage 3 (it follows GEAR_MT by design); the latched setting is
+            # "handback" above
+            "pub_ml": (ml.gateEnabled, ml.ebpEnabled, ml.nsbEnabled, round(ml.handbackRamp, 3))}
 
   def test_mid_engagement_changes_wait_for_disengage(self):
     sim = ManualCarSim(speed=15., gear=3, v_set=15., plant="closed", ClutchShiftGate=True)

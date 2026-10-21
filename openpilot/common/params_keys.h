@@ -388,7 +388,7 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"NoServiceBrakeOverspeedHardCeiling", {PERSISTENT | BACKUP, FLOAT, "6.7"}},
     {"ManualLowSpeedHandbackSpeed", {PERSISTENT | BACKUP, FLOAT, "2.24"}},
     {"ManualLowSpeedHandbackRamp", {PERSISTENT | BACKUP, FLOAT, "0.5"}},
-    {"EngineBrakePreferred", {PERSISTENT | BACKUP, BOOL, "0"}},
+    {"EngineBrakePreferred", {PERSISTENT | BACKUP, BOOL, "1"}},
     {"EngineBrakeHardFloor", {PERSISTENT | BACKUP, FLOAT, "-1.5"}},
     {"EngineBrakeLeadTtc", {PERSISTENT | BACKUP, FLOAT, "6.0"}},
     {"EngineBrakeLeadClosingSpeed", {PERSISTENT | BACKUP, FLOAT, "1.0"}},
