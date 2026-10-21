@@ -26,7 +26,7 @@ from openpilot.sunnypilot.selfdrive.test_console.profiles.civic_6mt import PROFI
 from openpilot.sunnypilot.selfdrive.test_console.profiles.civic_6mt.registry import PHASES, TESTS, TESTS_BY_ID
 from openpilot.sunnypilot.selfdrive.test_console.profiles.civic_6mt.tap import RawCanTap
 from openpilot.sunnypilot.selfdrive.test_console.registry import Kind
-from openpilot.sunnypilot.selfdrive.test_console.signals import SAMPLE_FIELDS, LogEventTap, Sample
+from openpilot.sunnypilot.selfdrive.test_console.signals import SAMPLE_FIELDS, LogEventTap, Sample, published_state
 from openpilot.sunnypilot.selfdrive.test_console.signals import SampleBuilder as _SampleBuilder
 from openpilot.sunnypilot.selfdrive.test_console.status_io import MARKERS_FILE, RESULTS_FILE, read_json
 from openpilot.sunnypilot.selfdrive.test_console.tests.sim import DT, Sim, feed
@@ -230,6 +230,26 @@ class TestButton(OpenpilotTestCase):
     b = StartButton("cancel", "short")
     self.assertFalse(b.differs("cancel", "short"), "no reconfigure loop on an unresolvable name")
     self.assertTrue(b.differs("lkas", "short"))
+
+
+class TestPublishedClampFloor(OpenpilotTestCase):
+  def test_ebp_floor_from_manual_longitudinal(self):
+    # Task 17: E1 judges the command against the clamp floor controlsd publishes - only while the clamp applies
+    cc_sp = messaging.new_message('carControlSP').carControlSP
+    ml = cc_sp.manualLongitudinal
+    ml.ebpEnabled, ml.ebpSuppressing, ml.ebpFloor = True, True, -0.38
+    s = Sample()
+    published_state(s, cc_sp, True, None, False)
+    self.assertTrue(s.ebp)
+    self.assertAlmostEqual(s.ebp_floor, -0.38, places=5)
+    ml.ebpSuppressing = False
+    s = Sample()
+    published_state(s, cc_sp, True, None, False)
+    self.assertFalse(s.ebp)
+    self.assertTrue(math.isnan(s.ebp_floor))
+    s = Sample()
+    published_state(s, cc_sp, False, None, False)   # stale / invalid message: nothing taken from it
+    self.assertTrue(math.isnan(s.ebp_floor))
 
 
 class TestLogTap(OpenpilotTestCase):
