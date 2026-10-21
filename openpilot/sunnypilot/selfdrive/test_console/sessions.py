@@ -24,6 +24,7 @@ CORE_MAX_ALLOW = frozenset({
   "NonAdaptiveLongitudinal", "NoServiceBrakeHold", "NoServiceBrakeDecelFloor", "NoServiceBrakeOverspeedBackstop",
   "NoServiceBrakeOverspeedMargin", "NoServiceBrakeOverspeedMode", "ClutchShiftGate", "ClutchShiftGateGasReleaseHint",
   "ClutchReengageSmart", "EngineBrakePreferred", "GearAwareAccel", "DisengageOnAccelerator",
+  "SetSpeedCoast", "CruiseAccelBoost",   # session 10 (owner, 2026-10-21)
 })
 # ...and, explicitly, never these (documentation + belt and braces against an edit of the set above)
 CORE_DENY = frozenset({OP_LONG_PARAM, "ExperimentalMode", "OpenpilotEnabledToggle", "LongitudinalPersonality",
@@ -59,7 +60,7 @@ SHORT = {OP_LONG_PARAM: "op long", "NonAdaptiveLongitudinal": "non-adaptive", "N
          "NoServiceBrakeOverspeedMargin": "margin", "NoServiceBrakeOverspeedMode": "mode",
          "ClutchShiftGate": "gate", "ClutchShiftGateGasReleaseHint": "gas hint",
          "ClutchReengageSmart": "smart", "EngineBrakePreferred": "EBP", "GearAwareAccel": "gear-aware",
-         "DisengageOnAccelerator": "DOA"}
+         "DisengageOnAccelerator": "DOA", "SetSpeedCoast": "coast to set", "CruiseAccelBoost": "accel boost"}
 
 
 def fmt_value(v) -> str:

@@ -74,19 +74,20 @@ BUTTONS = ButtonMap(
   allowed=("gapAdjustCruise", "accelCruise", "decelCruise", "lkas"),
   short={"gapAdjustCruise": "gap"},
   # the gap button: short (steps the distance; irrelevant in non-adaptive) or triple (three steps = back where it was,
-  # recommended); never long (a >= 0.5 s hold toggles Experimental mode)
+  # recommended); never long (a >= 0.5 s hold toggles NonAdaptive while disengaged - session 10 GapHoldNonAdaptive)
   modes={"gapAdjustCruise": ("triple", "short")},
   side_effect={"gapAdjustCruise": "gap press also steps the follow distance (triple = net 0)",
                "accelCruise": "press also raises the set speed", "decelCruise": "press also lowers the set speed",
                "lkas": "press also toggles lane keeping"},
   note="distance button: a short press also steps the following-distance personality on release; a >= 0.5 s hold " +
-       "toggles Experimental mode (sunnypilot's distance-button long press)",
+       "toggles non-adaptive cruise while disengaged (GapHoldNonAdaptive, default ON; OFF = sunnypilot's Experimental mode)",
 )
 
 # Feature Params the session UI may set on this car (Task 9 Part C + Task 11). Notably NOT AlphaLongitudinalEnabled.
 ALLOWLIST = ("NonAdaptiveLongitudinal", "NoServiceBrakeHold", "NoServiceBrakeDecelFloor", "NoServiceBrakeOverspeedBackstop",
              "NoServiceBrakeOverspeedMargin", "NoServiceBrakeOverspeedMode", "ClutchShiftGate", "ClutchShiftGateGasReleaseHint",
-             "ClutchReengageSmart", "EngineBrakePreferred", "GearAwareAccel", "DisengageOnAccelerator")
+             "ClutchReengageSmart", "EngineBrakePreferred", "GearAwareAccel", "DisengageOnAccelerator",
+             "SetSpeedCoast", "CruiseAccelBoost")   # session 10: offered on session 7
 
 # All Params a registry row may check. Read-only (1 Hz); the daemon never writes any of them.
 WATCHED_TOGGLES = ("NonAdaptiveLongitudinal", "ClutchShiftGate", "ClutchShiftGateGasReleaseHint", "DisengageOnAccelerator",

@@ -258,7 +258,8 @@ class TestUiWritePath(OpenpilotTestCase):
       "NonAdaptiveLongitudinal", "NoServiceBrakeHold", "NoServiceBrakeDecelFloor", "NoServiceBrakeOverspeedBackstop",
       "NoServiceBrakeOverspeedMargin", "ClutchShiftGate", "ClutchShiftGateGasReleaseHint", "ClutchReengageSmart",
       "EngineBrakePreferred", "GearAwareAccel", "DisengageOnAccelerator",
-      "NoServiceBrakeOverspeedMode"})  # + Task 11 (maintain / pulse A/B in session 8)
+      "NoServiceBrakeOverspeedMode",   # + Task 11 (maintain / pulse A/B in session 8)
+      "SetSpeedCoast", "CruiseAccelBoost"})   # + session 10 (owner, 2026-10-21; offered on session 7)
     self.assertEqual(UI_WRITABLE - set(UI_WRITABLE_TOGGLES), set(CONSOLE_PARAMS))
     self.assertTrue(all(k.startswith("TestConsole") for k in CONSOLE_PARAMS))
 

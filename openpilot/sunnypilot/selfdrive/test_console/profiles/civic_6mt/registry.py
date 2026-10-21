@@ -330,7 +330,9 @@ SESSIONS: tuple[Session, ...] = (
   Session("6", "Clutch feel", "Rev-match / heel-toe and engine-brake downshifts with the gate",
           GATE_REQ, ("G3", "G4"), prereqs=("5",), optional_toggles=GATE_AB),
   Session("7", "Non-adaptive", "Hold set speed, no braking for a slower lead; over set downhill",
-          OP_LONG + (("NonAdaptiveLongitudinal", True),), ("N1", "N2"), prereqs=("4",)),
+          OP_LONG + (("NonAdaptiveLongitudinal", True),), ("N1", "N2"), prereqs=("4",),
+          # session 10 (owner, 2026-10-21): offered here so they can be set in the car (any mode, not a test of their own)
+          optional_toggles=(("SetSpeedCoast", (False, True)), ("CruiseAccelBoost", (False, True)))),
   Session("8", "No-service-brake", "Coast over set speed downhill (floors 0.3 and 0.0), then the overspeed backstop",
           OP_LONG + (("NonAdaptiveLongitudinal", True), ("NoServiceBrakeHold", True),
                      ("NoServiceBrakeOverspeedBackstop", True)), ("NSB1", "NSB2"), prereqs=("7",),
