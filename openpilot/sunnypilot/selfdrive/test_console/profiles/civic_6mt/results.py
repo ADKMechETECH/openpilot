@@ -458,14 +458,14 @@ def r_ebp_trims(a: EpisodeAnalyzer):
     return None, ""
   fit = coast_fit(a.ctx)
   sent = [e.get("sent_min", math.nan) for e in a.episodes]
-  # Task 13 B1: the sent accel (raw tap) below the coast target is a brake request on the bus - a FAIL of its own
-  hard = [e for e in a.episodes if e["capacity"] or e["out_min"] < a.ctx.ebp_coast_target - 0.01 or
-          e.get("sent_min", math.nan) < a.ctx.ebp_coast_target - 0.01]
+  # Task 17: a command (or the sent accel, raw tap) below the clamp's published floor while it holds braking off is a
+  # fault of the clamp - a FAIL of its own; braking beyond coasting (the fit coast model) is judged below
+  hard = [e for e in a.episodes if e.get("under_floor", 0) > 0]
   # judged against the FIT coast model (the episode's gear); a gear without a fit -> unknown (provisional), not clean
   unknown = [e for e in a.episodes if fit is None or e.get("gear") not in fit]
   soft = [e for e in a.episodes if e not in unknown and e["excess_min"] - fit[e["gear"]] < -0.3]
-  detail = (f"{len(a.episodes) - len(hard) - len(soft)}/{len(a.episodes)} clean; capacity releases " +
-            f"{sum(e['capacity'] for e in a.episodes)}; reasons {','.join(str(e['reason']) for e in a.episodes[-3:])}; " +
+  detail = (f"{len(a.episodes) - len(hard) - len(soft)}/{len(a.episodes)} clean; below the clamp floor in {len(hard)}; " +
+            f"gears {','.join(str(e['gear']) for e in a.episodes[-5:])}; reasons {','.join(str(e['reason']) for e in a.episodes[-3:])}; " +
             f"min sent accel {_fmt(min(sent, default=math.nan))}, brake-assist seen {sum(e.get('assist', 0) for e in a.episodes)}x")
   if hard:
     return FAIL, detail

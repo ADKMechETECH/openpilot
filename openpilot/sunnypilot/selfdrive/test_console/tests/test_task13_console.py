@@ -141,11 +141,11 @@ class TestB1CoastFit(OpenpilotTestCase):
   def test_e1_sent_and_fit(self):
     def run(results, sent=0.0, gear=4):
       a = make_analyzer(TESTS_BY_ID["E1"], with_results(ctx(EngineBrakePreferred=True), results))
-      sim = Sim(long_active=True, gear_raw=gear, a_coast=SEED[gear], accel_sent=sent)
+      sim = Sim(long_active=True, gear_raw=gear, a_coast=SEED[gear], accel_sent=-0.35 if sent == 0.0 else sent)
       for _ in range(5):
-        sim.events = [("engine_brake_preferred", {"active": True, "gear": gear})]
-        samples = list(sim.run(2., accel_out=0.0, a_ego=SEED[gear] * TRUE_SCALE))
-        sim.events = [("engine_brake_preferred", {"active": False, "reason": "idle"})]
+        sim.events = [("engine_brake_clamp", {"binding": True, "gear": gear, "floor": -0.35})]
+        samples = list(sim.run(2., accel_out=-0.35, a_ego=SEED[gear] * TRUE_SCALE, ebp=True, ebp_floor=-0.35))
+        sim.events = [("engine_brake_clamp", {"binding": False, "gear": gear})]
         samples += sim.run(0.5)
         feed(a, samples)
       self.assertTrue(a.complete)
@@ -348,11 +348,11 @@ class TestC1PerGearFit(OpenpilotTestCase):
     for gear, want in ((4, PASS), (5, CAPTURED)):
       with self.subTest(e1_gear=gear):
         a = make_analyzer(TESTS_BY_ID["E1"], with_results(ctx(EngineBrakePreferred=True), results))
-        sim = Sim(long_active=True, gear_raw=gear, a_coast=SEED[gear], accel_sent=0.0)
+        sim = Sim(long_active=True, gear_raw=gear, a_coast=SEED[gear], accel_sent=-0.35)
         for _ in range(5):
-          sim.events = [("engine_brake_preferred", {"active": True, "gear": gear})]
-          samples = list(sim.run(2., accel_out=0.0, a_ego=SEED[gear] * TRUE_SCALE))
-          sim.events = [("engine_brake_preferred", {"active": False, "reason": "idle"})]
+          sim.events = [("engine_brake_clamp", {"binding": True, "gear": gear, "floor": -0.35})]
+          samples = list(sim.run(2., accel_out=-0.35, a_ego=SEED[gear] * TRUE_SCALE, ebp=True, ebp_floor=-0.35))
+          sim.events = [("engine_brake_clamp", {"binding": False, "gear": gear})]
           samples += sim.run(0.5)
           feed(a, samples)
         self.assertEqual(a.result()[0], want, a.result())

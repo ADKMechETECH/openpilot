@@ -23,8 +23,7 @@ V_CRUISE_UNSET_KPH = 250.     # carState.vCruise is km/h; 255 = unset
 
 # cloudlog events the console follows (emitted by the fork's feature modules; see CLAUDE.md)
 WATCHED_EVENTS = ("clutch_shift_gate", "engine_brake_preferred", "no_service_brake_backstop", "no_service_brake_pulse",
-                  "manual_low_speed_handback", "engine_brake_coast")
-EBP_CAPACITY_WARNING = "engine_brake_preferred: car not slowing"
+                  "manual_low_speed_handback", "engine_brake_coast", "engine_brake_clamp")
 HANDBACK_ALERT = "manualLowSpeedHandback"
 OVERSPEED_ALERT = "noServiceBrakeOverspeed"   # Task 11 pulse-mode escalation ("Overspeed: Take Over")
 # selfdriveState alert types that mean something went wrong with longitudinal/CAN during a capture
@@ -77,7 +76,8 @@ class Sample:
   collision: bool = False        # plannerd published: non-adaptive is braking for a collision threat (Task 12 A1)
   handback_active: bool = False  # controlsd published: the low-speed handback ramp is running
   latched: dict = field(default_factory=dict)   # Param -> the value the feature actually latched (published, Task 12 B3)
-  ebp: bool = False              # EngineBrakePreferred suppressing (last cloudlog state)
+  ebp: bool = False              # EngineBrakePreferred's clamp applies (published, else the last cloudlog state)
+  ebp_floor: float = NAN         # controlsd published: the clamp's floor while it applies (Task 17), else NaN
   alert: str = ""                # selfdriveState.alertType
   tx_blocked: int = 0            # pandaStates[0].safetyTxBlocked (cumulative)
   events: tuple = ()             # cloudlog events received this frame: ((name, payload dict), ...)
@@ -107,8 +107,6 @@ class LogEventTap:
 
   @staticmethod
   def parse(record: str) -> tuple[str, dict] | None:
-    if EBP_CAPACITY_WARNING in record:
-      return "ebp_capacity", {}
     if not any(name in record for name in WATCHED_EVENTS):
       return None
     try:
@@ -201,6 +199,7 @@ def published_state(s: Sample, cc_sp, cc_sp_ok: bool, plan_sp, plan_sp_ok: bool)
     s.gate = str(ml.gateState) if ml.gateEnabled else ""
     s.gate_paused, s.urgency, s.handback_active = bool(ml.gatePaused), str(ml.urgency), bool(ml.handbackActive)
     s.ebp = bool(ml.ebpSuppressing)
+    s.ebp_floor = float(ml.ebpFloor) if s.ebp else NAN
     s.latched.update({"ClutchShiftGate": bool(ml.gateEnabled), "ClutchReengageSmart": bool(ml.reengageSmart),
                       "EngineBrakePreferred": bool(ml.ebpEnabled)})
   if plan_sp is not None and plan_sp_ok:

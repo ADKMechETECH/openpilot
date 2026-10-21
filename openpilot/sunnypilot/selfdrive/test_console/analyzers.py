@@ -663,21 +663,25 @@ class BackstopDetector:
 
 
 class EbpSuppressDetector:
-  """EngineBrakePreferred suppression periods (cloudlog active=True .. active=False)."""
+  """EngineBrakePreferred (Task 17: the per-gear clamp) holding braking off: from a cloudlog engine_brake_clamp
+  binding=True (the plan wanted more decel than the floor) to binding=False / the clamp ending / long inactive. Per
+  episode: the gear, the floor, the lowest command (out and as sent) and how often it was below the published floor
+  (a fault: the clamp's floor is the lowest request allowed), the excess decel vs coasting (service brakes)."""
 
   def __init__(self, ctx: Context):
     self.ep: dict | None = None
 
   def feed(self, s: Sample) -> list[dict]:
     done = []
+    end = False
     for name, p in s.events:
-      if name == "engine_brake_preferred" and p.get("active") and self.ep is None:
-        self.ep = {"t0": s.t, "gear": p.get("gear"), "a_eb": p.get("a_eb"), "out_min": s.accel_out, "excess_min": math.inf,
-                   "capacity": False, "reason": None, "sent_min": math.inf, "assist": 0}
-      elif name == "engine_brake_preferred" and not p.get("active") and self.ep is not None:
-        self.ep["reason"] = p.get("reason")
-      elif name == "ebp_capacity" and self.ep is not None:
-        self.ep["capacity"] = True
+      if name == "engine_brake_clamp" and p.get("binding") and self.ep is None:
+        self.ep = {"t0": s.t, "gear": p.get("gear"), "floor": p.get("floor"), "out_min": s.accel_out,
+                   "excess_min": math.inf, "reason": None, "sent_min": math.inf, "assist": 0, "under_floor": 0}
+      elif self.ep is not None and ((name == "engine_brake_clamp" and not p.get("binding")) or
+                                    (name == "engine_brake_preferred" and not p.get("active"))):
+        self.ep["reason"] = p.get("reason", "released")
+        end = True
     ep = self.ep
     if ep is None:
       return done
@@ -686,10 +690,12 @@ class EbpSuppressDetector:
       ep["excess_min"] = min(ep["excess_min"], s.excess)
     if math.isfinite(s.accel_sent):   # what actually went on the bus, and the brake-request bit (Task 12 D3)
       ep["sent_min"] = min(ep["sent_min"], s.accel_sent)
+    if s.ebp and math.isfinite(s.ebp_floor) and not end:
+      below = s.accel_out < s.ebp_floor - 0.01 or (math.isfinite(s.accel_sent) and s.accel_sent < s.ebp_floor - 0.01)
+      ep["under_floor"] += int(below)
     ep["assist"] += s.brake_assist > 0
-    if ep["reason"] is not None or not s.long_active:
+    if end or not s.long_active:
       ep["dur"] = s.t - ep["t0"]
-      ep["capacity"] |= ep["reason"] == "capacity"
       self.ep = None
       done.append(ep)
     return done

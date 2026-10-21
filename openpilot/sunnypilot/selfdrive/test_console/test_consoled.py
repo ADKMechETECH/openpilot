@@ -51,7 +51,6 @@ def read_context(params: Params, ctx: Context) -> None:
   ctx.nsb_trigger, ctx.nsb_release, ctx.nsb_ceiling = pulse.trigger, pulse.release, pulse.ceiling
   ctx.nsb_pulse_decel, ctx.nsb_pulse_jerk = pulse.decel, pulse.jerk
   ctx.handback_ramp = float(params.get("ManualLowSpeedHandbackRamp", return_default=True))
-  ctx.ebp_coast_target = float(params.get("EngineBrakeCoastTarget", return_default=True))
 
 
 def guarded_step(guard: Guard, console: Console, site: str, fn) -> None:

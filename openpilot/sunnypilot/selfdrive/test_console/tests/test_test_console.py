@@ -242,10 +242,10 @@ class TestLogTap(OpenpilotTestCase):
     recs = [self._record({"event": "clutch_shift_gate", "state": "shifting", "prev": "idle"}),
             self._record({"event": "engine_brake_preferred", "active": True, "a_demand": -0.2}),
             self._record({"event": "something_else", "x": 1}),
-            self._record("engine_brake_preferred: car not slowing as estimated (gear 3); suppression off until re-engaged"),
+            self._record({"event": "engine_brake_clamp", "binding": True, "gear": 4, "floor": -0.38}),
             "not json clutch_shift_gate"]
     ev = tap.update(recs)
-    self.assertEqual([e[0] for e in ev], ["clutch_shift_gate", "engine_brake_preferred", "ebp_capacity"])
+    self.assertEqual([e[0] for e in ev], ["clutch_shift_gate", "engine_brake_preferred", "engine_brake_clamp"])
     self.assertEqual(tap.gate, "shifting")
     self.assertTrue(tap.ebp)
 
@@ -595,19 +595,20 @@ class TestOtherEpisodes(OpenpilotTestCase):
     b = make_analyzer(TESTS_BY_ID["E1"], ctx(EngineBrakePreferred=True))   # uncalibrated: provisional (Task 12 D3)
     a = make_analyzer(TESTS_BY_ID["E1"], calibrated(ctx(EngineBrakePreferred=True)))
     sim = Sim(long_active=True, a_coast=-0.4, accel_sent=0.0)
-    for _ in range(5):
-      sim.events = [("engine_brake_preferred", {"active": True, "gear": 4})]
-      samples = list(sim.run(2., accel_out=0.0, a_ego=-0.35))
-      sim.events = [("engine_brake_preferred", {"active": False, "reason": "idle"})]
-      samples += sim.run(0.5)
+    for _ in range(5):   # Task 17: an episode = the clamp holding braking off (engine_brake_clamp binding edges)
+      sim.events = [("engine_brake_clamp", {"binding": True, "gear": 4, "floor": -0.35})]
+      samples = list(sim.run(2., accel_out=-0.35, a_ego=-0.35, ebp=True, ebp_floor=-0.35))
+      sim.events = [("engine_brake_clamp", {"binding": False, "gear": 4})]
+      samples += sim.run(0.5, ebp=True, ebp_floor=-0.35)
       feed(a, samples)
       feed(b, samples)
     self.assertTrue(a.complete)
     self.assertEqual(a.result()[0], PASS, a.result())
     self.assertEqual(b.result()[0], CAPTURED, b.result())
-    sim.events = [("engine_brake_preferred", {"active": True, "gear": 4})]
-    feed(a, sim.run(1., accel_out=0.0))
-    sim.events = [("ebp_capacity", {}), ("engine_brake_preferred", {"active": False, "reason": "capacity"})]
+    # a command below the published floor while clamped: the clamp failed
+    sim.events = [("engine_brake_clamp", {"binding": True, "gear": 4, "floor": -0.35})]
+    feed(a, sim.run(1., accel_out=-0.6, ebp=True, ebp_floor=-0.35))
+    sim.events = [("engine_brake_clamp", {"binding": False, "gear": 4})]
     feed(a, sim.run(0.5))
     self.assertEqual(a.result()[0], FAIL)
 
