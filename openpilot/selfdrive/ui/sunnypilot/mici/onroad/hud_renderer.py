@@ -14,7 +14,7 @@ from openpilot.system.ui.lib.application import FontWeight, gui_app
 from openpilot.system.ui.lib.text_measure import measure_text_cached
 
 SHIFT_TEXT_SIZE = 32
-SHIFT_TEXT_COLOR = rl.Color(255, 255, 255, 200)
+SHIFT_TEXT_COLOR = rl.Color(255, 255, 255, 255)   # Task 16: full white
 
 
 def manual_hud_text(sm) -> str:

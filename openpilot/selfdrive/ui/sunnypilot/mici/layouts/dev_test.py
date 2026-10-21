@@ -24,7 +24,7 @@ from openpilot.sunnypilot.selfdrive.test_console.conditions import Context, cond
 from openpilot.sunnypilot.selfdrive.test_console.registry import TestSpec
 from openpilot.sunnypilot.selfdrive.test_console.status_io import (P_ARMED, P_BACKGROUND, P_BUTTON, P_PRESS, P_SELECTED, StatusPoller,
                                                                      prereq_hint, result_line)
-from openpilot.system.ui.lib.application import gui_app
+from openpilot.system.ui.lib.application import FontWeight, gui_app
 from openpilot.system.ui.widgets.scroller import NavScroller
 
 poller = StatusPoller()
@@ -56,20 +56,45 @@ def _active(spec: TestSpec) -> dict:
   return st if poller.live(time.monotonic()) and st.get("selected") == spec.id else {}
 
 
-class InfoCard(GreyBigButton):
-  """Non-interactive text card; smaller type so a few lines of guidance fit the 240 px screen."""
+# Task 16: readable at arm's length - stock-sized cards, white on dark (stock subtitles are grey), no type under 24 px
+TITLE_FONT = 36
+TEXT_FONT = 28
+WHITE = rl.Color(255, 255, 255, 255)
 
-  def __init__(self, title: str, text: str = "", font_size: int = 28):
+
+def contrast(card, value_size: int | None = None) -> None:
+  """White title and value on a stock Big* card (stock draws the value in grey); optionally a larger value font.
+  Stock re-applies its 90 % white title color on every draw (BigButton._draw_content -> set_color); pinning set_color on
+  this card's title label keeps it full white."""
+  card._label.set_text_color(WHITE)
+  card._label.set_color = lambda _color: card._label.set_text_color(WHITE)
+  card._sub_label.set_text_color(WHITE)
+  if value_size is not None:
+    card._sub_label.set_font_size(value_size)
+
+
+class InfoCard(GreyBigButton):
+  """Non-interactive text card: a title and a few lines of guidance, white, no smaller than 24 px."""
+
+  def __init__(self, title: str, text: str = "", font_size: int = TEXT_FONT):
     super().__init__(title, text)
-    self._label.set_font_size(32)
-    self._sub_label.set_font_size(font_size)
+    self._label.set_font_size(TITLE_FONT)
+    contrast(self, max(font_size, 24))
 
   def update_text(self, title: str, text: str) -> None:
     if title != self.text:
       self.set_text(title)
-      self._label.set_font_size(32)
+      self._label.set_font_size(TITLE_FONT)
     if text != self.value:
       self.set_value(text)
+
+
+class StatusCard(InfoCard):
+  """Live status (key values only) in large monospace type."""
+
+  def __init__(self, title: str, text: str = "", font_size: int = 30):
+    super().__init__(title, text, font_size)
+    self._sub_label.set_font_weight(FontWeight.UNIFONT)
 
 
 def condition_lines(conditions: list, max_lines: int = 5) -> str:
@@ -92,7 +117,8 @@ class TestDetailPage(NavScroller):
     self.spec, self.profile = spec, profile
     phase = profile.registry.phases[spec.phase]
     self._arm = BigToggle("armed", initial_state=self._is_armed(), toggle_callback=self._on_arm)
-    self._status = InfoCard(f"{spec.id} {spec.label}", "")
+    contrast(self._arm, 30)
+    self._status = StatusCard(f"{spec.id} {spec.label}", "")
     self._result = InfoCard("result", "", font_size=24)
     self._conds = InfoCard("", "", font_size=24)  # untitled: room for 5 condition lines
     self._button = InfoCard("start/stop", "")
@@ -159,7 +185,7 @@ class TestButton(BigButton):
   def __init__(self, spec: TestSpec, profile):
     super().__init__(f"{spec.id} {spec.label}", "not run", font_size=40)
     self.spec = spec
-    self._sub_label.set_font_size(30)
+    contrast(self, 30)
     self._page = TestDetailPage(spec, profile)
     self.set_click_callback(lambda: gui_app.push_widget(self._page))
 
@@ -185,7 +211,7 @@ class TestButton(BigButton):
 class DevTestLayoutMici(NavScroller):
   def __init__(self):
     super().__init__()
-    self._live = InfoCard("dev test • phases", "")
+    self._live = StatusCard("dev test • phases", "")
     self._background = BigToggle("background telemetry", initial_state=ui_state.params.get_bool(P_BACKGROUND),
                                  toggle_callback=guarded(lambda v: write_param(ui_state.params, P_BACKGROUND, v)))
     # only the press modes the start button allows (Task 12 D-10: the gap button = triple / short, never long)
@@ -195,6 +221,8 @@ class DevTestLayoutMici(NavScroller):
     modes = list(buttons.modes.get(name, PRESS_MODES)) if buttons is not None else list(PRESS_MODES)
     current = ui_state.params.get(P_PRESS, return_default=True)
     self._press = BigMultiToggle("start press", modes, select_callback=self._on_press)
+    contrast(self._background, 30)
+    contrast(self._press, 30)
     self._press.set_value(buttons.resolve_mode(name, current) if buttons is not None else
                           (current if current in PRESS_MODES else PRESS_MODES[0]))
     self._profile = object()

@@ -18,16 +18,16 @@ from openpilot.sunnypilot.selfdrive.test_console.status_io import StatusPoller
 from openpilot.system.ui.lib.application import FontWeight, gui_app
 from openpilot.system.ui.lib.text_measure import measure_text_cached
 
-FONT_SIZE = 24
+FONT_SIZE = 28              # Task 16: large monospace, readable at a stoplight
 PAD_X, PAD_Y, LINE_GAP = 14, 6, 2
 SIDE_CLEARANCE = 110        # px kept free at each side for the wheel / model icons
-BG = {
-  "armed": rl.Color(70, 70, 70, 210),
-  "capturing": rl.Color(200, 40, 40, 225),
-  "stopped": rl.Color(200, 140, 20, 225),
-  "PASS": rl.Color(30, 150, 70, 225),
-  "CAPTURED": rl.Color(30, 120, 150, 225),
-  "FAIL": rl.Color(220, 90, 20, 235),
+BG = {                      # opaque, so the white text never sits on the road view (Task 16: high contrast)
+  "armed": rl.Color(40, 40, 40, 255),
+  "capturing": rl.Color(180, 30, 30, 255),
+  "stopped": rl.Color(170, 110, 0, 255),
+  "PASS": rl.Color(20, 120, 50, 255),
+  "CAPTURED": rl.Color(20, 90, 130, 255),
+  "FAIL": rl.Color(190, 70, 0, 255),
 }
 
 
@@ -70,7 +70,7 @@ def alert_showing() -> bool:
 class TestConsoleChip:
   def __init__(self):
     self._poller = StatusPoller()
-    self._font = gui_app.font(FontWeight.BOLD)
+    self._font = gui_app.font(FontWeight.UNIFONT)
 
   @guarded
   def render(self, rect: rl.Rectangle) -> None:

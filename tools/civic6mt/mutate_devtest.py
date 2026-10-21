@@ -88,8 +88,11 @@ MUTATIONS = [
   m("d2_write_while_rolling", "D2 D-02", f"{TC}/sessions.py", "  if onroad and not standstill:", "  if False:"),
   m("d2_tap_flips_satisfied", "D2 D-02", f"{TC}/sessions.py", "    return None if t.ok else t.want", "    return (not t.have) if t.ok else t.want"),
   m("d2_conditions_use_params", "D2 D-02", f"{TC}/conditions.py", "toggle_value(k, s, ctx) == want", "ctx.toggles.get(k, False) == want"),
-  m("d2_tap_any_release", "D2 D-09", f"{UI}/dev_test_sessions.py",
-    "    return action if rl.check_collision_point_rec(rl.Vector2(release.x, release.y), rect) else None", "    return action"),
+  # re-pointed in Task 16: the session view's cards are stock NavScroller items, so D-09 rests on the stock scroller
+  # invalidating an item's touch while it scrolls - remove that and a real swipe across a switch must write
+  m("d2_tap_any_release", "D2 D-09 / T16", "openpilot/system/ui/widgets/scroller.py",
+    "item.set_touch_valid_callback(lambda: self.scroll_panel.is_touch_valid() and self.enabled",
+    "item.set_touch_valid_callback(lambda: True and self.enabled", SMOKE),
   m("d3_pass_before_complete", "D3", f"{TC}/analyzers.py",
     "    return (None if status == PASS and not self.complete else status), detail", "    return status, detail"),
   m("d3_c1_raw_ratio", "D3 D-03", R, "  ratio = (acc - coast) / want if math.isfinite(coast) and want < -0.05 else math.nan",
@@ -164,6 +167,12 @@ MUTATIONS = [
   # --- Task 15 -----------------------------------------------------------------------------------------------------
   m("t15_s2_bite_from_debounce_end", "T15 (bite-lag floor)", f"{TC}/analyzers.py",
     "          self.t_match = self._match_cand\n", "          self.t_match = None\n"),
+  m("t16_switch_not_from_param", "T16 UI", f"{UI}/dev_test_sessions.py", "      self.set_checked(bool(t.have))\n", "", SMOKE),
+  m("t16_grey_titles", "T16 UI", f"{UI}/dev_test.py",
+    "  card._label.set_color = lambda _color: card._label.set_text_color(WHITE)\n", "", SMOKE),
+  m("t16_small_text", "T16 UI", f"{UI}/dev_test_sessions.py", "VALUE_SIZE = 32 ", "VALUE_SIZE = 18 ", SMOKE),
+  m("t16_tiny_cards", "T16 UI", f"{UI}/dev_test_sessions.py", "    contrast(self, VALUE_SIZE)\n    self.spec, self._profile, self._details",
+    "    contrast(self, VALUE_SIZE)\n    self._rect.width, self._rect.height = 200, 60\n    self.spec, self._profile, self._details", SMOKE),
 ]
 
 

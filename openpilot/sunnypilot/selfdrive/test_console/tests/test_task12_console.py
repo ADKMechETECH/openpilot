@@ -183,32 +183,9 @@ class TestD2TruthfulWrites(OpenpilotTestCase):
     self.assertTrue(gate.ok)
     self.assertIsNone(S.next_value(gate))
 
-  def test_dismiss_swipe_ending_on_a_switch_does_nothing(self):
-    import pyray as rl
-    from openpilot.selfdrive.ui.sunnypilot.mici.layouts.dev_test_sessions import TAP_SLOP, _Hits
-    from openpilot.system.ui.lib.application import MousePos
-    fired = []
-    hits = _Hits()
-    switch = rl.Rectangle(100, 100, 80, 28)
-    hits.add(switch, lambda: fired.append("switch"))
-    hits.add(rl.Rectangle(300, 100, 80, 28), lambda: fired.append("other"))
-    on = MousePos(120, 110)
-    # a downward dismiss swipe that starts above and ends on the switch
-    self.assertIsNone(hits.tap(MousePos(120, 20), hits.hit(MousePos(120, 20)), on))
-    # pressed on the switch, dragged away and back (> slop): not a tap either
-    self.assertIsNone(hits.tap(MousePos(120, 110 - 2 * TAP_SLOP), hits.hit(on), on))
-    # pressed on another target, slid onto the switch
-    self.assertIsNone(hits.tap(MousePos(305, 110), hits.hit(MousePos(305, 110)), on))
-    # pressed just outside the switch, released on it within the slop: the press hit no target
-    self.assertIsNone(hits.tap(MousePos(95, 110), hits.hit(MousePos(95, 110)), MousePos(105, 110)))
-    # pressed on the switch's edge, released just off it (within the slop): not a tap on anything
-    edge = MousePos(178, 110)
-    self.assertIsNone(hits.tap(edge, hits.hit(edge), MousePos(186, 110)))
-    # a real tap
-    action = hits.tap(on, hits.hit(on), MousePos(125, 112))
-    self.assertIsNotNone(action)
-    action()
-    self.assertEqual(fired, ["switch"])
+  # D-09 ("a swipe ending on a switch does nothing") moved with the Task 16 UI rebuild: the session view's cards are stock
+  # NavScroller items now, so it is checked on the real widgets with a real multi-frame swipe in
+  # test_ui_smoke.TestDevTestUiSmoke.test_toggle_cards_on_the_real_widgets (and tools/civic6mt/dev_test_render.py).
 
   def test_conditions_use_published_latched_values(self):
     c = ctx(EngineBrakePreferred=True)          # the Param says ON...
