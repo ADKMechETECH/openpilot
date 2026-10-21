@@ -38,7 +38,8 @@ FEATURE_KEYS = ("NonAdaptiveLongitudinal", "NoServiceBrakeHold", "NoServiceBrake
                 "NoServiceBrakeOverspeedMargin", "NoServiceBrakeOverspeedMode", "ClutchShiftGate", "ClutchShiftGateGasReleaseHint",
                 "ClutchReengageSmart", "ClutchReengageGasDebounce", "ClutchReengageRatioTol", "ClutchReengageMaxRamp",
                 "ClutchReengageSeed", "ClutchShiftGateMaxCoast", "ClutchShiftGateCoastAccel", "EngineBrakePreferred",
-                "GearAwareAccel", "ManualLowSpeedHandbackSpeed", "ManualLowSpeedHandbackRamp", "DisengageOnAccelerator")
+                "GearAwareAccel", "ManualLowSpeedHandbackSpeed", "ManualLowSpeedHandbackRamp", "DisengageOnAccelerator",
+                "SetSpeedCoast", "SetSpeedCoastDecel", "SetSpeedCoastMinSpeed", "CruiseAccelBoost")
 
 
 def make_cp(transmission=TransmissionType.manual, op_long=True):

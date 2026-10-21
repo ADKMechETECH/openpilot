@@ -283,6 +283,36 @@ class TestRule5Matrix(OpenpilotTestCase):
     sim.run(DT_MDL)
     self.assertLessEqual(sim.plan.aTarget, sim.plan_sp.features.aTargetStock + 1e-6)
 
+  def _set_speed_coast_shaping(self):
+    """Session 10: 70 mph, set speed dropped 5 mph - SetSpeedCoast holds the plan at its gentle floor above the stock plan."""
+    sim = ManualCarSim(speed=31.3, gear=6, v_set=31.3, plant="closed", SetSpeedCoast=True, ClutchShiftGate=False)
+    sim.run(2.)
+    sim.set(v_set=sim.speed - 2.2)
+    assert frames_until(sim, lambda s: s.plan.aTarget - s.plan_sp.features.aTargetStock > 0.1, 4.)
+    return sim
+
+  def test_set_speed_coast_steps_aside_in_one_control_frame(self):
+    sim = self._set_speed_coast_shaping()
+    plan = sim.plan.aTarget
+    one_frame(sim, inject(sim, "none"))
+    self.assertEqual(sim.ext.last_a_target, plan, "no urgency: the gentle plan runs")
+    for reason in REASONS:
+      with self.subTest(reason=reason):
+        sim = self._set_speed_coast_shaping()
+        plan, stock = sim.plan.aTarget, sim.plan_sp.features.aTargetStock
+        csm = inject(sim, reason)
+        one_frame(sim, csm)
+        self.assertIsNotNone(sim.ext.urgency)
+        self.assertAlmostEqual(sim.ext.last_a_target, min(csm['longitudinalPlan'].aTarget, stock), places=5)
+        self.assertLess(sim.ext.last_a_target, plan - 0.1)
+
+  def test_set_speed_coast_planner_steps_down_to_stock(self):
+    sim = self._set_speed_coast_shaping()
+    sim.force_decel = True
+    sim.run(DT_MDL)
+    self.assertLessEqual(sim.plan.aTarget, sim.plan_sp.features.aTargetStock + 1e-6)
+    self.assertFalse(sim.plan_sp.features.setSpeedCoastActive)
+
   def test_gear_aware_off_publishes_nothing_new(self):
     sim = ManualCarSim(speed=10., gear=1, v_set=14., NonAdaptiveLongitudinal=True, GearAwareAccel=False,
                        ClutchShiftGate=False)

@@ -29,15 +29,16 @@ MIN_ALLOW_THROTTLE_SPEED = 2.5
 _A_TOTAL_MAX_V = [1.7, 3.2]
 _A_TOTAL_MAX_BP = [20., 40.]
 
-def get_max_accel(v_ego):
-  return np.interp(v_ego, A_CRUISE_MAX_BP, A_CRUISE_MAX_VALS)
+def get_max_accel(v_ego, a_max_vals=A_CRUISE_MAX_VALS):
+  # a_max_vals: CruiseAccelBoost's higher table (session 10, opt-in); default = stock
+  return np.interp(v_ego, A_CRUISE_MAX_BP, a_max_vals)
 
 def get_coast_accel(pitch):
   return np.sin(pitch) * -5.65 - 0.3  # fitted from data using xx/projects/allow_throttle/compute_coast_accel.py
 
 def get_cruise_accel(e2e, v_cruise, v_ego, a_cruise_prev, angle_steers, CP, dt, accel_coast, allow_throttle,
-                     j_scale=(1.0, 1.0)):
-  max_accel = ACCEL_MAX if e2e else get_max_accel(v_ego)
+                     j_scale=(1.0, 1.0), a_min=A_CRUISE_MIN, a_max_vals=A_CRUISE_MAX_VALS):
+  max_accel = ACCEL_MAX if e2e else get_max_accel(v_ego, a_max_vals)
 
   if not e2e:
     a_total_max = np.interp(v_ego, _A_TOTAL_MAX_BP, _A_TOTAL_MAX_V)
@@ -49,7 +50,8 @@ def get_cruise_accel(e2e, v_cruise, v_ego, a_cruise_prev, angle_steers, CP, dt, 
       coast_limit = np.interp(v_ego, [MIN_ALLOW_THROTTLE_SPEED, MIN_ALLOW_THROTTLE_SPEED*2], [max_accel, clipped_accel_coast])
       max_accel = min(max_accel, coast_limit)
 
-  target_accel = np.clip(v_cruise - v_ego, A_CRUISE_MIN, max_accel)
+  # a_min: SetSpeedCoast's gentle floor (session 10, opt-in, set speeds >= 55 mph, stock under Rule-5 urgency)
+  target_accel = np.clip(v_cruise - v_ego, a_min, max_accel)
   j_cruise = np.interp(v_ego, A_CRUISE_MAX_BP, J_CRUISE_VALS)
   # j_scale = (rise, fall) factors from GearAwareAccel (manual only, <= 1.0); (1.0, 1.0) = stock
   target_accel = float(np.clip(target_accel, a_cruise_prev - j_cruise * j_scale[1] * dt, a_cruise_prev + j_cruise * j_scale[0] * dt))
@@ -159,12 +161,15 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
     LongitudinalPlannerSP.update_coast_logger(self, sm, self.fcw)
     j_scale = LongitudinalPlannerSP.update_gear_aware_accel(self, sm, self.a_cruise,
                                                             float(np.clip(v_cruise - v_ego, A_CRUISE_MIN, ACCEL_MAX)))
+    # session 10: SetSpeedCoast (gentle decel floor) / CruiseAccelBoost (higher accel ceiling); stock when off
+    a_min, a_max_vals = LongitudinalPlannerSP.update_cruise_profile(self, sm, v_cruise, v_ego)
     self.a_cruise = get_cruise_accel(is_e2e, v_cruise, v_ego,
                                      self.a_cruise, steer_angle_without_offset, self.CP, self.dt,
-                                     accel_coast, self.allow_throttle, j_scale)
-    # GearAware (Task 13 A3): the stock-jerk shadow of the set-speed candidate. Under Rule-5 urgency the shaped one steps
-    # down to it here, and controlsd uses the stock plan (output_a_target_stock) in the very control frame urgency appears
-    gear_aware = self.gear_aware_accel.enabled
+                                     accel_coast, self.allow_throttle, j_scale, a_min, a_max_vals)
+    # GearAware (Task 13 A3) / SetSpeedCoast: the stock shadow of the set-speed candidate. Under Rule-5 urgency the shaped
+    # one steps down to it here, and controlsd uses the stock plan (output_a_target_stock) in the very control frame
+    # urgency appears
+    gear_aware = self.gear_aware_accel.enabled or self.cruise_profile.shaped
     if gear_aware:
       self.a_cruise_stock = get_cruise_accel(is_e2e, v_cruise, v_ego, self.a_cruise_stock, steer_angle_without_offset,
                                              self.CP, self.dt, accel_coast, self.allow_throttle)

@@ -215,8 +215,13 @@ struct LongitudinalPlanSP @0xf35cc4560bbf6ec2 {
     collisionReason @2 :Text;      # what triggered it ("" when not)
     gearAware @3 :Bool;            # latched
     urgency @4 :Text;              # the planner's braking-urgency reason ("" = none)
-    aTargetStock @5 :Float32;      # GearAware on: the plan's aTarget with the stock-jerk set-speed candidate (Task 13
-                                   # A3: controlsd takes min(aTarget, this) in any frame with Rule-5 urgency); 0 when off
+    aTargetStock @5 :Float32;      # GearAware or SetSpeedCoast on: the plan's aTarget with the stock set-speed candidate
+                                   # (Task 13 A3: controlsd takes min(aTarget, this) in any frame with Rule-5 urgency);
+                                   # 0 when both are off
+    # fork-only (civic-cruise, session 10): cruise_profile.py. Ordinals may collide on a future sunnypilot rebase.
+    setSpeedCoast @6 :Bool;        # SetSpeedCoast latched
+    setSpeedCoastActive @7 :Bool;  # its gentle floor applies this frame (set speed >= the threshold, no urgency)
+    accelBoost @8 :Bool;           # CruiseAccelBoost latched
   }
 
   struct NoServiceBrake {
@@ -390,11 +395,14 @@ struct OnroadEventSP @0xda96579883444c35 {
     e2eChime @23;
     laneChangeRoadEdge @24;
     bigModelReady @25;
-    # fork-only (civic-cruise): manual low-speed handback (@26/@27), no-service-brake overspeed escalation (@28).
-    # Ordinals may collide on a future sunnypilot rebase.
+    # fork-only (civic-cruise): manual low-speed handback (@26/@27), no-service-brake overspeed escalation (@28),
+    # distance-button hold -> NonAdaptive on manuals (@29-@31, session 10). Ordinals may collide on a sunnypilot rebase.
     manualLowSpeedHandback @26;
     manualLowSpeedNoEntry @27;
     noServiceBrakeOverspeed @28;
+    nonAdaptiveOn @29;
+    nonAdaptiveOff @30;
+    nonAdaptiveDisengageFirst @31;
   }
 }
 

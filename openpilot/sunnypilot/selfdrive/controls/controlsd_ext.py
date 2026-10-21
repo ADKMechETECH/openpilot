@@ -155,14 +155,15 @@ class ControlsExt(ModelStateBase):
     return self.clutch_takeover.limit_accel(long_active, CS.vEgo, self.urgency, plan.aTarget, accel_limits)
 
   def plan_a_target(self, sm: messaging.SubMaster) -> float:
-    """The aTarget LongControl runs this frame. GearAware (Task 13 A3) shapes only the set-speed candidate in plannerd;
+    """The aTarget LongControl runs this frame. GearAware (Task 13 A3) and SetSpeedCoast (session 10) shape only the
+    set-speed candidate in plannerd;
     with a Rule-5 reason this control frame, take the stock-jerk plan plannerd published beside it (never higher than
     the plan: only ever more braking / less throttle). GearAware off, or no valid plan-SP message: the plan unchanged."""
     a_target = sm['longitudinalPlan'].aTarget
     if self.urgency is None or not sm.all_checks(['longitudinalPlanSP']):
       return a_target
     features = sm['longitudinalPlanSP'].features
-    if not features.gearAware or not math.isfinite(features.aTargetStock):
+    if not (features.gearAware or features.setSpeedCoast) or not math.isfinite(features.aTargetStock):
       return a_target
     return min(a_target, features.aTargetStock)
 

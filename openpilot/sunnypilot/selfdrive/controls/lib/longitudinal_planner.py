@@ -18,6 +18,7 @@ from openpilot.sunnypilot.selfdrive.controls.lib.no_service_brake import NoServi
 from openpilot.sunnypilot.selfdrive.controls.lib.engine_brake_model import CoastEventLogger
 from openpilot.sunnypilot.selfdrive.controls.lib.engine_brake_learning import EngineBrakeLearner
 from openpilot.sunnypilot.selfdrive.controls.lib.gear_aware_accel import GearAwareAccel
+from openpilot.sunnypilot.selfdrive.controls.lib.cruise_profile import CruiseProfile
 from openpilot.sunnypilot.selfdrive.controls.lib.e2e_alerts_helper import E2EAlertsHelper
 from openpilot.sunnypilot.selfdrive.controls.lib.smart_cruise_control.smart_cruise_control import SmartCruiseControl
 from openpilot.sunnypilot.selfdrive.controls.lib.speed_limit.speed_limit_assist import SpeedLimitAssist
@@ -67,6 +68,8 @@ class LongitudinalPlannerSP:
     # Manual only: gear-indexed set-speed jerk shaping (toggle GearAwareAccel, default OFF), and coast-event telemetry
     # for calibrating engine_brake_model (not a toggle: logging only, can't change driving — like the Phase 1 signals)
     self.gear_aware_accel = GearAwareAccel(CP, self._params)
+    # session 10 (owner, 2026-10-21): SetSpeedCoast / CruiseAccelBoost, opt-in, any transmission (cruise_profile.py)
+    self.cruise_profile = CruiseProfile(CP, self._params)
     self.coast_logger = CoastEventLogger(CP.transmissionType == structs.CarParams.TransmissionType.manual, DT_MDL)
     # Task 17: engine-brake learning - brake-free coast samples + the axle-torque brake check, persisted; telemetry only
     # (its table proposals are not applied). Logs engaged frames while EngineBrakePreferred is latched on.
@@ -159,6 +162,9 @@ class LongitudinalPlannerSP:
   def update_gear_aware_accel(self, sm: messaging.SubMaster, a_cruise_prev: float, cruise_target: float) -> tuple[float, float]:
     return self.gear_aware_accel.update(self._engaged(sm), sm['carState'], self._pitch(sm), self.urgency, a_cruise_prev,
                                         cruise_target, self._clutch_valid(sm))
+
+  def update_cruise_profile(self, sm: messaging.SubMaster, v_cruise: float, v_ego: float) -> tuple[float, list[float]]:
+    return self.cruise_profile.update(self._engaged(sm), v_cruise, v_ego, self.urgency)
 
   def update_no_service_brake(self, sm: messaging.SubMaster, v_ego: float, collision: bool = False) -> bool:
     CS = sm['carState']
@@ -299,7 +305,10 @@ class LongitudinalPlannerSP:
     features.collisionBraking = self.collision_hold > 0.
     features.collisionReason = self.collision_reason
     features.gearAware = bool(self.gear_aware_accel.enabled)
-    if self.gear_aware_accel.enabled:   # only while on: OFF publishes exactly what it did before Task 13
+    cp = self.cruise_profile
+    features.setSpeedCoast, features.setSpeedCoastActive = bool(cp.coast_enabled), bool(cp.coast_active)
+    features.accelBoost = bool(cp.boost_enabled)
+    if self.gear_aware_accel.enabled or cp.shaped:   # only while on: OFF publishes exactly what it did before Task 13
       features.aTargetStock = float(self.output_a_target_stock)
     features.urgency = self.urgency or ""
 
