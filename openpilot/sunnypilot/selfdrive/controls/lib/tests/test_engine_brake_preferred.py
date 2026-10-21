@@ -217,7 +217,7 @@ class TestTable(OpenpilotTestCase):
   def test_floor_math(self):
     # flat: 80 % of the measured decel; downhill the grade comes off it; capped just below 0
     d = table_decel(STATIC_DECEL, 4, 17.)
-    self.assertAlmostEqual(d, 0.47)
+    self.assertAlmostEqual(d, STATIC_DECEL[4][3], msg="17 m/s is a bin centre")
     self.assertAlmostEqual(brake_free_floor(d, 0.), -MARGIN * d)
     self.assertAlmostEqual(brake_free_floor(d, -0.02), -MARGIN * d + G * math.sin(0.02))
     self.assertGreater(brake_free_floor(d, -0.1), FLOOR_MAX, "steeper than engine braking: not usable")
@@ -225,7 +225,7 @@ class TestTable(OpenpilotTestCase):
     self.assertEqual(brake_free_floor(-1., 0.), 0.)
 
   def test_table_interpolates_and_holds_ends(self):
-    self.assertAlmostEqual(table_decel(STATIC_DECEL, 5, 19.), (0.43 + 0.39) / 2)
+    self.assertAlmostEqual(table_decel(STATIC_DECEL, 5, 19.), (STATIC_DECEL[5][3] + STATIC_DECEL[5][4]) / 2)
     self.assertAlmostEqual(table_decel(STATIC_DECEL, 3, 60.), STATIC_DECEL[3][-1])
     self.assertEqual(table_decel(STATIC_DECEL, 7, 20.), 0.)
     self.assertEqual(table_decel(STATIC_DECEL, 0, 20.), 0.)

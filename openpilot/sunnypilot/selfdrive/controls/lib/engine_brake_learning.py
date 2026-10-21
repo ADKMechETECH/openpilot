@@ -51,7 +51,7 @@ V_EDGES = (3., 7., 11., 15., 19., 23., 27., 31., 40.)   # bins around engine_bra
 assert len(V_EDGES) == len(V_MIDS) + 1
 
 K_TQ = 2.0767e-3            # m/s^2 per axle N*m = 1/(m*r): Stage 2 fit (m*r ~ 481 kg*m)
-ROAD_LOAD = (0.225, 1.25e-4)   # m/s^2: c0 + c2*v^2, Stage 1 fit (neutral coasts + in-gear D - E)
+ROAD_LOAD = (0.188, 1.52e-4)   # m/s^2: c0 + c2*v^2, Stage 1 + Stage 3 fit (neutral coasts + settled in-gear D - E)
 USER_BRAKE_MAX = 0.2        # VSA_STATUS.USER_BRAKE (deprecated.brake): pedal pressure above this = foot on the brake
 SETTLE_AFTER_GAS = 0.5      # s after the gas pedal is released
 SETTLE_AFTER_GEAR = 1.0     # s after the trusted gear last changed
