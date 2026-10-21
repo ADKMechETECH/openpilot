@@ -358,7 +358,8 @@ doc-correction commits are openpilot `d609dd301` / opendbc `02ad781f6`). Plan + 
     per event, ≤ 30 s chunks) → JSON lines `[t, rpm, v_ego, ratio, a_ego, pitch]` in `/data/engine_brake_coast/coast.jsonl`
     (RotatingFileHandler, 1 MB × 10) + `engine_brake_coast` cloudlog summary. Raw ratio logged so the fit can re-bin gears.
     Not toggle-gated (telemetry, like Phase 1). `TODO(on-car)`: fit a per-gear/rpm table from these logs, replace the seed.
-- **6a `EngineBrakePreferred`** (toggle, default OFF; `engine_brake_preferred.py`, wired in `controlsd_ext.py` /
+- **6a `EngineBrakePreferred`** *(superseded by Task 17: replaced by the per-gear clamp; the coast-target design below
+  is history)* (toggle, default OFF; `engine_brake_preferred.py`, wired in `controlsd_ext.py` /
   `controlsd.py`): like Task 4, a raise of **LongControl's lower accel limit** (final command, all LoC states, PID
   anti-windup) to `EngineBrakeCoastTarget` (0.0) while `a_eb_credited ≤ aTarget < 0`, where `a_eb_credited` = 0.7 ×
   (engine + road estimate) + gravity in full, capped at the hard floor. **controlsd alone decides** (unlike Task 4's
@@ -916,6 +917,72 @@ the target), `f5dc25587` (HUD contrast); dev-test merges `2c87fe532`, `215d315e3
   3c low-speed handback in an empty lot. Update via `git pull` on the device (dev branch, not prebuilt); the first start
   rebuilds (params_keys.h changed). Prebuilt not rebuilt (owner: test on-device first).
 
+**Task 17 — EngineBrakePreferred = per-gear engine-brake clamp + learning scaffold** (owner brief 2026-10-20, with
+three owner confirmations: reuse the toggle, the gear-trust rule, learn only from brake-free data). opendbc `c54d823b9`;
+feature `7fb66ecc4` (clamp), `2a1772a73` (learner), `689b63f73` (mutations), `da041c61e` (plant + hand-off
+finding); dev-test merges `59a3941b3` / `238f67f5a`, console `7e5fff9df`. Data: Stage 1 coasts (`analysis/stage1/eb_table.py`), Stage 2 torque fit, S8.
+- **Premise (Stage 2):** one `ACCEL_COMMAND`; any negative request closes the throttle and the VSA brakes only what the
+  car doesn't already achieve (on the flat AND downhill). So a request no stronger than the closed-throttle decel in the
+  current gear never uses the brakes. Task 16's EBP (coast target only while the plan was within the credited engine
+  braking) was a no-op for exactly that reason; the clamp is different: when the plan wants MORE than engine braking (a
+  lowered set speed, a descent, a lead in adaptive mode) it does not hand off to the brakes.
+- **Static table** `engine_brake_table.py`: flat-road closed-throttle decel D(gear, v), 8 speed bins, from the Stage 1
+  disengaged coasts — min(median measured, 0x130 axle-torque engine part + fitted road load 0.225 + 1.25e-4·v²) where
+  ≥ 1 s of data, that model elsewhere (1st: 23 N·m crank drag), 0 outside 900–6500 rpm. ~0.4–0.5 in 3rd–6th, 0.7 in 2nd.
+- **Clamp** (`engine_brake_preferred.py`, controlsd, LongControl's lower limit): `floor = −0.8·D − g·sin(pitch)`.
+  *Implemented differently from the brief:* (1) **the grade term** — the brief's flat table would brake on every descent
+  (the VSA tracks the request downhill); (2) **descent beyond engine braking** (floor weaker than `FLOOR_MAX` −0.15) →
+  steps aside to stock: holding speed there needs the brakes whatever the request; capping instead used as much brake in
+  the sim with a higher peak (it alternated between a zero-torque roll and braking). −0.15 because −0.01 holds zero
+  torque, −0.17 closes the throttle (Stage 2); (3) **runaway backstop** = > set + 3.6 m/s for 2 s while NOT slowing — a
+  plain overspeed backstop tripped on every set-speed drop > 8 mph (found by a test) and handed it back to the brakes;
+  (4) the clamp lives in controlsd (Rule 5, PID anti-windup), not the Honda carcontroller.
+  Gear (owner rule): `GEAR_MT`, trusted only with `clutchPedal` UP, not decoupled (incl. the carstate phantom guard),
+  rpm/speed within 5 % of that gear, not < 1100 rpm below 13 m/s; else floor **0 (coast only)**. Never clamped: any
+  Rule-5 reason (same frame), EBP's own lead thresholds, a plan < hard floor within 1 s (these hold it off 1.5 s),
+  descent, runaway, no pitch, no clutch signal, stopping, < 5 m/s, long inactive. Logs `engine_brake_preferred` (edges +
+  reason), `engine_brake_clamp` (binding edges: gear, v, floor, target, aEgo, pitch), `…_overspeed`. Published:
+  `manualLongitudinal.ebpSuppressing` (= clamp applies), new `ebpFloor @17` / `ebpGear @18` / `ebpBinding @19`;
+  `ebpLockedOut` always false (capacity lockout removed: it encoded "never under-deliver the plan"). `EngineBrakeCoastTarget`
+  **removed** (params_keys.h). GearAwareAccel keeps the old 0.7 credit as its own `CREDIT_MARGIN` (unchanged behavior).
+- **Learning** (`engine_brake_learning.py`, plannerd, 10 Hz, manuals with op long; telemetry only): learns ONLY from
+  brake-free data (owner): disengaged closed-throttle coasts (no gas, brake switch off, `USER_BRAKE` < 0.2, trusted gear,
+  axle torque < 0, settled 0.5 s after the lift / 1 s after a gear change) → per cell Welford stats of D and the torque
+  engine part E. Engaged frames (toggle latched on, long active, negative request) are logged for review with the torque
+  brake check `extra = D − (E + road)` > 0.3 = brakes suspected (Stage 2: 0.00 median on pure coasts, 0.6–1.1 at −1.2),
+  never learned from. *Why not slowdown-vs-request (the brief's signal):* Stage 2 frames that slowed MORE than asked were
+  still braked 80 % of the time (slow brake release after firm requests). Store = Params `EngineBrakeLearnedTable`
+  (JSON, PERSISTENT), saved ≤ every 60 s; samples `/data/engine_brake_learn/samples.jsonl`. `propose_table` (pure, tested):
+  ≥ 50 samples, ≤ 0.02 m/s² per drive cycle (plannerd start), toward the mean − 2 SE, never above it, never below static;
+  a measurement below static is noted. **Proposals are stored and logged, NOT applied** (`APPLY_LEARNED = False`).
+- **Torque plumbing:** opendbc `CarStateSP.engineTorqueAxle` (`GAS_PEDAL_2.ENGINE_TORQUE_ESTIMATE`, NaN while 0x130
+  isn't alive), `custom.capnp` @4.
+- **Tests:** `test_engine_brake_preferred.py` rewritten (28: table / floor math, gear trust, measured-car closed loop —
+  set-speed drop and mild descent brake-free where stock brakes, pitch error ±1°, table over-reading, untrusted gear =
+  coast only, steep descent = stock, runaway, fast-closing / braking lead = stock, Rule 5 same frame + hold, latch,
+  composition with NSB, logging), `test_engine_brake_learning.py` (11), Rule-5 EBP matrix state now a binding clamp;
+  `test_ebp_lockout_survives…` removed with the lockout. Mutations: 19 new `t17_*`, `b3_ebp_latch` re-pointed,
+  `b3_ebp_lockout_cleared` / `t16_coast_target_zero` removed.
+- **Descent hand-off (owner, 2026-10-20): "engine braking giving up shouldn't default to service brake — that's when
+  the sawtooth should take over."** Structurally it does: on a descent the clamp steps aside and the floors compose by
+  max, so `NoServiceBrakeHold`'s coast floor / overspeed backstop / pulse sawtooth is what applies (with NSB off: stock).
+  **FINDING (Stage 2 descents, re-analysed):** the VSA also holds requests of ~0 and small positive ones downhill (closed
+  throttle, ~0.2–0.3 m/s² of braking), not only negative ones — so NSB's coast floor (−0.3, and 0.0) is braked to as well:
+  on a descent steeper than the gear's engine braking the car holds its speed on the brakes and **never drifts up to the
+  sawtooth's trigger**. Pinned by `TestDescentHandOff` (EBP test plant now models it; a synthetic "drift" car keeps the
+  runaway-backstop test). A brake-free coast phase needs the request at the car's own closed-throttle accel (positive on
+  such a descent) with the 0x130 torque as the guard against throttle = **the NSB coast-follow item, now the
+  prerequisite for the sawtooth on this car** (owner decides when).
+- **Run (PC, 2026-10-20):** feature: CORE 926 passed + the pre-existing `test_default_chestnut` failure (controls lib
+  342 after the plant fix), WIDE 2210; selfref controlsd / plannerd / card **0 diffs** on all 4 CI segments (vs the Task
+  14 captures; toggles OFF); `clutch_reengage_replay` PASS; `engine_brake_replay` PASS (the clamp runs on 1352 frames in
+  6th, floor −0.73…−0.15, never binds — openpilot never asks below −0.11 on that segment — so ON = OFF); **`mutate.py`
+  101/101** (t15 pedal-staleness entry re-pointed after the GAS_PEDAL_2 freshness refactor). Dev-test: CORE **1055 passed** (+ the same chestnut failure), WIDE 2210; `test_console_replay` **0 diffs** controlsd + plannerd on all 4 segments (console armed, 0 errors), isolation OK, offline OK, equiv every armed test captured, `dev_test_render` 9/9; **`mutate_devtest.py` 55/55** (the first sweep was 54/55: nothing tested that E1 reads the PUBLISHED floor — `TestPublishedClampFloor` added). Pushed 2026-10-20 (see wrap-up).
+- **On-car (session 10, after Stage 3):** set-speed drops on the flat with the cluster's mini-car brake lights off; a
+  mild descent; does a −0.15 request close the throttle (FLOOR_MAX); does a small positive request below the car's own
+  accel keep the throttle closed on a descent (would make it brake-free on any grade); pitch-estimate error on the
+  car's usual descents; review the learner's samples + proposals before `APPLY_LEARNED`.
+
 ## Test console architecture (core + vehicle profile)
 The on-car test console is a **vehicle-agnostic core** — capture state machine, detectors/analyzers, the registry/session
 engine, the UI framework, file IPC, the start button's gestures, and the non-actuating guarantee — **plus one vehicle
@@ -1047,6 +1114,14 @@ Behavior — empty road, low speed, ready to take over, one toggle at a time:
       not go positive while over set); lifting below set coasts briefly then resumes smoothly.
 - [ ] **(Task 16) Console UI on the device:** cards readable at arm's length in the mount, swipes never flip a switch,
       a refused write says why on the card.
+- [ ] **(Task 17, before coast-follow — Stage 3 card 3d) Descent throttle boundary:** mild descent (~3–5 %), 6th, engaged
+      ~2 mph under set, off the pedals: at a small positive `ACCEL_COMMAND` (+0.05…+0.1) does `ENGINE_TORQUE_ESTIMATE`
+      (0x130) stay at closed-throttle drag (≈ −65 Nm in 6th → coast-follow works) or rise (the PCM opens the throttle →
+      a different strategy)? One observation, not a sweep (owner, 2026-10-20). Coast-follow stays after Stage 3.
+- [ ] **(Task 17) Engine-brake clamp (session 10):** `EngineBrakePreferred` ON, flat, 4th–6th: set-speed drops of 5 mph
+      slow the car on engine braking with the cluster's mini-car brake lights OFF; `engine_brake_clamp` events line up;
+      clutch in / neutral = no decel request; a lead closing ≥ 1 m/s or braking → normal braking at once. Then a mild
+      descent (a little braking possible: pitch error). Check that −0.15 really closes the throttle (`FLOOR_MAX`).
 - [ ] **(Task 15) Clutch pedal switch:** in cabana, move the clutch pedal slowly: `GAS_PEDAL_2.CLUTCH_PEDAL_UP` (bit 50)
       opens at the first movement, `CLUTCH_PEDAL_FLOOR` (bit 51) closes only at the floor; `CarStateSP.clutchPedal` reads
       1 / 2 / 3 accordingly and never 0 once running.
@@ -1094,6 +1169,26 @@ Task 6 (engine-brake features) — only after the items above, toggles one at a 
   forcing an ACC disengage) is dev-only. Side effect of the half-landed #802: the alpha-long toggle
   flipped *while onroad* applies on the next drive. See `docs/FORK-RESILIENCE.md`.
   When the comma arrives, install the fork's **`civic-6mt-dev-test`** branch (feature + Task 7 test console) and confirm it.
+- **NEXT after the Stage 3 road tests — NSB "coast-follow" (owner, 2026-10-20):** on this car any negative request the
+  engine can't meet is braked to (the VSA tracks the request; inferred from Stage 2), so NSB's fixed floor (−0.3 / 0.0)
+  either brakes gently downhill or rolls with no engine braking. Instead, while NSB holds the brakes off, request the car's
+  own closed-throttle coasting accel (filtered aEgo), confirmed at closed-throttle drag by the live 0x130 axle torque, leaning
+  slightly below to avoid throttle; overspeed backstop unchanged. Default OFF, sim on the measured-car plant, one targeted
+  downhill test (watch torque / decel / the cluster's mini-car brake lights). Do it after Stage 3, not before.
+  *(Task 17: EngineBrakePreferred's per-gear clamp now does the 'request within closed-throttle decel' part for any
+  slow-down request; coast-follow is still the NSB-specific 'drift over set' piece — and, per the Task 17 descent finding,
+  the prerequisite for the overspeed sawtooth to happen at all on this car: the VSA holds a 0 request downhill too.)*
+- **Brake-applied signal (2026-10-20):** none on the buses the harness sees — a hunt over the Stage 2 drive (every byte /
+  16-bit field / bit on bus 0 and in sendcan vs driver and openpilot braking) found no field that tracks braking; the
+  cluster's mini-car brake lights (which do light for ACC braking) are most likely fed over B-CAN via the gateway. Options:
+  the cluster icon as a human-observed indicator (phone video synced to the logs), a second CAN tool on B-CAN, or UDS
+  reads from the VSA (proprietary DIDs; parked first). Until then braking is inferred (decel vs 0x130 torque + road load).
+  **S8 (parked press test, route `00000005`, 2026-10-20):** `VSA_STATUS.USER_BRAKE` (0x1A4 bytes 0–1, already in the DBC,
+  `carState.deprecated.brake`) is the **driver's pedal pressure** — rest −0.02, light ≈ 0.5, medium 1.6–3, hard ≈ 6, back at
+  rest on release. It stays at rest while openpilot brakes (Stage 2: −1.2 m/s² requests, decel up to −1.5 m/s², no
+  change), so it doesn't show the VSA's own braking. `COMPUTER_BRAKING` (bit 23) isn't brake-applied either: on ~50 % of
+  engaged time whatever the request, also on throttle. Analysis: `analysis/stage1/brake_press_hunt.py`;
+  `docs/s8-brake-pressure-2026-10-20.md`.
 - **Downhill braking authority (Task 14 finding, beyond the handback):** in the sims openpilot cannot stop for a stopped
   car on a 3–6 % descent in ANY mode (manual / automatic, adaptive / non-adaptive, handback or not) when the car's brake
   delivers force rather than tracking the requested decel: openpilot's own loop has no grade term on this car (`kiV = 0`)
