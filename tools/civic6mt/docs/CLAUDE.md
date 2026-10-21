@@ -978,10 +978,49 @@ finding); dev-test merges `59a3941b3` / `238f67f5a`, console `7e5fff9df`. Data: 
   14 captures; toggles OFF); `clutch_reengage_replay` PASS; `engine_brake_replay` PASS (the clamp runs on 1352 frames in
   6th, floor −0.73…−0.15, never binds — openpilot never asks below −0.11 on that segment — so ON = OFF); **`mutate.py`
   101/101** (t15 pedal-staleness entry re-pointed after the GAS_PEDAL_2 freshness refactor). Dev-test: CORE **1055 passed** (+ the same chestnut failure), WIDE 2210; `test_console_replay` **0 diffs** controlsd + plannerd on all 4 segments (console armed, 0 errors), isolation OK, offline OK, equiv every armed test captured, `dev_test_render` 9/9; **`mutate_devtest.py` 55/55** (the first sweep was 54/55: nothing tested that E1 reads the PUBLISHED floor — `TestPublishedClampFloor` added). Pushed 2026-10-20 (see wrap-up).
+- **Wrap-up:** pushed opendbc `c54d823b9`, feature `fe4ebb0b1`, dev-test `0d02346cf` (the fork copy of CLAUDE.md lags this
+  line only); bundles regenerated (11th regen); docs re-mirrored (fork copies + Dropbox). Nothing flashed. The device
+  update rebuilds on first start (`params_keys.h` and `custom.capnp` changed). `EngineBrakePreferred` stays default OFF;
+  the learner collects on every drive (telemetry). Coast-follow: after Stage 3 (owner), gated on the Stage 3 card 3d check.
 - **On-car (session 10, after Stage 3):** set-speed drops on the flat with the cluster's mini-car brake lights off; a
   mild descent; does a −0.15 request close the throttle (FLOOR_MAX); does a small positive request below the car's own
   accel keep the throttle closed on a descent (would make it brake-free on any grade); pitch-estimate error on the
   car's usual descents; review the learner's samples + proposals before `APPLY_LEARNED`.
+
+**Stage 3 — on-car (2026-10-21): coast-down table drive + first mixed op-long drive** (brief: Dropbox
+`CommaAI/prompts/stage3-analysis-prompt.md`; full write-up `docs/stage3-findings-2026-10-21.md`; scripts
+`analysis/stage3/`). Routes `00000006--65015c3735` (Drive 1, 30 min, never engaged) and `00000007--001552d195` (Drive 2,
+434 s engaged), pulled over the phone hotspot (`comma@10.69.162.42`), rlog + qcamera only → Dropbox `CommaAI/routes/`.
+**Every custom toggle was OFF in Drive 2** (published latched state): it ran stock SP longitudinal + the Task 16 surge
+seed + the handback. Feature `sp-honda-dev-202608` + dev-test: table + tool commits (see the doc §4).
+- **Engine-brake table rebuilt** (`engine_brake_table.STATIC_DECEL`) from ~850 s / 276 brake-free coasts (Stage 1 +
+  Drive 1 + Drive 2's disengaged coasts), settled frames only (≥ 1 s into a coast — the first second reads ~0.05 light).
+  **Stage 1 was not conservative:** 3rd–6th ~0.03 high; 1st 0.95 → 0.62 (Stage 1 had no 1st-gear coasts — crank-drag
+  model); 2nd at 5 m/s 0.70 → 0.33. Learner `ROAD_LOAD` → 0.188 + 1.52e-4·v². Gaps: 6th 60–70 mph, 3rd > 50 mph, 5th/6th
+  < 35 mph, 1st/2nd above their measured speeds. The learner had already collected both drives on-device (nothing to
+  feed); found: its mean runs above the settled median (tail + no settle), and **proposals never accumulate**
+  (`_new_cycle` doesn't pass `learned_prev` → never more than 0.02 from static) — fix at the APPLY_LEARNED review.
+- **Surge fix confirmed:** 17 gas-override releases, 0 s of positive command while over set (Stage 2, same analysis: 7
+  of 10 over-set releases, up to 1.47 s, +2.6 mph). All 21 `longActive` restarts followed the gas (17) or the engagement.
+- **Shifts:** "no flare" with the gate OFF = the PCM ignores ACC throttle with the clutch in (up to +0.32 requested). 0
+  faults. Gate what-if (`carstate_route_replay.py --gate`, fixed to engage after 5 s of a live clutch signal — 0x1DD
+  blips at start-up had blocked it) on all three on-car routes: 298 episodes, 0 false starts, resume median 0.15 s.
+- **Handback:** both at 5.0 mph, smooth, no stall — but **5 mph in 2nd = 575 rpm, below idle**: the ECU's idle control
+  pushed +150 Nm (the "idle creep", ~4.7 mph) until the clutch went in 1 s later. Proposal (owner): gear-aware handback
+  speed (≥ ~1000 rpm in the current gear: 2nd 8.7 mph, 3rd 13 mph).
+- **Follow distance / sluggish re-accel = stock.** `long_mpc.py` byte-identical to MVL base / sunnypilot / comma;
+  aggressive = 1.25 s·v **+ 6 m** → 1.48 s desired, 1.65 s actual at 62 mph. Plan trails the lead's accel by 1.15 s in
+  stop-and-go (lead MPC). The surge seed can only act after a gas override (code + logs).
+- **ACCEL_COMMAND at highway (new):** the PCM delivers the requested *acceleration* incl. road load — a steady 0 holds
+  speed at 60–80 mph (+160 Nm), throttle closes only near −0.3. Stage 2's "0 = zero torque" was at ~30 mph.
+- **Card 3d not exercised** (8.5 s engaged steeper than −1.7°, no small positive requests) — coast-follow stays gated.
+- **Cold idle beats the phantom guard:** 1,240–1,700 rpm for the first 30 s, GEAR_MT reported 1 at a standstill in
+  neutral → read coupled for 32 s (harmless at 0 mph). Proposal: GEAR_MT 1–6 below 0.5 m/s = neutral; idle-relative rpm.
+- **Flare cool-down counts shifts:** clutch-in/slipping rpm rises (blips, re-coupling) can't start a cap but count toward
+  the 2-in-10 s cool-down (3×/drive). Minor; proposal: count only flares that could start a cap.
+- **Run (PC, 2026-10-21):** controls lib 342 passed; CORE 927 + the pre-existing chestnut failure; Task 17 mutations
+  20/20; `engine_brake_replay` PASS. Nothing flashed; Python-only (dev-test `git pull`; prebuilt needs the script, no
+  recompile).
 
 ## Test console architecture (core + vehicle profile)
 The on-car test console is a **vehicle-agnostic core** — capture state machine, detectors/analyzers, the registry/session
@@ -1110,8 +1149,9 @@ Behavior — empty road, low speed, ready to take over, one toggle at a time:
 - [ ] **(Task 12 A2) RPM-flare thresholds** against real ENGINE_DATA: 3 new samples > 1500 rpm/s, no gas; cool-down
       after 2 flares in 10 s. Zero false flares over a normal drive (sim: 10 min of σ 30 rpm noise at 25 Hz).
 - [ ] Uphill handback: crossing the threshold on the gas uphill — how fast the car slows once the ramp ends.
-- [ ] **(Task 16) Gas-override surge fix:** engaged over set, press the gas, lift: no re-acceleration (the command must
-      not go positive while over set); lifting below set coasts briefly then resumes smoothly.
+- [x] **(Task 16) Gas-override surge fix:** engaged over set, press the gas, lift: no re-acceleration (the command must
+      not go positive while over set); lifting below set coasts briefly then resumes smoothly. *(Stage 3: 17 releases,
+      0 s positive while over set.)*
 - [ ] **(Task 16) Console UI on the device:** cards readable at arm's length in the mount, swipes never flip a switch,
       a refused write says why on the card.
 - [ ] **(Task 17, before coast-follow — Stage 3 card 3d) Descent throttle boundary:** mild descent (~3–5 %), 6th, engaged
@@ -1125,8 +1165,9 @@ Behavior — empty road, low speed, ready to take over, one toggle at a time:
 - [ ] **(Task 15) Clutch pedal switch:** in cabana, move the clutch pedal slowly: `GAS_PEDAL_2.CLUTCH_PEDAL_UP` (bit 50)
       opens at the first movement, `CLUTCH_PEDAL_FLOOR` (bit 51) closes only at the floor; `CarStateSP.clutchPedal` reads
       1 / 2 / 3 accordingly and never 0 once running.
-- [ ] **(Task 15) Phantom guard at cold idle:** right after a cold start, rolling in neutral: is idle under 1100 rpm
-      (`PHANTOM_RPM_MAX`)? If not, a phantom gear at cold idle would be trusted.
+- [x] **(Task 15) Phantom guard at cold idle:** right after a cold start, rolling in neutral: is idle under 1100 rpm
+      (`PHANTOM_RPM_MAX`)? If not, a phantom gear at cold idle would be trusted. *(Stage 3: **no** — 1,240–1,700 rpm for
+      the first 30 s; GEAR_MT 1 at a standstill was trusted. Fix proposed, not done — see Stage 3.)*
 - [ ] **(Task 15) 0.15 s resume:** gate ON, real up/downshifts: the resume 0.15 s after the clutch is fully out — no lurch
       (the takeover ramp still rate-limits it); `clutch_shift_gate_timeout reason=neutral` on a neutral coast with the
       clutch out, not on a slow clutch release.
