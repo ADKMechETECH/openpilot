@@ -106,6 +106,15 @@ TESTS: tuple[TestSpec, ...] = (
            {"seconds": 90.0, "min_segment": 0.0},
            "window", "", ("t", "v_ego", "gear_raw", "raw_payload"),
            prereqs=("S1",), first_run=True, optional=True, sample_hz=20, background=False, session="1"),
+  TestSpec("S8", 0, Kind.TELEMETRY, "Brake-pressure hunt",
+           ("Parked in NEUTRAL, engine idling, parking brake on. Press start, then: ~5 s still,",
+            "HARD brake press held 5 s, release ~5 s; MEDIUM press 5 s, release ~5 s; LIGHT press 5 s, release ~5 s. Press start to stop.",
+            "Passive capture only (nothing is sent to any module). A field that steps up hard > medium > light and drops on release " +
+            "is brake pressure - the analysis runs on the full logs, every bus."),
+           (), "segments",
+           {"seconds": 60.0, "min_segment": 0.0},
+           "window", "", ("t", "v_ego", "brake", "raw_payload"),
+           prereqs=(), first_run=True, optional=True, sample_hz=20, background=False, session="1"),
 
   # --- Phase 1: baseline -----------------------------------------------------------------------------------------
   TestSpec("D1", 1, Kind.FEATURE, "Baseline op-long drive",
@@ -307,7 +316,7 @@ GATE_AB = (("ClutchReengageSmart", (False, True)), ("ClutchShiftGateGasReleaseHi
 
 SESSIONS: tuple[Session, ...] = (
   Session("1", "Signals • parked", "Decode GEAR_MT, then the clutch / volume signature hunts, engine idling",
-          (), ("S1", "S6", "S7")),
+          (), ("S1", "S6", "S7", "S8")),
   Session("2", "Signals • shifts", "Real shifts: GEAR_MT lag, RPM noise, lift-to-clutch, rev-match traces",
           (), ("S2", "S3", "S4", "S5"), prereqs=("1",)),
   Session("3", "Baseline", "5 min engaged on op long with every feature OFF: no faults, no blocked frames",

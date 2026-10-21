@@ -46,7 +46,7 @@ def write_param(*a, **kw):
   return _write(*a, profile=CIVIC, **kw)
 
 # the brief's table (Task 9 Part A)
-MAPPING = {"1": ("S1", "S6", "S7"), "2": ("S2", "S3", "S4", "S5"), "3": ("D1",), "4": ("C1", "C2"), "5": ("G1", "G2"),
+MAPPING = {"1": ("S1", "S6", "S7", "S8"), "2": ("S2", "S3", "S4", "S5"), "3": ("D1",), "4": ("C1", "C2"), "5": ("G1", "G2"),
            "6": ("G3", "G4"), "7": ("N1", "N2"), "8": ("NSB1", "NSB2"), "9": ("H1", "H2", "H3", "H4"),
            "10": ("E1", "E3", "E2"), "11": ("GA1", "A7"), CAL: ("E0c", "E0a", "E0b")}
 
@@ -324,8 +324,9 @@ class TestSignatureHunts(OpenpilotTestCase):
     self.assertIn("scrub every logged bus", detail)
 
   def test_signature_tests_never_run_in_background(self):
-    self.assertFalse(TESTS_BY_ID["S6"].background or TESTS_BY_ID["S7"].background)
-    self.assertTrue(all(t.background for t in TESTS if t.id not in ("S6", "S7")))
+    # the marked parked hunts (S6, S7, and S8 - Task 16) run only when the driver starts them
+    self.assertFalse(TESTS_BY_ID["S6"].background or TESTS_BY_ID["S7"].background or TESTS_BY_ID["S8"].background)
+    self.assertTrue(all(t.background for t in TESTS if t.id not in ("S6", "S7", "S8")))
     with tempfile.TemporaryDirectory() as root:
       console = Console(Store(root), ctx())
       console.set_control("", False, True)
@@ -334,5 +335,6 @@ class TestSignatureHunts(OpenpilotTestCase):
         console.update(s, False)
       self.assertNotIn("S6", console.bg_runs)
       self.assertNotIn("S7", console.bg_runs)
+      self.assertNotIn("S8", console.bg_runs)
       self.assertIn("S1", console.bg_runs)
       console.shutdown()

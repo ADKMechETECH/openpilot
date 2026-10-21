@@ -146,7 +146,7 @@ class TestRegistry(OpenpilotTestCase):
     self.assertTrue({"E0a", "E0b", "E0c"} <= first)
     ids = [t.id for t in TESTS]
     self.assertLess(ids.index("E0c"), ids.index("E0a"), "E0c (gear inference) is the hard prereq of the coasts")
-    self.assertEqual(len(TESTS), 30)
+    self.assertEqual(len(TESTS), 31)   # Task 16: + S8 (parked brake-pressure hunt)
 
   def test_telemetry_tests_need_no_toggle(self):
     for t in TESTS:

@@ -308,7 +308,7 @@ The plan re-cut into ~30-minute outings. Every test belongs to exactly one sessi
 
 | Session | Name | Objective | Tests | Requires | Offers | After |
 |---|---|---|---|---|---|---|
-| 1 | Signals • parked | Decode GEAR_MT, then the clutch / volume signature hunts, engine idling | S1, S6 (optional), S7 (optional) | — | — | — |
+| 1 | Signals • parked | Decode GEAR_MT, then the clutch / volume signature hunts, engine idling | S1, S6 (optional), S7 (optional), S8 (optional) | — | — | — |
 | 2 | Signals • shifts | Real shifts: GEAR_MT lag, RPM noise, lift-to-clutch, rev-match traces | S2, S3, S4, S5 | — | — | 1 |
 | 3 | Baseline | 5 min engaged on op long with every feature OFF: no faults, no blocked frames | D1 | `AlphaLongitudinalEnabled` ON (Developer panel; not settable here), `NonAdaptiveLongitudinal` OFF, `ClutchShiftGate` OFF, `NoServiceBrakeHold` OFF, `EngineBrakePreferred` OFF, `GearAwareAccel` OFF | — | — |
 | 4 | Command authority | Does a negative ACCEL_COMMAND brake, and does 0 coast or hold speed? | C1, C2 | `AlphaLongitudinalEnabled` ON (Developer panel; not settable here) | — | 3, Cal |
@@ -338,6 +338,7 @@ The plan re-cut into ~30-minute outings. Every test belongs to exactly one sessi
 | S5 | 2 | telemetry ★ | Rev-match trace | manual transmission, GEAR_MT tap live, speed > 3 m/s | 5 shift [blip] | GEAR_MT stays 0 through every blip and the gate never leaves 'shifting' during it | S1 |
 | S6 | 1 | telemetry ★ (optional) • not background | Clutch-bit hunt | manual transmission, GEAR_MT tap live | 9 clutch presses (rolling) or a 45 s signature window (N = 3) | characterization (CAPTURED) | S1 |
 | S7 | 1 | telemetry ★ (optional) • not background | Volume-button hunt | none (a marked window) | 90 s | characterization (CAPTURED) | S1 |
+| S8 | 1 | telemetry ★ (optional) • not background | Brake-pressure hunt | none (a marked window) | 60 s | characterization (CAPTURED) | — |
 
 **Phase 1 — Baseline drive** (openpilot long (alpha) engaged, all feature toggles OFF) — gates trusting any on-road feature test
 
