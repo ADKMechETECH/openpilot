@@ -17,13 +17,15 @@ from openpilot.selfdrive.controls.lib.longitudinal_planner import LongitudinalPl
 from openpilot.selfdrive.controls.radard import _LEAD_ACCEL_TAU
 from openpilot.selfdrive.modeld.constants import ModelConstants
 from openpilot.sunnypilot.selfdrive.controls.lib.braking_urgency import braking_urgency
-from openpilot.sunnypilot.selfdrive.controls.lib.engine_brake_model import G, engine_rpm_at, estimate_coast_decel
+from openpilot.sunnypilot.selfdrive.controls.lib.engine_brake_model import G, engine_brake_decel, engine_rpm_at, \
+  estimate_coast_decel, resistive_decel
 from openpilot.sunnypilot.selfdrive.controls.lib.engine_brake_preferred import EngineBrakePreferred, lead_urgent, \
   CAPACITY_TIME, RELEASE_HOLD, DEFAULT_HARD_FLOOR, HARD_FLOOR_RANGE, LEAD_TTC_RANGE, COAST_TARGET_RANGE, DEFAULT_COAST_TARGET
 from openpilot.sunnypilot.selfdrive.controls.lib.no_service_brake import apply_brake_floor, read_decel_floor
 from openpilot.sunnypilot.selfdrive.controls.lib.tests.test_manual_low_speed_handback import make_cp, TransmissionType
 
-THROTTLE_FADE = 0.05  # m/s^2: a small positive command already opens the throttle enough to cancel engine braking
+ZERO_TORQUE_BAND = 0.05   # m/s^2: Stage 2 C2 - a request this close to 0 holds ~zero axle torque (no engine braking)
+BRAKE_EPS = 0.02          # m/s^2: service braking below this counts as none
 ACTUATOR_TAU = 0.25  # s
 
 
@@ -56,7 +58,7 @@ class ManualSim:
   The car encodes the design's assumption: command 0 = closed-throttle coast (engine braking), negative = service
   brakes on top of it, a small positive command opens the throttle enough to cancel engine braking."""
   def __init__(self, speed=25., v_set=25., gear=6, lead=None, grade=0., true_eb_scale=1.0, pitch=True,
-               ebp_code=True, transmission=TransmissionType.manual, op_long=True, force_decel=False):
+               ebp_code=True, transmission=TransmissionType.manual, op_long=True, force_decel=False, plant="measured"):
     self.CP, self.CP_SP = make_cp(transmission, op_long)
     self.params = Params()
     self.planner = LongitudinalPlanner(self.CP, self.CP_SP, init_v=speed)
@@ -72,6 +74,8 @@ class ManualSim:
     self.lead_pos = self.lead["gap"] if self.lead else 0.
     self.lead_v = self.lead["v"] if self.lead else 0.
     self.log = []
+    self.brake = 0.
+    self.plant = plant   # "measured" (Stage 2, the default) | "force_additive" (synthetic: a car that under-delivers)
 
   def lead_decel(self):
     decel = 0.
@@ -131,10 +135,27 @@ class ManualSim:
     return plan
 
   def car_accel(self, cmd):
-    # closed throttle -> engine braking (fades out as the throttle opens); negative command = service brakes on top
-    a_eb = estimate_coast_decel(self.gear, engine_rpm_at(self.gear, self.speed), self.speed, 0.) * self.true_eb_scale
-    fade = float(np.clip(1. - max(cmd, 0.) / THROTTLE_FADE, 0., 1.))
-    return cmd + a_eb * fade - G * math.sin(self.grade)
+    """The car as Stage 2 measured it (C2, route 00000004--9b8c913b70) - NOT force-additive (cmd + engine braking):
+      - a request within ZERO_TORQUE_BAND of 0, or positive: the PCM holds axle torque for it, so 0 rolls on road load
+        only (no engine braking: sent -0.01 -> -0.20 flat, torque -5 Nm);
+      - a negative request: closed throttle; the car slows at the stronger of the TRUE engine braking and the request,
+        the service brakes making up any difference (-0.17 -> -0.38 engine braking alone; -1.05 -> -1.06 with brakes;
+        downhill the VSA tracks the request too).
+    true_eb_scale scales only the engine part (how wrong the model is); self.brake = the service braking used."""
+    a_road = resistive_decel(self.speed) - G * math.sin(self.grade)
+    self.brake = 0.
+    if self.plant == "force_additive":
+      # the pre-Stage-2 model, kept as a SYNTHETIC car for the backstop-mechanism tests: a negative command adds service
+      # braking on top of engine braking + road load (all scaled), so a coast command can leave the car short of the plan
+      a_eb = estimate_coast_decel(self.gear, engine_rpm_at(self.gear, self.speed), self.speed, 0.) * self.true_eb_scale
+      fade = float(np.clip(1. - max(cmd, 0.) / ZERO_TORQUE_BAND, 0., 1.))
+      self.brake = max(-cmd, 0.)
+      return cmd + a_eb * fade - G * math.sin(self.grade)
+    if cmd >= -ZERO_TORQUE_BAND:
+      return cmd + a_road
+    a_closed = a_road + engine_brake_decel(self.gear, engine_rpm_at(self.gear, self.speed)) * self.true_eb_scale
+    self.brake = max(a_closed - cmd, 0.)
+    return min(cmd, a_closed)
 
   def run(self, seconds):
     for _ in range(round(seconds / DT_MDL)):
@@ -158,7 +179,8 @@ class ManualSim:
           self.lead_v = max(self.lead_v - self.lead_decel() * DT_CTRL, 0.)
           self.lead_pos += self.lead_v * DT_CTRL
         self.t += DT_CTRL
-        self.log.append({"t": self.t, "cmd": cmd, "speed": self.speed, "a_target": plan.aTarget, "suppress": suppress,
+        self.log.append({"t": self.t, "cmd": cmd, "brake": self.brake, "speed": self.speed, "a_target": plan.aTarget,
+                         "suppress": suppress,
                          "gap": self.lead_pos - self.distance if self.lead else None, "fcw": plan.fcw,
                          "reason": self.ebp.reason if self.ebp else None, "lower": limits[0],
                          "urgency": urgency_for(CS, plan, radar, force_decel=self.force_decel)})
@@ -166,9 +188,9 @@ class ManualSim:
 
 
 def brake_cmds(log):
-  # commands below the coast target - where the service brakes could join. Stage 2 C2 (on-car): between the coast target
-  # (-0.2) and 0 the car only closes the throttle (engine braking), so those aren't brake-range commands.
-  return [l["cmd"] for l in log if l["cmd"] < DEFAULT_COAST_TARGET - 1e-6]
+  # frames where the (measured-car) plant used the service brakes - not "the command was negative": on this car a negative
+  # request weaker than the gear's engine braking is met by closing the throttle alone (Stage 2 C2)
+  return [l["brake"] for l in log if l["brake"] > BRAKE_EPS]
 
 
 # Scenarios
@@ -213,8 +235,14 @@ class TestEngineBrakePreferred(OpenpilotTestCase):
     off = ManualSim(**FAST_CLOSING).run(10.)
     setup(ebp=True)
     on = ManualSim(**FAST_CLOSING).run(10.)
-    self.assertFalse(any(l["suppress"] for l in on))
-    self.assertEqual([l["cmd"] for l in on], [l["cmd"] for l in off], "suppression must be disabled entirely")
+    # no suppression while the lead closes >= 1 m/s or any urgency holds (+ the release hold); stock-identical until then
+    first = next((i for i, l in enumerate(on) if l["suppress"]), len(on))
+    self.assertEqual([l["cmd"] for l in on[:first]], [l["cmd"] for l in off[:first]], "suppression disabled while closing")
+    self.assertGreater(on[first - 1]["t"], 8., "nothing suppressed through the closing phase")
+    for l in on[first:]:
+      if l["suppress"]:
+        self.assertLess(l["speed"] - 15., 1.0, "suppressing only once the lead no longer closes fast")
+        self.assertIsNone(l["urgency"])
     self.assertLess(min(l["cmd"] for l in on), -1.0)
     closing = [l for l in on if l["gap"] is not None and l["speed"] - 15. > 1.0]
     self.assertTrue(closing and all(l["reason"] in ("lead", "hard_floor", "urgency") for l in closing))
@@ -267,11 +295,11 @@ class TestEngineBrakePreferred(OpenpilotTestCase):
     # THE risk: real engine braking is only 20% of the model's, following a slowing lead. The car coasts and closes;
     # the capacity / demand backstops must hand off to the brakes before the gap gets meaningfully worse than stock.
     setup(ebp=False)
-    off = ManualSim(true_eb_scale=0.2, **GENTLE_FOLLOW).run(16.)  # stock, same car
+    off = ManualSim(true_eb_scale=0.2, plant="force_additive", **GENTLE_FOLLOW).run(16.)  # stock, same (synthetic) car
     # worst case for the backstops: coast target 0 (the weakest allowed; on the real car ~zero torque, no engine braking -
     # Stage 2 C2). The default -0.2 slows the car more, so the suppression can end without any backstop (checked below)
     setup(ebp=True, EngineBrakeCoastTarget=0.0)
-    sim = ManualSim(true_eb_scale=0.2, **GENTLE_FOLLOW)
+    sim = ManualSim(true_eb_scale=0.2, plant="force_additive", **GENTLE_FOLLOW)
     on = sim.run(16.)
     releases = [l for prev, l in zip(on, on[1:], strict=False) if prev["suppress"] and not l["suppress"]]
     self.assertTrue(releases, "a backstop must end the suppression")
@@ -285,7 +313,7 @@ class TestEngineBrakePreferred(OpenpilotTestCase):
     self.assertTrue(sim.ebp.capacity_failed, "and the estimate isn't trusted again this engagement")
     # the default coast target (-0.2, closed throttle) on the same over-optimistic model: never a smaller gap, no FCW
     setup(ebp=True)
-    default = ManualSim(true_eb_scale=0.2, **GENTLE_FOLLOW).run(16.)
+    default = ManualSim(true_eb_scale=0.2, plant="force_additive", **GENTLE_FOLLOW).run(16.)
     self.assertGreaterEqual(min(l["gap"] for l in default), min(l["gap"] for l in on) - 0.05)
     self.assertFalse(any(l["fcw"] for l in default))
 
@@ -293,13 +321,13 @@ class TestEngineBrakePreferred(OpenpilotTestCase):
     # no engine braking at all at the coast command -> the capacity backstop. Stage 2 C2 showed ACCEL_COMMAND 0 is exactly
     # that on the car (~zero torque), so this pins the coast target to 0 (still allowed) to keep testing the backstop
     setup(ebp=True, non_adaptive=True, EngineBrakeCoastTarget=0.0)
-    log = ManualSim(true_eb_scale=0.0, **GENTLE_TRIM).run(8.)
+    log = ManualSim(true_eb_scale=0.0, plant="force_additive", **GENTLE_TRIM).run(8.)
     capacity = [l for l in log if l["reason"] == "capacity"]
     self.assertEqual(len(capacity), 1)
     self.assertLess(capacity[0]["t"], CAPACITY_TIME + 0.5)
     self.assertFalse(any(l["suppress"] for l in log if l["t"] > capacity[0]["t"]), "no re-entry this engagement")
     self.assertLess(log[-1]["speed"], GENTLE_TRIM["v_set"] + 0.1, "speed trim completes via the brakes")
-    sim = ManualSim(true_eb_scale=0.0, **GENTLE_TRIM)
+    sim = ManualSim(true_eb_scale=0.0, plant="force_additive", **GENTLE_TRIM)
     sim.run(2.)
     self.assertTrue(sim.ebp.capacity_failed)
     sim.ebp.update(False, False, sim.car_state(), sim.plan_msg(), sim.radar(), None, LongCtrlState.off, 0.)
@@ -458,3 +486,36 @@ class TestCoastTargetDefault(OpenpilotTestCase):
     p = Params()
     p.remove("EngineBrakeCoastTarget")
     self.assertAlmostEqual(float(p.get("EngineBrakeCoastTarget", return_default=True)), -0.2)
+
+
+class TestMeasuredCarFinding(OpenpilotTestCase):
+  """Stage 2 C2 on the measured-car plant (Task 16): the car already closes the throttle and engine-brakes for any request
+  weaker than its engine braking, so EngineBrakePreferred changes no outcome - not brake use, not speed, not the gap -
+  even when the model over-estimates engine braking 5x. Pinned so a plant / feature change that alters it is noticed."""
+
+  def test_ebp_changes_no_outcome_on_the_measured_car(self):
+    for name, sc in (("trim", GENTLE_TRIM), ("follow", GENTLE_FOLLOW), ("lead brakes", LEAD_BRAKES)):
+      for scale in (1.0, 0.2):
+        with self.subTest(scenario=name, true_eb_scale=scale):
+          runs = []
+          for on in (False, True):
+            setup(ebp=on, non_adaptive=sc is GENTLE_TRIM)
+            runs.append(ManualSim(true_eb_scale=scale, **sc).run(16.))
+          off, on = runs
+          if sc is not LEAD_BRAKES:
+            self.assertTrue(any(l["suppress"] for l in on), "precondition: EBP actually suppressed")
+          self.assertAlmostEqual(sum(l["brake"] for l in on), sum(l["brake"] for l in off), delta=0.05)
+          self.assertAlmostEqual(on[-1]["speed"], off[-1]["speed"], delta=0.05)
+          gaps_on, gaps_off = [l["gap"] for l in on if l["gap"] is not None], [l["gap"] for l in off if l["gap"] is not None]
+          if gaps_on:
+            self.assertAlmostEqual(min(gaps_on), min(gaps_off), delta=0.2)
+
+  def test_small_requests_use_no_brakes_without_ebp(self):
+    # the C2 numbers on the plant: 0 rolls on road load only; -0.17 / -0.45 = engine braking alone; -1.05 needs brakes
+    sim = ManualSim(speed=12., gear=3)
+    self.assertAlmostEqual(sim.car_accel(0.), resistive_decel(12.), places=6)
+    for req, brakes in ((-0.17, False), (-0.45, False), (-1.05, True)):
+      a = sim.car_accel(req)
+      self.assertLessEqual(a, req + 1e-9, f"{req}: at least the request")
+      self.assertEqual(sim.brake > BRAKE_EPS, brakes, f"{req}: brakes {sim.brake:.2f}")
+
