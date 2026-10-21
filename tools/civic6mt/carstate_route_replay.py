@@ -25,6 +25,8 @@ from opendbc.car.honda.interface import CarInterface
 from opendbc.car.honda.values import CAR
 from openpilot.tools.lib.logreader import LogReader
 
+ENGAGE_AFTER_VALID = 5.0   # s of a live clutch signal before the --gate what-if "engages"
+
 PEDAL_NAMES = {CLUTCH_PEDAL_UNKNOWN: "unknown", CLUTCH_PEDAL_UP: "up", CLUTCH_PEDAL_TRAVEL: "travel",
                CLUTCH_PEDAL_FLOOR: "floor"}
 
@@ -70,6 +72,7 @@ def replay(rlogs: list[str], gate_smart: bool | None = None):
   assert CP.transmissionType == structs.CarParams.TransmissionType.manual, CP.transmissionType
   rows = []
   gate, engaged = None, False
+  valid_since, t_prev = 0., 0
   if gate_smart is not None:
     from opendbc.car.structs import car
     from openpilot.sunnypilot.selfdrive.controls.lib.clutch_shift_gate import ClutchShiftGate
@@ -88,10 +91,15 @@ def replay(rlogs: list[str], gate_smart: bool | None = None):
         # "engage" one frame after the clutch signal is alive: the gate latches its toggle only while disengaged, and a
         # dead signal at that moment (or while engaged) leaves it off - as on the car
         gstate = int(gate.update(CS, engaged, CS_SP.gearRaw if valid else -1, valid, CS_SP.clutchPedal if valid else 0))
-        engaged = engaged or valid
+        # ...after it has been alive ENGAGE_AFTER_VALID s in a row: 0x1DD settles a few seconds after ignition (Stage 3
+        # route 00000006: drops at 4.3-5.0 s), when nobody can engage yet - "engaging" on the first valid frame let that
+        # start-up blip block the gate for the whole replay
+        valid_since = (valid_since + (m.logMonoTime - t_prev) * 1e-9) if valid and t_prev else 0.
+        t_prev = m.logMonoTime
+        engaged = engaged or valid_since >= ENGAGE_AFTER_VALID
       rows.append((m.logMonoTime * 1e-9, CS.vEgo, CS.deprecated.engineRpm, CS.deprecated.clutchPressed, CS_SP.clutchPedal,
                    CS_SP.gearRaw, CS_SP.clutchSignalValid, CI.CS.phantom_gear_guard.untrusted, CS.canValid, gstate,
-                   CS.gasPressed))
+                   CS.gasPressed, engaged))
   return np.array(rows, dtype=float)
 
 
@@ -105,7 +113,7 @@ def main():
   if not rlogs:
     sys.exit(f"no rlogs under {args.route_dir}")
   R = replay(rlogs, args.smart if args.gate else None)
-  t, v, rpm, decoupled, pedal, gear, valid, phantom, can_valid, gstate, gas = R.T
+  t, v, rpm, decoupled, pedal, gear, valid, phantom, can_valid, gstate, gas, engaged = R.T
   t -= t[0]
   dt = np.median(np.diff(t))
   print(f"segments {len(rlogs)}  frames {len(t)}  duration {t[-1]:.0f} s")
@@ -130,10 +138,10 @@ def main():
   neutral = (pedal == CLUTCH_PEDAL_UP) & ~in_gear & (gear != 14) & (v > 3)
   print(f"neutral with the clutch out, rolling > 3 m/s (pedal up, GEAR_MT 0): {neutral.sum() * dt:.1f} s")
   if args.gate:
-    gate_report(t, v, rpm, decoupled, pedal, gear, gstate, gas, dt)
+    gate_report(t, v, rpm, decoupled, pedal, gear, gstate, gas, engaged, dt)
 
 
-def gate_report(t, v, rpm, decoupled, pedal, gear, gstate, gas, dt):
+def gate_report(t, v, rpm, decoupled, pedal, gear, gstate, gas, engaged, dt):
   from openpilot.sunnypilot.selfdrive.controls.lib.clutch_shift_gate import GateState
   names = {int(s): s.name for s in GateState}
   print("\ngate (ClutchShiftGate ON, engaged the whole drive - a what-if, not what the car did):")
@@ -164,7 +172,7 @@ def gate_report(t, v, rpm, decoupled, pedal, gear, gstate, gas, dt):
     print(f"  resume after the drivetrain read coupled: median {np.median(lg):.2f} s, max {lg.max():.2f} s (n={len(lg)})")
   # throttle the gate would have allowed into a decoupled drivetrain: never (limit_accel caps it), but count the
   # frames the gate was idle while the drivetrain read decoupled (it must be 0: idle means the cap is off)
-  idle_decoupled = (gstate == int(GateState.idle)) & (decoupled == 1)
+  idle_decoupled = (gstate == int(GateState.idle)) & (decoupled == 1) & (engaged == 1)   # before the what-if engages: n/a
   print(f"  idle while the drivetrain reads decoupled (must be 0): {idle_decoupled.sum()} frames")
   print(f"  neutral -> coastTimeout before MaxCoast: {sum('coastTimeout' in r[2] for r in rows)} episodes")
   print("  longest episodes:")

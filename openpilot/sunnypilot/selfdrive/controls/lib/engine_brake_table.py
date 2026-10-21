@@ -29,11 +29,15 @@ TODO(on-car): where between -0.01 and -0.17 the PCM switches from torque-holding
  the clamp work on slightly steeper descents). And whether a small POSITIVE request below a_ct keeps the throttle
  closed on a descent - if it does, the clamp could be brake-free on any grade.
 
-D comes from the Stage 1 disengaged coasts (route 00000002--6c1a3bb7d4; analysis/stage1/eb_table.py in the project
-repo): per gear and speed bin, min(median measured flat decel, the 0x130 axle-torque engine part + the fitted road
-load); bins without data use that model (1st gear: 23 N*m crank drag through the gearing); 0 where the engine would be
-under 900 or over 6500 rpm. EngineBrakeLearner (engine_brake_learning.py) refines it; its values are NOT applied
-until APPLY_LEARNED is switched on after review.
+D comes from the disengaged closed-throttle coasts of Stage 1 and Stage 3 (routes 00000002--6c1a3bb7d4,
+00000006--65015c3735 = the Stage 3 coast-down drive, and the disengaged parts of 00000007--001552d195; ~850 s, 276
+coasts; analysis/stage3/eb_table3.py + build_table.py in the project repo): per gear and speed bin with >= 3 coasts and
+>= 3 s, min(median measured flat decel over frames >= 1 s into a coast, the 0x130 axle-torque engine part + the fitted
+road load 0.188 + 1.52e-4*v^2); a bin without that much data takes min(that model, the gear's nearest measured bin)
+(engine braking grows with rpm, so a neighbour caps a guess); 0 where the engine would be under 900 or over 6500 rpm.
+Stage 1's table (Task 17) was close in 3rd-6th but about 0.03 m/s^2 optimistic, and far too high in 1st (0.95, a crank
+drag model: measured 0.62) and in 2nd at 5 m/s (0.70: measured 0.33, ~1300 rpm). EngineBrakeLearner
+(engine_brake_learning.py) refines it; its values are NOT applied until APPLY_LEARNED is switched on after review.
 """
 import math
 
@@ -44,15 +48,18 @@ MARGIN = 0.8                # use 80 % of the measured closed-throttle decel
 FLOOR_MAX = -0.15           # m/s^2: a brake-free floor weaker than this can't be held with the throttle closed
 UNKNOWN_GEAR_FLOOR = 0.0    # gear not trusted (clutch in, neutral, phantom, ratio mismatch): coast only, no decel request
 
-# Speed bin centres (m/s) and flat-road closed-throttle decel (m/s^2, positive) per gear, from Stage 1.
+# Speed bin centres (m/s) and flat-road closed-throttle decel (m/s^2, positive) per gear, from Stage 1 + Stage 3.
+# Measured bins (>= 3 coasts, >= 3 s): 1st 5; 2nd 5-13; 3rd 13-17; 4th 13-25; 5th 17-25, 35.5; 6th 21-25, 35.5.
+# The rest are capped model values (see the module docstring) - gaps: 1st above 7 m/s, 2nd above 15, 3rd below 11 and
+# above 19, 4th below 11 and above 27, 5th below 15 and 27-31, 6th below 19 and 27-31.
 V_MIDS = (5.0, 9.0, 13.0, 17.0, 21.0, 25.0, 29.0, 35.5)
 STATIC_DECEL = {
-  1: (0.95, 0.95, 0.96, 0.00, 0.00, 0.00, 0.00, 0.00),
-  2: (0.70, 0.70, 0.69, 0.73, 0.75, 0.77, 0.00, 0.00),
-  3: (0.00, 0.52, 0.46, 0.55, 0.57, 0.59, 0.62, 0.67),
-  4: (0.00, 0.44, 0.45, 0.47, 0.49, 0.51, 0.54, 0.59),
-  5: (0.00, 0.41, 0.42, 0.43, 0.39, 0.47, 0.50, 0.55),
-  6: (0.00, 0.00, 0.38, 0.40, 0.38, 0.44, 0.47, 0.52),
+  1: (0.62, 0.62, 0.62, 0.00, 0.00, 0.00, 0.00, 0.00),
+  2: (0.33, 0.64, 0.65, 0.67, 0.69, 0.70, 0.00, 0.00),
+  3: (0.00, 0.50, 0.52, 0.53, 0.53, 0.53, 0.53, 0.53),
+  4: (0.00, 0.42, 0.44, 0.45, 0.46, 0.47, 0.47, 0.47),
+  5: (0.00, 0.35, 0.35, 0.35, 0.39, 0.42, 0.42, 0.50),
+  6: (0.00, 0.00, 0.36, 0.36, 0.36, 0.43, 0.43, 0.53),
 }
 GEARS = tuple(sorted(STATIC_DECEL))
 
