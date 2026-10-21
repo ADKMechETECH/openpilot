@@ -1070,6 +1070,51 @@ dev-test). Three changes, all from the Stage 3 findings:
   `build.py` rebuilt `libparams_c.so` (registered EBP default now True), manager up. **Device Python = `/usr/local/venv/bin/python`
   with `PYTHONPATH=/data/openpilot`** (system `python3` lacks zmq/capnp). Ready for session 10.
 
+**Session 10 — on-car (2026-10-21): first EBP-ON drive + lateral investigation** (brief: Dropbox
+`CommaAI/session10-analysis-prompt.md`; full write-up `docs/session10-findings-2026-10-21.md`; scripts `analysis/session10/`).
+Route `00000008--044cd426e8` (48 min, 537 s engaged, mostly 6th at 60–76 mph behind traffic), pulled over home WiFi
+(`comma@192.168.0.150`), rlog + qcamera → Dropbox `CommaAI/routes/`. Device on dev-test `0b69935b7`. No code changed.
+- **EBP was ON** (stored 1, `ebpEnabled` latched every engaged frame) and works: binding 8.3 s (plan to −1.20 held at the
+  engine-braking floor, torque check 7 % braked). But it ran only 15 % of the negative-plan time: **72 % was lead following**,
+  where Rule 5 / its lead thresholds (closing ≥ 1 m/s at any distance + 1.5 s hold) hand braking to stock by design.
+  Suspected service brake over the whole engaged drive: ~15 s of 508. What is felt in a slow-down is mostly closed-throttle
+  engine braking (≈ 0.4–0.5 m/s²), which EBP never removes. The calibrated pitch matched GPS grade (median 0.04°).
+- **Throttle boundary at highway speed (new):** 6th, 56–78 mph: a −0.05…−0.15 request gets −0.14 on part throttle
+  (+114 Nm); −0.15…−0.25 closes it. Below ~55 mph in 4th, any request < −0.05 closes it. So `FLOOR_MAX` −0.15 sits on the
+  boundary at highway speed, and a gentle "coast to set speed" cap is feasible at highway speed only (proposal, owner).
+- **Set-speed drops:** 4 of 16 had no lead and overspeed; all slowed mostly on engine braking (≤ 0.9 s braked each; the
+  braked one was a descent step-aside). NonAdaptive does not change set-speed reductions (it keeps exactly `a_cruise`).
+  `ACCEL_COMMAND` 0 is not a coast on this car (zero-torque roll at 30 mph, holds speed at highway).
+- **Re-accel:** stock. Both highway 15 mph drops = following a slower lead (aggressive); Brian took over both times. When
+  openpilot re-accelerates it rides `get_max_accel` (0.78 at 60 mph → 60→75 ≥ 9.2 s) and, behind a close lead, holds ≤ 0
+  ~3 s to re-open the gap. openpilot kept braking through a lane change (model kept the old lead 2.5 s). Proposal: opt-in
+  higher `A_CRUISE_MAX` above 25 m/s (~1.1/0.9); 6th delivered 0.9–1.2 m/s² for the driver.
+- **Long-press = Experimental mode** (stock SP `cruise_helpers.py`, ≥ 0.5 s while main cruise is on), not NonAdaptive
+  (no button handler exists; only the dev-test console writes it). Brian's holds toggled Experimental 4× (net off) and a
+  hold with main cruise off + a tap stepped **personality aggressive → relaxed → standard** (still standard on the device).
+  Wiring proposal: CruiseHelper handler, hold → NonAdaptive while disengaged (option b), new EventNameSP + alert.
+- **Lateral: our fork changed nothing lateral.** Differences vs SP/comma come from the MVL base: **STEER_MAX 5120**
+  (`2c62d127b`; SP/comma 4096), rate-limiter reset on `STEER_CONTROL_ACTIVE` drop (0.1 s of drops on this drive — not a
+  factor), widened calibration limits (calibration here is fine: 100 %, pitch +1.15°, yaw −2.14°), torque override
+  3.1/1.5 (torque/NNLC only). Model = SP default **CD210** (`ModelManager_ActiveBundle` unset); NNLC off and the mici UI has
+  no steering panel. Measured: the car tracks openpilot's desired curvature (gyro/desired 0.94–1.04, 0.1 s lag); the
+  failures are tight 35–40 mph bends where the model ramps late to ~1.7 m/s², openpilot sends 5120 for ~2.5 s and gets
+  ~half (2 "turn exceeds limit"); 62 s at the 5120 cap over the drive. Whether the EPS honors > 4096 is unknown
+  (`steeringTorqueEps` reads 0). **Laneless:** the plan weaves 2–2.5× more with a weak lane line; the car follows it →
+  model issue; no laneless tuning in this base. Proposals: read the 3X's model/NNLC settings, A/B NNLC (param over SSH),
+  A/B a release model, then (only if needed) a Param-gated STEER_MAX 4096/5120 A/B.
+- **Owner decisions (same day) — done:** (1) `SetSpeedCoast` (default OFF): set speed ≥ 55 mph → the set-speed candidate
+  decelerates ≤ 0.12 m/s² (stock −1.2); Rule 5 = stock the same planner frame + the stock shadow (`features.aTargetStock`,
+  the GearAware mechanism) for controlsd. (2) `CruiseAccelBoost` (default OFF): `get_max_accel` [1.6, 1.2, 1.1, 0.9]
+  (60→75 mph 6.5 s vs 9.2). Both in `sunnypilot/.../cruise_profile.py`, any transmission with op long, latched while
+  disengaged. (3) `GapHoldNonAdaptive` (**default ON**, manual + op long): the ≥ 0.5 s distance hold toggles
+  `NonAdaptiveLongitudinal` while disengaged (engaged: alert only), never steps the personality (also with main off);
+  automatics stock (`cruise_helpers.py`). Fork-only ordinals `LongitudinalFeatures` @6–@8, `OnroadEventSP` @29–@31.
+  (4) **NNLC enabled on the device** (param, offroad) instead of a STEER_MAX A/B; open-loop pre-flight
+  `analysis/session10/nnlc_offline.py` (bounded ±1, sign agreement 88–99 %, less time at the cap). Caveat: the NN expects
+  the stock 4096 scale, this base sends 5120 — if NNLC overshoots, A/B STEER_MAX 4096 next. Feature `de178ceb5`; 8/8 new
+  mutations caught. **Always-on exception list (E2) gains `GapHoldNonAdaptive`** (button behavior only).
+
 ## Test console architecture (core + vehicle profile)
 The on-car test console is a **vehicle-agnostic core** — capture state machine, detectors/analyzers, the registry/session
 engine, the UI framework, file IPC, the start button's gestures, and the non-actuating guarantee — **plus one vehicle
@@ -1294,6 +1339,12 @@ Task 6 (engine-brake features) — only after the items above, toggles one at a 
   not `0x1BE` — corrected 2026-10-16.)
 - Confirm `GEAR_MT`/`PEDAL_GAS`/`ENGINE_RPM` decode correctly on this specific car with a cabana
   log once the comma is installed (values match actual gear/clutch/RPM).
+- **Lateral on the comma four (session 10, 2026-10-21):** weaker / wider than the owner's earlier stock-SP 3X. Not our
+  fork (see Session 10). Open: what the 3X ran (model, NNLC/torque); NNLC and model A/Bs; whether the Civic EPS honors
+  commands above 4096 (MVL's 5120). Score each A/B with `analysis/session10/lateral.py` on the same roads/bends.
+- ~~Owner decisions pending (session 10)~~ — decided 2026-10-21: coast cap, accel boost and long-press → NonAdaptive
+  built (default OFF / OFF / ON); NNLC enabled on the device instead of the STEER_MAX A/B (that A/B stays the fallback
+  if NNLC overshoots). On-car next: NNLC on the same bends (`lateral.py`), then the two toggles.
 
 ## Device install: source vs prebuilt (`docs/PREBUILT.md`)
 The car runs the fork from either **`civic-6mt-dev-test`** (source; builds on the device) or **`civic-6mt-prebuilt`**

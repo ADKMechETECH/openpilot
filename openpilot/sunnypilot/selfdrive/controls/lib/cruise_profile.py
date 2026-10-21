@@ -22,7 +22,7 @@ still slows at the capped rate - it never runs away; a large set-speed drop just
 
 CruiseAccelBoost (default OFF): a higher set-speed accel ceiling above 10 m/s - get_max_accel's table
 [1.6, 1.2, 0.8, 0.6] over [0, 10, 25, 40] m/s becomes [1.6, 1.2, 1.1, 0.9]. Stock takes >= 9.2 s for 60 -> 75 mph
-(0.78 -> 0.69 m/s^2); boosted about 6.6 s. The driver's own re-accel in 6th on route 00000008 was 0.9-1.2 m/s^2. The
+(0.78 -> 0.69 m/s^2); boosted about 6.5 s. The driver's own re-accel in 6th on route 00000008 was 0.9-1.2 m/s^2. The
 set-speed jerk limit is unchanged, and the ceiling also bounds the whole plan (as stock get_max_accel does). Throttle
 side only: not a Rule-5 path.
 """
