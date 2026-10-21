@@ -390,9 +390,9 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"ManualLowSpeedHandbackRamp", {PERSISTENT | BACKUP, FLOAT, "0.5"}},
     {"EngineBrakePreferred", {PERSISTENT | BACKUP, BOOL, "0"}},
     {"EngineBrakeHardFloor", {PERSISTENT | BACKUP, FLOAT, "-1.5"}},
-    {"EngineBrakeCoastTarget", {PERSISTENT | BACKUP, FLOAT, "-0.2"}},
     {"EngineBrakeLeadTtc", {PERSISTENT | BACKUP, FLOAT, "6.0"}},
     {"EngineBrakeLeadClosingSpeed", {PERSISTENT | BACKUP, FLOAT, "1.0"}},
+    {"EngineBrakeLearnedTable", {PERSISTENT, JSON}},
     {"GearAwareAccel", {PERSISTENT | BACKUP, BOOL, "0"}},
 
     // sunnypilot model params

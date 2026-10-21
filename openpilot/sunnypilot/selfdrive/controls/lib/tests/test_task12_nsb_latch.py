@@ -176,22 +176,3 @@ class TestB3LatchOnEngagement(OpenpilotTestCase):
     for key in before:
       self.assertNotEqual(after[key], before[key], f"{key} applied after disengage + re-engage")
 
-  def test_ebp_lockout_survives_a_shift_and_an_override(self):
-    # closed plant: command 0 holds speed, so EBP's coast never slows the car -> capacity lockout. Task 16: the default
-    # coast target is -0.2 now (which the closed plant delivers), so this pins it to 0 to keep the lockout scenario
-    sim = ManualCarSim(speed=25., gear=6, v_set=24.5, plant="closed", NonAdaptiveLongitudinal=True, EngineBrakePreferred=True,
-                       ClutchShiftGate=True, EngineBrakeCoastTarget=0.0)
-    ebp = sim.ext.engine_brake_preferred
-    for _ in range(round(15. / DT_MDL)):   # (the integrated-shortfall backstop needs a few seconds of a tiny trim)
-      sim.run(DT_MDL)
-      if ebp.capacity_failed:
-        break
-    self.assertTrue(ebp.capacity_failed, "precondition: capacity lockout")
-    sim.run(0.5, clutch=True, gear=5)
-    sim.run(1.5, clutch=False)
-    sim.run(0.5, gas=True)
-    sim.run(0.5, gas=False)
-    self.assertTrue(ebp.capacity_failed, "a shift / gas override does not clear it")
-    sim.enabled = False
-    sim.run(DT_MDL)
-    self.assertFalse(ebp.capacity_failed, "only a disengage does")

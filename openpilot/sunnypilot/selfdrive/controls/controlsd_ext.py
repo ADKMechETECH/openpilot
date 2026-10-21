@@ -127,10 +127,13 @@ class ControlsExt(ModelStateBase):
 
   def apply_engine_brake_preferred(self, sm: messaging.SubMaster, enabled: bool, long_active: bool,
                                    accel_limits: tuple[float, float], long_control_state, calibrated_pose) -> tuple[float, float]:
-    # Must run every frame (latching, hold/capacity timers). Rule-5 urgency or no pose -> never suppresses.
+    # Must run every frame (latching, hold timer, logging). Rule-5 urgency or no pose -> never clamps.
     pitch = float(calibrated_pose.orientation.xyz[1]) if calibrated_pose is not None else None
+    CS_SP = sm['carStateSP']
     self.engine_brake_preferred.update(enabled, long_active, sm['carState'], sm['longitudinalPlan'], sm['radarState'],
-                                       self.urgency, long_control_state, pitch, self.clutch_valid)
+                                       self.urgency, long_control_state, pitch, self.clutch_valid,
+                                       CS_SP.gearRaw if self.clutch_valid else -1,
+                                       CS_SP.clutchPedal if self.clutch_valid else CLUTCH_PEDAL_UNKNOWN)
     return self.engine_brake_preferred.limit_accel(accel_limits)
 
   def apply_clutch_takeover(self, sm: messaging.SubMaster, long_active: bool, accel_limits: tuple[float, float],
@@ -231,7 +234,8 @@ class ControlsExt(ModelStateBase):
     ml.urgency = self.urgency or ""
     ml.gateEnabled, ml.gateState, ml.gatePaused, ml.gateBlocked = gate.enabled, gate.state.name, gate.paused, gate.blocked
     ml.reengageSmart = bool(gate.enabled and gate.reengage.smart)
-    ml.ebpEnabled, ml.ebpSuppressing, ml.ebpLockedOut = ebp.enabled, ebp.suppress, ebp.capacity_failed
+    ml.ebpEnabled, ml.ebpSuppressing, ml.ebpLockedOut = ebp.enabled, ebp.active, False
+    ml.ebpFloor, ml.ebpGear, ml.ebpBinding = float(ebp.floor), int(ebp.gear), bool(ebp.binding)
     ml.handbackAvailable, ml.handbackActive = hb.available, hb.active
     ml.handbackRampDone, ml.handbackDisengage = hb.ramp_done, hb.disengage_due
     ml.handbackSpeed, ml.handbackRamp = float(hb.speed), float(hb.ramp_time)

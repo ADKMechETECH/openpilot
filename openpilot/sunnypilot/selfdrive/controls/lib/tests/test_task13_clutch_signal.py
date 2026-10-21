@@ -77,7 +77,7 @@ class TestPresentButBadClutchSignal(OpenpilotTestCase):
         suppressed = False
         for _ in range(60):
           sim.run(0.1)
-          suppressed |= sim.ext.engine_brake_preferred.suppress
+          suppressed |= sim.ext.engine_brake_preferred.active
         self.assertTrue(all(sim.can_valid_seen))
         self.assertEqual(suppressed, not stuck, "EBP suppresses only with a live clutch signal")
 
@@ -102,12 +102,12 @@ class TestPresentButBadClutchSignal(OpenpilotTestCase):
     sim.enabled = True
     for _ in range(60):
       sim.run(0.1)
-      if sim.ext.engine_brake_preferred.suppress:
+      if sim.ext.engine_brake_preferred.active:
         break
-    self.assertTrue(sim.ext.engine_brake_preferred.suppress, "precondition: EBP suppressing")
+    self.assertTrue(sim.ext.engine_brake_preferred.active, "precondition: EBP clamping")
     self.assertTrue(sim.ext.clutch_shift_gate.enabled)
     sim.stuck_counter = True
     sim.run(0.05)
     self.assertFalse(sim.ext.clutch_valid)
-    self.assertFalse(sim.ext.engine_brake_preferred.suppress)
+    self.assertFalse(sim.ext.engine_brake_preferred.active)
     self.assertTrue(all(sim.can_valid_seen))

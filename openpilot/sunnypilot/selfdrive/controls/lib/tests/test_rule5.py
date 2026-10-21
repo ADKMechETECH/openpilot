@@ -24,7 +24,6 @@ from openpilot.common.realtime import DT_CTRL, DT_MDL
 from openpilot.common.test import OpenpilotTestCase
 from openpilot.sunnypilot.selfdrive.controls.lib.braking_urgency import braking_urgency
 from openpilot.sunnypilot.selfdrive.controls.lib.clutch_shift_gate import GateState
-from openpilot.sunnypilot.selfdrive.controls.lib.engine_brake_preferred import DEFAULT_COAST_TARGET
 from openpilot.sunnypilot.selfdrive.controls.lib.tests.manual_sim import FakeSM, ManualCarSim, Pose, controls_frame
 
 REASONS = ("fcw", "force_decel", "stock_aeb", "stopping", "hard_decel", "invalid_plan", "stale_plan", "invalid_radar",
@@ -105,11 +104,12 @@ def nsb_pulse(over):
 
 
 def ebp():
-  sim = ManualCarSim(speed=25., gear=6, v_set=24.7, NonAdaptiveLongitudinal=True, EngineBrakePreferred=True,
-                     ClutchShiftGate=False)
-  # suppressing: the lower limit raised to the coast target (Task 16: -0.2, closed throttle)
-  assert frames_until(sim, lambda s: s.ext.engine_brake_preferred.suppress and
-                      last(s)["limits"][0] >= DEFAULT_COAST_TARGET - 1e-9, 6.)
+  sim = ManualCarSim(speed=25., gear=6, v_set=22., NonAdaptiveLongitudinal=True, EngineBrakePreferred=True,
+                     ClutchShiftGate=False, pedal_switch=True)
+  # clamping (Task 17): a trusted 6th, the lower limit raised to 6th's brake-free floor while the plan wants more
+  e = sim.ext.engine_brake_preferred
+  assert frames_until(sim, lambda s: e.active and e.gear == 6 and e.binding and
+                      abs(last(s)["limits"][0] - e.floor) < 1e-9 and e.floor > ACCEL_MIN + 1., 6.)
   return sim
 
 
@@ -318,7 +318,7 @@ LOGGING = {"cloudlog", "print", "str", "repr", "format", "warning", "info", "deb
 # function -> (the function that consults urgency for it, why)
 REVIEWED = {
   "engine_brake_preferred.py:EngineBrakePreferred.limit_accel":
-    ("engine_brake_preferred.py:EngineBrakePreferred.update", "suppress is only set by update(), Rule 5 first"),
+    ("engine_brake_preferred.py:EngineBrakePreferred.update", "active is only set by update(), Rule 5 first"),
   "no_service_brake.py:apply_brake_floor":
     ("controlsd_ext.py:ControlsExt.apply_no_service_brake", "only caller; returns before it under urgency"),
   "no_service_brake.py:PulseFloor.apply":
