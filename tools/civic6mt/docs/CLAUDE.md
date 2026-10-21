@@ -1062,13 +1062,13 @@ dev-test). Three changes, all from the Stage 3 findings:
   `engine_brake_replay` PASS. Dev-test: CORE 1066 + chestnut (after rebuilding `libparams_c.so` on that branch — the
   feature build lacks the `TestConsole*` keys); **`mutate_devtest.py` 55/55**; `dev_test_render` 9/9. `test_console_replay`
   not rerun (no console code changed).
-- **Pushed:** feature `06c659dab`, dev-test `2d0dbe32c` (opendbc unchanged, `c54d823b9`); the fork copy of CLAUDE.md lags
-  this line only. **Device NOT updated yet** — the comma four was unreachable (hotspot `10.69.162.42` timed out; the PC
-  was on home Wi-Fi; `192.168.0.150` no route). Pending, with the car OFF (offroad): (1) `cd /data/openpilot && git pull`
-  (source install: the next start rebuilds incrementally — `params_keys.h` and a capnp comment changed); (2) **set
-  `EngineBrakePreferred` to 1** — the device's param file holds 0, which overrides the new default; (3) optional: rebuild
-  the learner store as v2 from the device's own samples so the Stage 3 coasts aren't dropped at the next start
-  (`learner_backfill.py samples.jsonl* --cycles 2` → `Params().put("EngineBrakeLearnedTable", …)`).
+- **Pushed:** feature `862bd713a`, dev-test `cafc0dab6` (incl. the MADS fix; opendbc unchanged, `c54d823b9`); the fork copy of
+  CLAUDE.md lags this line only. Dev-test CORE 1069 + chestnut after the MADS fix.
+- **Device updated 2026-10-21 (offroad, hotspot `10.69.162.42`):** `git pull` → `cafc0dab6`; `EngineBrakePreferred` set to 1
+  (the stored 0 overrode the new default); learner store rebuilt as v2 on the device from its own `samples.jsonl` (5,126
+  samples, 24 cells, cycles 2; the v1 store kept at `/data/engine_brake_learn/EngineBrakeLearnedTable.v1.json`); rebooted →
+  `build.py` rebuilt `libparams_c.so` (registered EBP default now True), manager up. **Device Python = `/usr/local/venv/bin/python`
+  with `PYTHONPATH=/data/openpilot`** (system `python3` lacks zmq/capnp). Ready for session 10.
 
 ## Test console architecture (core + vehicle profile)
 The on-car test console is a **vehicle-agnostic core** — capture state machine, detectors/analyzers, the registry/session
