@@ -187,7 +187,9 @@ class ControlsExt(ModelStateBase):
       urgency = handback_urgency(self.urgency, radar, v_ego, reaction, a_down)
       imminent = handback_lead_imminent(radar, v_ego, reaction, a_down)
       holding = handback_lead_holding(radar, v_ego, reaction, a_down)
-    hb.update(enabled, v_ego, last_accel, urgency, force_decel_from(sm), imminent, holding)
+    gear_raw = int(sm['carStateSP'].gearRaw) if hb.available and self.clutch_valid else 0
+    hb.update(enabled, v_ego, last_accel, urgency, force_decel_from(sm), imminent, holding,
+              gear_raw if 1 <= gear_raw <= 6 else 0)
     return self.low_speed_handback.ramp_done
 
   def lead_visible(self, sm: messaging.SubMaster) -> bool:
@@ -238,7 +240,7 @@ class ControlsExt(ModelStateBase):
     ml.ebpFloor, ml.ebpGear, ml.ebpBinding = float(ebp.floor), int(ebp.gear), bool(ebp.binding)
     ml.handbackAvailable, ml.handbackActive = hb.available, hb.active
     ml.handbackRampDone, ml.handbackDisengage = hb.ramp_done, hb.disengage_due
-    ml.handbackSpeed, ml.handbackRamp = float(hb.speed), float(hb.ramp_time)
+    ml.handbackSpeed, ml.handbackRamp = float(hb.threshold), float(hb.ramp_time)   # gear-aware (Stage 3)
     ml.nsbEnabled, ml.nsbDecelFloor = bool(self.no_service_brake_enabled), float(self.no_service_brake_floor)
 
   def state_control_ext(self, sm: messaging.SubMaster) -> custom.CarControlSP:
