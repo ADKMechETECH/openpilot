@@ -118,6 +118,9 @@ cfg = dataclasses.replace(cfg, pubs=cfg.pubs + ["radarState", "carStateSP"], sub
 
 
 def run(msgs, **params):
+  # the gate is under test, not EngineBrakePreferred: pinned OFF (it defaults ON on manuals since Session 10 prep, and
+  # the captures predate that)
+  params = {"EngineBrakePreferred": False, **params}
   if params.get("ClutchShiftGate"):
     params.setdefault("DisengageOnAccelerator", False)   # the gate refuses to enable with it ON (Task 12 A2.8)
   return replay_process(cfg, msgs, custom_params=params or None, disable_progress=True)
