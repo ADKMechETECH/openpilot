@@ -532,11 +532,12 @@ def r_bit_hunt(a: BitHuntAnalyzer):
 
 
 def r_window(a: SegmentAnalyzer):
-  """S7: a marked capture window for scrubbing every bus in cabana (the volume buttons are likely on B-CAN)."""
+  """S7 / S8: a marked capture window; the analysis runs offline on the full logs, every bus (S7: the volume rhythm,
+  likely B-CAN; S8: a brake-pressure field)."""
   secs = sum(g.dur for g in a.segments)
   if secs <= 0.:
     return None, ""
-  return CAPTURED, f"{secs:.0f}s window marked (test_marker start/stop): scrub every logged bus in cabana for the 4/5 rhythm"
+  return CAPTURED, f"{secs:.0f}s window marked (test_marker start/stop) - analysed offline on the full logs"
 
 
 RESULTS = {

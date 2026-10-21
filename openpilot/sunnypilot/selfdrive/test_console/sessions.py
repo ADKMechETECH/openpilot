@@ -228,7 +228,7 @@ def chip_text(state: dict, live: bool, test_id: str, button: str = "gap", press:
     return f"ARM {test_id}, then {press}-press {button} to START", "idle"
   st, progress = state.get("state"), state.get("progress", "")
   if st == "capturing":
-    return f"STOP • ● REC  {progress}".strip(), "capturing"
+    return f"● REC  {progress} • press to pause".strip(), "capturing"
   if st == "stopped":
     return f"PAUSED {progress} • press to resume".strip(), "stopped"
   if st == "complete":

@@ -214,7 +214,7 @@ class TestStatusDerivation(OpenpilotTestCase):
 
   def test_chip(self):
     st = {"armed": True, "selected": "G2", "state": "capturing", "progress": "shifts 2/6"}
-    self.assertEqual(chip_text(st, True, "G2"), ("STOP • ● REC  shifts 2/6", "capturing"))
+    self.assertEqual(chip_text(st, True, "G2"), ("● REC  shifts 2/6 • press to pause", "capturing"))
     self.assertEqual(chip_text({**st, "state": "armed"}, True, "G2")[1], "armed")
     self.assertEqual(chip_text({**st, "state": "complete", "status": "PASS"}, True, "G2")[1], "PASS")
     self.assertEqual(chip_text({**st, "state": "stopped"}, True, "G2")[1], "stopped")
@@ -321,7 +321,7 @@ class TestSignatureHunts(OpenpilotTestCase):
     self.assertTrue(a.complete)
     status, detail = a.result()
     self.assertEqual(status, CAPTURED)
-    self.assertIn("scrub every logged bus", detail)
+    self.assertIn("analysed offline on the full logs", detail)
 
   def test_signature_tests_never_run_in_background(self):
     # the marked parked hunts (S6, S7, and S8 - Task 16) run only when the driver starts them

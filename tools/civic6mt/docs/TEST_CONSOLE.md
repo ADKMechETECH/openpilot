@@ -144,8 +144,10 @@ Tap a session card → its **session page**:
 - **one card per test**: `id  name` and its state (`✓ PASS`, `× FAIL`, `✓ captured`, `• partial n/m`, `○ armed`,
   `● REC` + progress). Tap → the **test detail page**: the ARM switch, live status, conditions (failing first), result,
   the start button, prereqs, how-to cards and the pass rule;
-- the **start-button status** in large monospace: "ARM G2, then triple-press gap to START" → "armed • …" →
-  **STOP • ● REC** + progress while capturing → PAUSED / PASS / FAIL / CAPTURED.
+- the **start-button status** in large monospace: "ARM G2, then short-press gap to START" (the press mode set on the
+  phase view) → "armed • …" → **● REC** + progress **• press to pause** while capturing → PAUSED … press to resume / PASS /
+  FAIL / CAPTURED. A test **ends by itself** once its goal is captured; a press while recording only pauses it (2026-10-20:
+  the chip used to read "STOP • ● REC", which read as an instruction — and nothing said the test ends on its own).
 - A swipe never fires a card (stock's scroller invalidates touches while it scrolls — Task 12 D-09, now checked on the
   real widgets with a real swipe).
 

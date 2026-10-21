@@ -107,8 +107,9 @@ TESTS: tuple[TestSpec, ...] = (
            "window", "", ("t", "v_ego", "gear_raw", "raw_payload"),
            prereqs=("S1",), first_run=True, optional=True, sample_hz=20, background=False, session="1"),
   TestSpec("S8", 0, Kind.TELEMETRY, "Brake-pressure hunt",
-           ("Parked in NEUTRAL, engine idling, parking brake on. Press start, then: ~5 s still,",
-            "HARD brake press held 5 s, release ~5 s; MEDIUM press 5 s, release ~5 s; LIGHT press 5 s, release ~5 s. Press start to stop.",
+           ("Parked in NEUTRAL, engine idling, parking brake on. ARM, then press start once (REC), then: ~5 s still,",
+            "HARD brake press held 5 s, release ~5 s; MEDIUM press 5 s, release ~5 s; LIGHT press 5 s, release ~5 s. " +
+            "It ends by itself after 60 s of capture (a press only pauses / resumes).",
             "Passive capture only (nothing is sent to any module). A field that steps up hard > medium > light and drops on release " +
             "is brake pressure - the analysis runs on the full logs, every bus."),
            (), "segments",
