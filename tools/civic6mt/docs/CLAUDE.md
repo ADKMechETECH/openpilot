@@ -815,7 +815,8 @@ console fixed, and found the Task 13 imminent-lead latch defective both ways). F
 **Task 15 — first pass from Stage 1 on-car data** (brief: the owner's Task 15 message, 2026-10-20; data:
 `docs/stage1-findings-2026-10-20.md`, route `00000002--6c1a3bb7d4`). Goal: the fork ready for Stage 2 (op-long ON, every
 custom feature OFF). opendbc `ec94b772a` (1), `d5af6598b` (2), `0ca828dde` (3); feature `dc4d4eec2` (schema + bump),
-`2729be830` (4), `83f8e6173` (tools), `34604c568` (docs). **Not pushed** (owner to OK); nothing flashed. Every custom toggle still defaults OFF; non-adaptive untouched (Stage 4).
+`2729be830` (4), `83f8e6173` (tools), `34604c568` (docs). **Pushed 2026-10-20** (opendbc `0ca828dde`, feature `aff9ce1d4`, dev-test `1a23dc9b3`);
+the fork copy of CLAUDE.md lags this line only. Nothing flashed by Claude (owner installs dev-test). Every custom toggle still defaults OFF; non-adaptive untouched (Stage 4).
 - **1 RPM source (blocker):** every Bosch-radarless manual reads `POWERTRAIN_DATA.ENGINE_RPM` (0x17C) — `ENGINE_DATA`'s
   is 0 on the car. Before this the ratio lock, flare backstop, EBP and GearAware were inert on the car.
 - **2 clutch pedal switches:** `GAS_PEDAL_2` (0x130) `CLUTCH_PEDAL_UP` (bit 50, opens as the pedal starts to move) /
@@ -864,6 +865,48 @@ custom feature OFF). opendbc `ec94b772a` (1), `d5af6598b` (2), `0ca828dde` (3); 
   moved slowly in cabana; does a 0.15 s resume feel abrupt (the takeover ramp still rate-limits it); `NEUTRAL_CONFIRM`
   vs real slow releases (pedal up 0.5–1.2 s before GEAR_MT reported was seen — those go through coastTimeout briefly, no
   throttle either way).
+
+**Task 16 — Stage 2 fixes + in-car UI** (owner brief 2026-10-20; data `docs/stage2-findings-2026-10-20.md`, route
+`00000004--9b8c913b70`). Feature `d3451cf1b` (1), `515f83aad` (2), `f5edfca91` (mutations), `0c0dd5ade` (tests/tools follow
+the target), `f5dc25587` (HUD contrast); dev-test merges `2c87fe532`, `215d315e3`, UI `d9f2e597a`.
+- **1 gas-override surge (SAFETY, always on for manuals, no toggle — owner decision):** while the gas overrides openpilot
+  the planner re-seeds from aEgo every frame (stock); after the lift it resumed from the driver's +1.8 m/s^2 and the PCM
+  re-opened the throttle (~1.5 s re-surge to 5.5 mph over set). `LongitudinalPlannerSP.update_gas_override` flags a
+  reset that is a driver gas override while engaged (kept through the lift frame); `reset_accel` seeds `min(aEgo, 0)`
+  for it on manuals; automatics and every other reset are stock. Only ever lowers the seed (less throttle, never less
+  braking). Tests (`test_gas_override_seed.py`, closed loop): no throttle requested or sent while above set after the
+  lift, no re-surge; below set it coasts first then resumes; automatic unchanged. *The brief's "never positive" is
+  checked as "never positive while above set": after a lift over set the car may dip below set and the plan then
+  correctly asks for throttle again.*
+- **2 `EngineBrakeCoastTarget` 0.0 → −0.2** (constant + `params_keys.h`, compiled): C2 showed 0 = zero torque (no engine
+  braking), a small negative = closed throttle. **It is the engine-braking request, not a brake threshold** — the brakes
+  join past the gear's engine braking (≈ −0.5 in 3rd), which is EBP's separate credited estimate. EBP stays default OFF.
+  Tests that hardcoded 0.0 now key on `DEFAULT_COAST_TARGET`; the two backstop tests (capacity, lockout) pin 0.0, their
+  worst case; `engine_brake_replay` runs EBP at the default (0 clamps on its segment) AND at 0.0 (must clamp: 53, as in
+  Task 6). **Known gap:** the EBP test plant is force-additive (cmd + engine braking) — Stage 2 showed small negatives
+  don't add brakes; rework the plant before Stage 4 EBP validation. Found by the full CORE run (the Rule 5 matrix's EBP
+  state and the B3 lockout test failed their preconditions); the 36 EBP / R5 / latch / Task 16 mutations re-run clean.
+- **3 UI (dev-test):** the session view was custom-drawn (14–28 px text, 24–42 px targets). Rebuilt on the **stock mici
+  settings components** (NavScroller + `Big*` cards at stock size 402×180, 44 px titles / 32 px values, nothing < 24 px,
+  white on dark — `contrast()` pins full white because stock re-applies a 90 % title color every draw and greys values):
+  home = status + one card per session + phase view; session page = name/toggle status, objective card, **one card per
+  toggle** (stock switch; multi-value = a card that cycles), **one card per test** (detail page with ARM), start-button
+  status in monospace (`UNIFONT`). Chip 28 px monospace, opaque; HUD shift text full white. Kept: single write path, no
+  Param-bound widget, D2 refusals on the card, satisfied requirement never flipped, D1 guards. D-09 is now stock's
+  scroller touch invalidation — checked on the real widgets with a real multi-frame swipe (a one-frame "teleport" swipe
+  does fire a card; real fingers span frames). `test_ui_smoke` rebuilt (every card + detail page, readability, real-widget
+  toggles); `dev_test_render` per-card PNGs + 9 interaction checks; mutations: `d2_tap_any_release` re-pointed at the
+  stock scroller, 4 new UI ones.
+- **Run (PC, 2026-10-20):** feature CORE **908 passed** (+ the pre-existing chestnut failure), WIDE 2209; selfref
+  controlsd / plannerd / card **0 diffs** on all 4 CI segments vs the Task 15 baseline (toggles OFF; CI segments are
+  automatics); `clutch_reengage_replay` PASS (gate OFF bit-identical on the re-fingerprinted manual); `engine_brake_replay`
+  PASS (both targets); `mutate.py` 84/84 (EBP/R5 subset 36/36 re-run after the test fixes). Dev-test: CORE **1035 passed** + the chestnut failure + **`test_locationd::test_params_gps`, a
+  pre-existing flake** (a "written within 5 s" timing test: fail/pass/fail here, fail/pass/pass at the Task 15 tip —
+  untouched code); WIDE 2209; `test_console_replay` 0 diffs on all 4 segments (console armed, 0 errors), isolation OK,
+  offline OK, equiv every armed test captured; `dev_test_render` 9/9; **`mutate_devtest.py` 53/53**.
+- **On-car next (Stage 3, test card):** 3a surge fix (lifts over and under set), 3b gate feel at 0.15 s (ClutchShiftGate ON),
+  3c low-speed handback in an empty lot. Update via `git pull` on the device (dev branch, not prebuilt); the first start
+  rebuilds (params_keys.h changed). Prebuilt not rebuilt (owner: test on-device first).
 
 ## Test console architecture (core + vehicle profile)
 The on-car test console is a **vehicle-agnostic core** — capture state machine, detectors/analyzers, the registry/session
@@ -992,6 +1035,10 @@ Behavior — empty road, low speed, ready to take over, one toggle at a time:
 - [ ] **(Task 12 A2) RPM-flare thresholds** against real ENGINE_DATA: 3 new samples > 1500 rpm/s, no gas; cool-down
       after 2 flares in 10 s. Zero false flares over a normal drive (sim: 10 min of σ 30 rpm noise at 25 Hz).
 - [ ] Uphill handback: crossing the threshold on the gas uphill — how fast the car slows once the ramp ends.
+- [ ] **(Task 16) Gas-override surge fix:** engaged over set, press the gas, lift: no re-acceleration (the command must
+      not go positive while over set); lifting below set coasts briefly then resumes smoothly.
+- [ ] **(Task 16) Console UI on the device:** cards readable at arm's length in the mount, swipes never flip a switch,
+      a refused write says why on the card.
 - [ ] **(Task 15) Clutch pedal switch:** in cabana, move the clutch pedal slowly: `GAS_PEDAL_2.CLUTCH_PEDAL_UP` (bit 50)
       opens at the first movement, `CLUTCH_PEDAL_FLOOR` (bit 51) closes only at the floor; `CarStateSP.clutchPedal` reads
       1 / 2 / 3 accordingly and never 0 once running.
@@ -1051,6 +1098,20 @@ Task 6 (engine-brake features) — only after the items above, toggles one at a 
   not `0x1BE` — corrected 2026-10-16.)
 - Confirm `GEAR_MT`/`PEDAL_GAS`/`ENGINE_RPM` decode correctly on this specific car with a cabana
   log once the comma is installed (values match actual gear/clutch/RPM).
+
+## Device install: source vs prebuilt (`docs/PREBUILT.md`)
+The car runs the fork from either **`civic-6mt-dev-test`** (source; builds on the device) or **`civic-6mt-prebuilt`**
+(flattened, compiled on the device for **AGNOS 19.7**, published from the PC by `scripts/rebuild-prebuilt.sh`).
+Install prebuilt: custom software `ADKMechETECH/civic-6mt-prebuilt`, or
+`git clone -b civic-6mt-prebuilt --depth 1 https://github.com/ADKMechETECH/openpilot.git` (no submodules in it).
+- **Pure Python / `.dbc` changes:** push to dev-test; a dev-test install just `git pull`s. *A prebuilt install only sees
+  what was last published — rerun the script (no recompile, quick).*
+- **Recompile → `scripts/rebuild-prebuilt.sh`:** new/renamed **Params keys (`params_keys.h`)** — nearly every feature
+  task — C/C++, Cython `.pyx`, panda firmware / `opendbc/safety`, cereal `.capnp` / services, the Python EKF generators
+  (`locationd/models/*_kf.py`, rednose), models (`.onnx`), SConstruct/SConscript.
+- **AGNOS version change:** full rebuild on the device after it updates.
+- Binaries embed `/data/openpilot`: always built there (the script swaps a build checkout in and puts the live install
+  back). The device has no GitHub credentials: publishing is from the PC.
 
 ## Build environment
 Linux via WSL2 (Ubuntu 24.04). Clone into the WSL home (`~/`), not `/mnt/e` (slow across the
