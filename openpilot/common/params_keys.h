@@ -394,6 +394,11 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"EngineBrakeLeadClosingSpeed", {PERSISTENT | BACKUP, FLOAT, "1.0"}},
     {"EngineBrakeLearnedTable", {PERSISTENT, JSON}},
     {"GearAwareAccel", {PERSISTENT | BACKUP, BOOL, "0"}},
+    {"SetSpeedCoast", {PERSISTENT | BACKUP, BOOL, "0"}},
+    {"SetSpeedCoastDecel", {PERSISTENT | BACKUP, FLOAT, "0.12"}},
+    {"SetSpeedCoastMinSpeed", {PERSISTENT | BACKUP, FLOAT, "24.6"}},
+    {"CruiseAccelBoost", {PERSISTENT | BACKUP, BOOL, "0"}},
+    {"GapHoldNonAdaptive", {PERSISTENT | BACKUP, BOOL, "1"}},
 
     // on-car test console — dev-test branch (civic-6mt-dev-test) only; never on the feature branch
     {"TestConsoleSelected", {PERSISTENT, STRING}},

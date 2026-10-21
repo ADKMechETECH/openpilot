@@ -19,6 +19,8 @@ TRIP = [f"{T}/test_rule5.py::TestRule5Tripwire"]
 FORCED = [f"{T}/test_non_adaptive_longitudinal.py::TestForcedMpcPlanner"]   # no acados needed
 LATCH = [f"{T}/test_manual_low_speed_handback.py::TestTask14Latch"]
 SEED = [f"{T}/test_gas_override_seed.py"]
+CPROF = [f"{T}/test_cruise_profile.py"]
+CRUISE = ["openpilot/sunnypilot/selfdrive/car/tests/test_cruise_mode.py"]
 
 
 # Task 14 A3: "FCW is never resolved at a stop" now has two layers (no standstill timer under FCW; FCW urgent even
@@ -304,4 +306,29 @@ MUTATIONS = [
   m("s3_mads_refusal_blocks_lateral", "S3 the handback never refuses / ends lateral", "openpilot/sunnypilot/mads/mads.py",
     "self.events_sp.contains(EventNameSP.lkasEnable) or self.longitudinal_only_low_speed:",
     "self.events_sp.contains(EventNameSP.lkasEnable):", ["openpilot/sunnypilot/mads/tests/test_mads_manual_handback.py"]),
+  # session 10 (owner decisions 2026-10-21): SetSpeedCoast / CruiseAccelBoost (cruise_profile.py), gap hold -> NonAdaptive
+  m("s10_coast_ignores_urgency", "S10 SetSpeedCoast steps aside on Rule-5 urgency (planner frame)", f"{SP}/lib/cruise_profile.py",
+    "active = self.coast_enabled and engaged and urgency is None and v_cruise >= self.coast_min_speed",
+    "active = self.coast_enabled and engaged and v_cruise >= self.coast_min_speed", CPROF + R5),
+  m("s10_coast_ignores_threshold", "S10 SetSpeedCoast only at highway set speeds", f"{SP}/lib/cruise_profile.py",
+    "active = self.coast_enabled and engaged and urgency is None and v_cruise >= self.coast_min_speed",
+    "active = self.coast_enabled and engaged and urgency is None", CPROF),
+  m("s10_coast_no_stock_shadow", "S10 SetSpeedCoast keeps the stock shadow (Rule 5 in the control frame)",
+    "openpilot/selfdrive/controls/lib/longitudinal_planner.py",
+    "gear_aware = self.gear_aware_accel.enabled or self.cruise_profile.shaped", "gear_aware = self.gear_aware_accel.enabled",
+    CPROF + R5),
+  m("s10_controlsd_ignores_coast_shadow", "S10 controlsd runs the stock plan under urgency with SetSpeedCoast",
+    f"{SP}/controlsd_ext.py", "if not (features.gearAware or features.setSpeedCoast) or",
+    "if not features.gearAware or", R5),
+  m("s10_coast_latch_engaged", "S10 SetSpeedCoast / CruiseAccelBoost latch only while disengaged", f"{SP}/lib/cruise_profile.py",
+    "    if not engaged:  # never switches mid-engagement\n      self.coast_enabled",
+    "    if True:  # never switches mid-engagement\n      self.coast_enabled", CPROF),
+  m("s10_boost_when_off", "S10 CruiseAccelBoost off = stock ceiling", f"{SP}/lib/cruise_profile.py",
+    "A_CRUISE_MAX_VALS_BOOST if self.boost_enabled else A_CRUISE_MAX_VALS", "A_CRUISE_MAX_VALS_BOOST", CPROF),
+  m("s10_gap_hold_writes_engaged", "S10 the gap hold never changes the mode while engaged",
+    "openpilot/sunnypilot/selfdrive/car/cruise_helpers.py",
+    "      if enabled:\n        events.add(EventNameSP.nonAdaptiveDisengageFirst)\n        return\n", "", CRUISE),
+  m("s10_gap_hold_steps_personality", "S10 a used hold never also steps the personality",
+    "openpilot/sunnypilot/selfdrive/car/cruise_helpers.py",
+    "      self.experimental_mode_switched = True\n      if enabled:", "      if enabled:", CRUISE),
 ]

@@ -25,9 +25,20 @@ class CruiseHelper:
     self._experimental_mode = False
     self.experimental_mode_switched = False
 
-  def update(self, CS, events, experimental_mode) -> None:
+    # civic-cruise session 10 (owner, 2026-10-21): on a manual with openpilot longitudinal, the distance-button hold
+    # toggles NonAdaptiveLongitudinal instead of Experimental mode (e2e longitudinal brakes to stops and launches, which a
+    # manual can't use; the planner ignores e2e in non-adaptive anyway). GapHoldNonAdaptive (default ON) restores stock.
+    self.gap_hold_non_adaptive = (bool(CP.openpilotLongitudinalControl) and
+                                  CP.transmissionType == structs.CarParams.TransmissionType.manual and
+                                  bool(self.params.get("GapHoldNonAdaptive", return_default=True)))
+
+  def update(self, CS, events, experimental_mode, enabled: bool = False) -> None:
     if self.CP.openpilotLongitudinalControl:
-      if CS.cruiseState.available:
+      if self.gap_hold_non_adaptive:
+        # counted with main cruise off too: NonAdaptive doesn't need it, and a hold must never step the personality
+        self.update_button_frame_counts(CS)
+        self.update_non_adaptive(events, enabled)
+      elif CS.cruiseState.available:
         self.update_button_frame_counts(CS)
 
         # toggle experimental mode once on distance button hold
@@ -42,6 +53,19 @@ class CruiseHelper:
       button = button_event.type.raw
       if button in self.button_frame_counts:
         self.button_frame_counts[button] = int(button_event.pressed)
+
+  def update_non_adaptive(self, events, enabled: bool) -> None:
+    """Once per hold (>= DISTANCE_LONG_PRESS frames, 0.5 s): flip NonAdaptiveLongitudinal - only while disengaged, where
+    the planner latches it (within ~1 s); engaged, it only says so. experimental_mode_switched marks the hold as used,
+    so selfdrived doesn't also step the personality on the release."""
+    if self.button_frame_counts[ButtonType.gapAdjustCruise] >= DISTANCE_LONG_PRESS and not self.experimental_mode_switched:
+      self.experimental_mode_switched = True
+      if enabled:
+        events.add(EventNameSP.nonAdaptiveDisengageFirst)
+        return
+      non_adaptive = not self.params.get_bool("NonAdaptiveLongitudinal")
+      self.params.put_bool("NonAdaptiveLongitudinal", non_adaptive, block=True)   # once per hold, disengaged only
+      events.add(EventNameSP.nonAdaptiveOn if non_adaptive else EventNameSP.nonAdaptiveOff)
 
   def update_experimental_mode(self, events, experimental_mode) -> None:
     if self.button_frame_counts[ButtonType.gapAdjustCruise] >= DISTANCE_LONG_PRESS and not self.experimental_mode_switched:

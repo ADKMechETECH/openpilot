@@ -288,6 +288,19 @@ EVENTS_SP: dict[int, dict[str, Alert | AlertCallbackType]] = {
 
   # No-service-brake pulse mode (no_service_brake.py): the bounded brake pulse couldn't hold the overspeed band, so
   # full openpilot braking is back. Fires once per escalation (one planner frame).
+  # session 10: the distance-button hold on a manual (cruise_helpers.CruiseHelper.update_non_adaptive)
+  EventNameSP.nonAdaptiveOn: {
+    ET.WARNING: NormalPermanentAlert("Cruise: Set Speed Only", "openpilot won't slow for traffic - you brake", duration=2.5),
+  },
+
+  EventNameSP.nonAdaptiveOff: {
+    ET.WARNING: NormalPermanentAlert("Cruise: Adaptive", "openpilot follows the car ahead", duration=2.5),
+  },
+
+  EventNameSP.nonAdaptiveDisengageFirst: {
+    ET.WARNING: NormalPermanentAlert("Cruise Mode Unchanged", "Disengage first, then hold the distance button", duration=2.5),
+  },
+
   EventNameSP.noServiceBrakeOverspeed: {
     ET.WARNING: Alert(
       "Overspeed: Take Over",
