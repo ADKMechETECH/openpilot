@@ -320,7 +320,10 @@ discarded uncommitted.* Code: `sunnypilot/.../manual_low_speed_handback.py`, wir
   opendbc is left as-is (metadata only — nothing consumes it; the handback structurally prevents a launch).
 - On Honda, `speedTooLow`/`belowEngageSpeed` also end/block MADS lateral at that speed (MADS only strips them
   for non-Honda brands) — consistent with stock Honda low-speed behavior. **Kept as-is for now; flagged as a
-  feature improvement** (see Open questions: "Lateral at the low-speed handback").
+  feature improvement** (see Open questions: "Lateral at the low-speed handback"). *(Corrected 2026-10-21: wrong for
+  the handback disengage — MADS runs after selfdrived and MVL's all-speed-MADS branch strips both once longitudinal is
+  off; Stage 3 logs: `latActive` stayed True through both handbacks. The one real coupling, a UEM SET press below the
+  handback speed with lateral off, is fixed — see Session 10 prep.)*
 - **Composition with Phase 2 / Task 4 (integration tests, all four `NonAdaptiveLongitudinal` ×
   `NoServiceBrakeHold` combos):** no conflicts. Handback timing and result are identical in every combo; the
   NSB floor and the handback envelope intersect (tighter bound wins, never widens). Interactions found:
@@ -1044,14 +1047,28 @@ dev-test). Three changes, all from the Stage 3 findings:
   param file held 0**, so the default alone wouldn't turn it on there. Closed-loop sims keep their EBP-OFF baseline
   (`manual_sim.set_params`); `test_defaults_on` covers the default (unset → ON, stored 0 → OFF, automatics never).
   **Always-on exception list (E2) gains: EBP on manuals with op long (default), and the gear-aware handback speed.**
+- **Lateral stays independent of the handback (owner, 2026-10-21, after a side note flagged that 2nd/3rd now hand back at
+  8.7/13 mph):** the Stage 3 logs show the handback never ended lateral with MADS on (`latActive` True through both
+  handbacks; MADS runs after selfdrived and MVL's all-speed-MADS branch strips `speedTooLow`/`belowEngageSpeed` once
+  longitudinal is off). The one coupling — a SET press (Unified Engagement Mode) below the handback speed with lateral
+  off was refused for lateral too — is fixed: `mads.py` strips both on manual-handback cars (`handback_available`)
+  whenever longitudinal is disengaged; stock-ACC Hondas / automatics unchanged. `test_mads_manual_handback.py`, mutation
+  `s3_mads_refusal_blocks_lateral`. MADS OFF = stock openpilot (lateral tied to engagement).
 - `clutch_reengage_replay.py` now pins EBP OFF (its "gate OFF = capture" check differed only because EBP turned on by
   default on the re-fingerprinted manual; pinned → bit-identical).
 - **Run (PC, 2026-10-21):** feature: controls lib 352 passed; CORE 937 + the pre-existing chestnut failure; WIDE 2210;
-  **`mutate.py` 110/110** (9 new `s3_*`); self-referenced plannerd + controlsd vs captures at `6db16d0e0`: **0 diffs on all
+  **`mutate.py` 110/110** (9 new `s3_*`; + `s3_mads_refusal_blocks_lateral` caught → 111; CORE 940 after the MADS fix); self-referenced plannerd + controlsd vs captures at `6db16d0e0`: **0 diffs on all
   4 CI segments** (automatics: none of the three changes reaches them); `clutch_reengage_replay` PASS;
   `engine_brake_replay` PASS. Dev-test: CORE 1066 + chestnut (after rebuilding `libparams_c.so` on that branch — the
   feature build lacks the `TestConsole*` keys); **`mutate_devtest.py` 55/55**; `dev_test_render` 9/9. `test_console_replay`
   not rerun (no console code changed).
+- **Pushed:** feature `06c659dab`, dev-test `2d0dbe32c` (opendbc unchanged, `c54d823b9`); the fork copy of CLAUDE.md lags
+  this line only. **Device NOT updated yet** — the comma four was unreachable (hotspot `10.69.162.42` timed out; the PC
+  was on home Wi-Fi; `192.168.0.150` no route). Pending, with the car OFF (offroad): (1) `cd /data/openpilot && git pull`
+  (source install: the next start rebuilds incrementally — `params_keys.h` and a capnp comment changed); (2) **set
+  `EngineBrakePreferred` to 1** — the device's param file holds 0, which overrides the new default; (3) optional: rebuild
+  the learner store as v2 from the device's own samples so the Stage 3 coasts aren't dropped at the next start
+  (`learner_backfill.py samples.jsonl* --cycles 2` → `Params().put("EngineBrakeLearnedTable", …)`).
 
 ## Test console architecture (core + vehicle profile)
 The on-car test console is a **vehicle-agnostic core** — capture state machine, detectors/analyzers, the registry/session
@@ -1220,7 +1237,11 @@ Task 6 (engine-brake features) — only after the items above, toggles one at a 
 - [ ] `GearAwareAccel`: throttle-on / lift-off feel in 1st–3rd; tune `JERK_SCALE_BY_GEAR`.
 
 ## Open questions
-- **FEATURE IMPROVEMENT — lateral at the low-speed handback (owner may not want lateral to drop):** today the
+- ~~**FEATURE IMPROVEMENT — lateral at the low-speed handback**~~ — **resolved 2026-10-21** (owner: lateral must stay
+  independent of the handback): with MADS on, the handback never ended lateral (see the Task 5 correction), and MADS
+  now also ignores the handback's refusal when lateral is off (Session 10 prep). Lateral stays on its own MADS/stock
+  logic at any speed. With MADS OFF, stock openpilot ties lateral to engagement — no decoupling there. Original text:
+  today the
   Task 5 handback disengages via stock `speedTooLow`, and on Honda MADS honors it, so lateral drops with
   longitudinal below ~5 mph and can't be engaged below ~6 mph (`belowEngageSpeed`). Decided 2026-10-16: leave
   as-is, revisit. *(Task 12 A3.6 [B-L5] looked again: not clean to do without the car — sunnypilot's `mads.py` keeps
