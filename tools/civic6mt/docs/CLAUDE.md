@@ -1019,8 +1019,39 @@ seed + the handback. Feature `sp-honda-dev-202608` + dev-test: table + tool comm
 - **Flare cool-down counts shifts:** clutch-in/slipping rpm rises (blips, re-coupling) can't start a cap but count toward
   the 2-in-10 s cool-down (3×/drive). Minor; proposal: count only flares that could start a cap.
 - **Run (PC, 2026-10-21):** controls lib 342 passed; CORE 927 + the pre-existing chestnut failure; Task 17 mutations
-  20/20; `engine_brake_replay` PASS. Nothing flashed; Python-only (dev-test `git pull`; prebuilt needs the script, no
+  20/20; `engine_brake_replay` PASS; dev-test CORE 1056 + chestnut, console + controls 471 passed. Pushed feature
+  `6db16d0e0` (`e5cb0b2c9` table, `c4eafd826` replay tool), dev-test `d733926dd` (opendbc unchanged, `c54d823b9`); the fork
+  copy of CLAUDE.md lags this line only. Nothing flashed; Python-only (dev-test `git pull`; prebuilt needs the script, no
   recompile).
+
+**Session 10 prep (2026-10-21)** (brief: Dropbox `CommaAI/session10-prep-prompt.md`; feature `sp-honda-dev-202608` →
+dev-test). Three changes, all from the Stage 3 findings:
+- **Gear-aware handback speed** (`manual_low_speed_handback.py` `GEAR_HANDBACK_SPEED`, always on like the handback):
+  threshold = max(`ManualLowSpeedHandbackSpeed`, the GEAR_MT gear's value): **2nd 8.7 mph, 3rd 13.0 mph** (~1000 rpm);
+  1st and **4th–6th use the setting — owner decision** (the brief's "1000 rpm in 4th ≈ 3.5 mph" was inverted: it is
+  17.6 mph in 4th / 26.4 in 6th; asked, and the owner kept 5 mph there since a driver clutches/downshifts first and an
+  18–26 mph handback would take Honda lateral with it). Gear = GEAR_MT while `clutchSignalValid`, else the setting
+  (clutch in / neutral too). Checked every frame until it latches; never undone by a gear change. The published
+  `handbackSpeed` is now the gear-aware value (capnp comment updated), so selfdrived's engage refusal and its "Drive
+  Above N mph" text follow the gear. A phantom 2nd in neutral at idle only makes a neutral coast hand back sooner.
+- **Learner v2** (`engine_brake_learning.py`, still telemetry only, `APPLY_LEARNED` off): per-cell D **histogram →
+  median** (bound = the quantile 2 binomial SEs below 0.5, n_eff = coast seconds); **1 s in-coast settle**
+  (`SETTLE_IN_COAST`); **proposals build up** (`_new_cycle` passes `learned_prev`). Store VERSION 2: a v1 store is dropped
+  at start (`engine_brake_learn_store_reset`); `tools/civic6mt/learner_backfill.py` rebuilds v2 from `samples.jsonl`
+  (the device's Stage 3 samples: 6,933 rows → 5,126 learnable, 24 cells; first proposals within +0.02 of static).
+- **`EngineBrakePreferred` default ON** (`params_keys.h` "1", owner). Both readers now use `get(…, return_default=True)`
+  (`get_bool` ignores registered defaults — an unset key would have stayed OFF). A stored 0 still wins: **the car's
+  param file held 0**, so the default alone wouldn't turn it on there. Closed-loop sims keep their EBP-OFF baseline
+  (`manual_sim.set_params`); `test_defaults_on` covers the default (unset → ON, stored 0 → OFF, automatics never).
+  **Always-on exception list (E2) gains: EBP on manuals with op long (default), and the gear-aware handback speed.**
+- `clutch_reengage_replay.py` now pins EBP OFF (its "gate OFF = capture" check differed only because EBP turned on by
+  default on the re-fingerprinted manual; pinned → bit-identical).
+- **Run (PC, 2026-10-21):** feature: controls lib 352 passed; CORE 937 + the pre-existing chestnut failure; WIDE 2210;
+  **`mutate.py` 110/110** (9 new `s3_*`); self-referenced plannerd + controlsd vs captures at `6db16d0e0`: **0 diffs on all
+  4 CI segments** (automatics: none of the three changes reaches them); `clutch_reengage_replay` PASS;
+  `engine_brake_replay` PASS. Dev-test: CORE 1066 + chestnut (after rebuilding `libparams_c.so` on that branch — the
+  feature build lacks the `TestConsole*` keys); **`mutate_devtest.py` 55/55**; `dev_test_render` 9/9. `test_console_replay`
+  not rerun (no console code changed).
 
 ## Test console architecture (core + vehicle profile)
 The on-car test console is a **vehicle-agnostic core** — capture state machine, detectors/analyzers, the registry/session
