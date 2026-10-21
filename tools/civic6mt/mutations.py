@@ -301,4 +301,7 @@ MUTATIONS = [
     LEARN),
   m("s3_ebp_default_ignored", "S3 EBP default ON honored", f"{SP}/lib/engine_brake_preferred.py",
     'bool(self.params.get("EngineBrakePreferred", return_default=True))', 'self.params.get_bool("EngineBrakePreferred")', EBP),
+  m("s3_mads_refusal_blocks_lateral", "S3 the handback never refuses / ends lateral", "openpilot/sunnypilot/mads/mads.py",
+    "self.events_sp.contains(EventNameSP.lkasEnable) or self.longitudinal_only_low_speed:",
+    "self.events_sp.contains(EventNameSP.lkasEnable):", ["openpilot/sunnypilot/mads/tests/test_mads_manual_handback.py"]),
 ]

@@ -12,6 +12,7 @@ from opendbc.car.hyundai.values import HyundaiFlags
 from openpilot.common.params import Params
 from openpilot.sunnypilot.mads.helpers import MadsSteeringModeOnBrake, read_steering_mode_param, MADS_NO_ACC_MAIN_BUTTON
 from openpilot.sunnypilot.mads.state import StateMachine, GEARS_ALLOW_PAUSED_SILENT
+from openpilot.sunnypilot.selfdrive.controls.lib.manual_low_speed_handback import handback_available
 
 State = custom.ModularAssistiveDrivingSystem.ModularAssistiveDrivingSystemState
 ButtonType = structs.CarState.ButtonEvent.Type
@@ -50,6 +51,11 @@ class ModularAssistiveDrivingSystem:
 
     if self.CP.brand in MADS_NO_ACC_MAIN_BUTTON:
       self.no_main_cruise = True
+
+    # Manual + openpilot longitudinal: belowEngageSpeed / speedTooLow come only from the low-speed handback
+    # (car_specific.py; minEnableSpeed is -1 there) and are longitudinal decisions, now at a gear-aware speed of up to
+    # 13 mph. Lateral keeps its own logic at any speed (owner, 2026-10-21).
+    self.longitudinal_only_low_speed = handback_available(self.CP)
 
     # read params on init
     self.enabled_toggle = self.params.get_bool("Mads")
@@ -182,7 +188,9 @@ class ModularAssistiveDrivingSystem:
           self.events_sp.add(EventNameSP.lkasEnable)
 
     if not self.selfdrive.enabled and self.CP.brand == 'honda':
-      if self.enabled or self.events_sp.contains(EventNameSP.lkasEnable):
+      # ...and on a manual-handback car also when lateral is off: a SET press (unified engagement) below the handback
+      # speed is refused for longitudinal by selfdrived, but must still engage lateral
+      if self.enabled or self.events_sp.contains(EventNameSP.lkasEnable) or self.longitudinal_only_low_speed:
         self.events.remove(EventName.belowEngageSpeed)
         self.events.remove(EventName.speedTooLow)
 
