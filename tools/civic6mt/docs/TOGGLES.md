@@ -99,7 +99,8 @@ Task 9 its **session view can set the toggles above** for the session you're on 
 listed per car in its vehicle profile (Task 10); on the Civic 6MT only `NonAdaptiveLongitudinal`, `NoServiceBrakeHold`,
 `NoServiceBrakeDecelFloor`, `NoServiceBrakeOverspeedBackstop`, `NoServiceBrakeOverspeedMargin`,
 `NoServiceBrakeOverspeedMode` (Task 11), `ClutchShiftGate`, `ClutchShiftGateGasReleaseHint`, `ClutchReengageSmart`,
-`EngineBrakePreferred`, `GearAwareAccel`, `DisengageOnAccelerator` (plus `TestConsole*`); any other key is refused, and
+`EngineBrakePreferred`, `GearAwareAccel`, `DisengageOnAccelerator`, and since session 10 `SetSpeedCoast` /
+`CruiseAccelBoost` (offered on session 7) (plus `TestConsole*`); any other key is refused, and
 on a car with no profile everything but `TestConsole*` is (openpilot longitudinal itself always stays in the Developer
 panel). It's the same as setting them here:
 the features still latch only while openpilot is disengaged, and since Task 12 D2 the console refuses to write a toggle
