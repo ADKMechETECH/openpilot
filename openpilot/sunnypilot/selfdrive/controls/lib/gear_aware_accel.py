@@ -26,13 +26,15 @@ from opendbc.car import structs
 from openpilot.common.params import Params
 from openpilot.common.realtime import DT_MDL
 from openpilot.sunnypilot.selfdrive.controls.lib.engine_brake_model import G, estimate_coast_decel, infer_gear
-from openpilot.sunnypilot.selfdrive.controls.lib.engine_brake_preferred import CAPACITY_MARGIN
 
 TransmissionType = structs.CarParams.TransmissionType
 
 # TODO(on-car): tune by feel (the 1st/2nd values especially). Index = gear 1..6. Must stay <= 1.0.
 JERK_SCALE_BY_GEAR = (0.5, 0.65, 0.8, 0.9, 1.0, 1.0)
 STOCK = (1.0, 1.0)
+# share of the estimated engine + road decel credited as the power->coast span (was EngineBrakePreferred's credit
+# before Task 17 replaced it with the per-gear clamp; kept here unchanged so GearAwareAccel behaves as before)
+CREDIT_MARGIN = 0.7
 
 
 class GearAwareAccel:
@@ -68,7 +70,7 @@ class GearAwareAccel:
     scale = self.jerk_scale(self.gear)
     a_gravity = -G * math.sin(pitch)
     a_eb = estimate_coast_decel(self.gear, CS.deprecated.engineRpm, CS.vEgo, pitch)
-    a_eb_credited = CAPACITY_MARGIN * (a_eb - a_gravity) + a_gravity
+    a_eb_credited = CREDIT_MARGIN * (a_eb - a_gravity) + a_gravity
     coast_span = a_cruise_prev > a_eb_credited and cruise_target >= a_eb_credited
     self.scales = (scale, scale if coast_span else 1.0)
     return self.scales

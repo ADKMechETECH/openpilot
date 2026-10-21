@@ -437,8 +437,8 @@ struct CarControlSP @0xa5cd762cd951a455 {
     gateBlocked @4 :Bool;          # ClutchShiftGate is on but refused (DisengageOnAccelerator ON / no clutch signal)
     reengageSmart @5 :Bool;        # latched
     ebpEnabled @6 :Bool;           # latched
-    ebpSuppressing @7 :Bool;
-    ebpLockedOut @8 :Bool;         # capacity failure: off for the rest of the engagement
+    ebpSuppressing @7 :Bool;       # Task 17: the per-gear clamp applies (the lower accel limit is raised to ebpFloor)
+    ebpLockedOut @8 :Bool;         # unused since Task 17 (the capacity lockout is gone); always false
     handbackActive @9 :Bool;       # the low-speed handback ramp is running (prompt)
     handbackRampDone @10 :Bool;
     handbackDisengage @11 :Bool;   # selfdrived: disengage now (speedTooLow)
@@ -447,6 +447,10 @@ struct CarControlSP @0xa5cd762cd951a455 {
     handbackAvailable @14 :Bool;
     nsbEnabled @15 :Bool;          # latched (controlsd side)
     nsbDecelFloor @16 :Float32;    # latched (controlsd side)
+    # fork-only (Task 17): EngineBrakePreferred's clamp
+    ebpFloor @17 :Float32;         # m/s^2: the lowest request allowed while ebpSuppressing (0 = gear not trusted)
+    ebpGear @18 :Int8;             # trusted gear 1-6, 0 = not trusted
+    ebpBinding @19 :Bool;          # the plan's target is below the floor: the clamp is holding braking off
 
     enum GateState {
       idle @0;
@@ -526,6 +530,9 @@ struct CarStateSP @0xb86e6369214c01c8 {
   clutchSignalValid @2 :Bool;
   # fork-only (civic-cruise, Task 15): clutch pedal switches: 0 unknown (default), 1 up, 2 travel, 3 floor.
   clutchPedal @3 :Int8;
+  # fork-only (civic-cruise, Task 17): the engine's own axle-torque estimate, N*m (negative = engine braking), NaN when not
+  # alive. Engine side only - never includes the service brakes.
+  engineTorqueAxle @4 :Float32;
 }
 
 struct LiveMapDataSP @0xf416ec09499d9d19 {

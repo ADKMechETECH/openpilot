@@ -16,6 +16,7 @@ from openpilot.sunnypilot.selfdrive.controls.lib.dec.dec import DynamicExperimen
 from openpilot.sunnypilot.selfdrive.controls.lib.braking_urgency import MPC_NEEDED_DECEL, braking_urgency, collision_threat
 from openpilot.sunnypilot.selfdrive.controls.lib.no_service_brake import NoServiceBrake
 from openpilot.sunnypilot.selfdrive.controls.lib.engine_brake_model import CoastEventLogger
+from openpilot.sunnypilot.selfdrive.controls.lib.engine_brake_learning import EngineBrakeLearner
 from openpilot.sunnypilot.selfdrive.controls.lib.gear_aware_accel import GearAwareAccel
 from openpilot.sunnypilot.selfdrive.controls.lib.e2e_alerts_helper import E2EAlertsHelper
 from openpilot.sunnypilot.selfdrive.controls.lib.smart_cruise_control.smart_cruise_control import SmartCruiseControl
@@ -67,6 +68,11 @@ class LongitudinalPlannerSP:
     # for calibrating engine_brake_model (not a toggle: logging only, can't change driving — like the Phase 1 signals)
     self.gear_aware_accel = GearAwareAccel(CP, self._params)
     self.coast_logger = CoastEventLogger(CP.transmissionType == structs.CarParams.TransmissionType.manual, DT_MDL)
+    # Task 17: engine-brake learning - brake-free coast samples + the axle-torque brake check, persisted; telemetry only
+    # (its table proposals are not applied). Logs engaged frames while EngineBrakePreferred is latched on.
+    self.eb_learner = EngineBrakeLearner(CP.transmissionType == structs.CarParams.TransmissionType.manual and
+                                         bool(CP.openpilotLongitudinalControl), DT_MDL, self._params)
+    self._ebp_requested = self._ebp_on = False
 
     # Task 16 (Stage 2 on-car, always on for manuals): the planner re-seeds from aEgo while the driver overrides with the
     # gas; on a manual that is the driver's own acceleration, which vanishes the instant they lift (closed throttle).
@@ -95,6 +101,15 @@ class LongitudinalPlannerSP:
   def update_coast_logger(self, sm: messaging.SubMaster, fcw: bool) -> None:
     pitch = self._pitch(sm)
     self.coast_logger.update(sm['carState'], sm['carControl'].longActive, fcw, pitch if pitch is not None else float('nan'))
+    if self.eb_learner.available:
+      engaged = self._engaged(sm)
+      if self._non_adaptive_frame % int(1. / DT_MDL) == 0:
+        self._ebp_requested = self._params.get_bool("EngineBrakePreferred")
+      if not engaged:
+        self._ebp_on = self._ebp_requested   # latched like controlsd's (Task 12 B3)
+      cc = sm['carControl']
+      self.eb_learner.update(sm['carState'], sm['carStateSP'], engaged, cc.longActive, cc.actuators.accel, self._ebp_on,
+                             pitch)
 
   @staticmethod
   def _engaged(sm) -> bool:

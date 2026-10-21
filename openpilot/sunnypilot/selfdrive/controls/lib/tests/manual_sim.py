@@ -14,6 +14,7 @@ import numpy as np
 
 from opendbc.car import gen_empty_fingerprint, structs
 from opendbc.car.interfaces import ACCEL_MIN, ACCEL_MAX
+from opendbc.car.structs import CLUTCH_PEDAL_FLOOR, CLUTCH_PEDAL_UP
 from openpilot.cereal import log, messaging
 from openpilot.common.params import Params
 from openpilot.common.realtime import DT_CTRL, DT_MDL
@@ -147,6 +148,7 @@ class ManualCarSim:
                transmission=TransmissionType.manual, **params):
     from openpilot.selfdrive.controls.lib.longitudinal_planner import LongitudinalPlanner
     params.setdefault("ClutchShiftGate", True)
+    self.pedal_switch = params.pop("pedal_switch", False)   # Task 15 GAS_PEDAL_2 clutch switches (default: not alive)
     self.params = set_params(**params)
     self.CP, self.CP_SP = make_cp(transmission)   # automatic: the same car model, for "automatics unchanged" checks
     self.planner = LongitudinalPlanner(self.CP, self.CP_SP, init_v=speed)
@@ -247,6 +249,8 @@ class ManualCarSim:
     sp = messaging.new_message('carStateSP').carStateSP
     sp.clutchSignalValid = True
     sp.gearRaw = 0 if self.clutch else self.gear
+    if self.pedal_switch:
+      sp.clutchPedal = CLUTCH_PEDAL_FLOOR if self.clutch else CLUTCH_PEDAL_UP
     return sp
 
   def common_sm(self):

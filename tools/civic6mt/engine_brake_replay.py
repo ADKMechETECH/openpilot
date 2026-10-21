@@ -9,9 +9,10 @@ GEAR_MT = the scheduled gear: Task 12 B5 keeps the features inert without it). r
 the replay configs' published services.
 
 Checks:
-  controlsd: RPM injection with the toggle OFF changes nothing; ON, the only change is the brake-range clamp (frames
-             where the command is held at exactly the coast target while the plan asks for decel), and no clamped frame
-             coincides with a Rule-5 urgency reason (braking_urgency on the same plan / radar / carState).
+  controlsd: RPM injection with the toggle OFF changes nothing; ON (Task 17: the per-gear clamp), every frame that
+             differs is a clamp (the command held at exactly the published floor carControlSP.manualLongitudinal.ebpFloor
+             while the plan asks for more decel), and no clamped frame coincides with a Rule-5 urgency reason
+             (braking_urgency on the same plan / radar / carState). The clutch pedal switch is injected as fully up.
   plannerd : GearAwareAccel OFF = 0 diffs vs. no injection; ON = only aTarget/trajectory-type fields change, FCW
              identical (also run with a synthetic held-in-3rd RPM trace, since the segment is all 6th gear).
 
@@ -30,8 +31,9 @@ from openpilot.selfdrive.test.process_replay.process_replay import CONFIGS, repl
 from openpilot.selfdrive.test.process_replay.test_processes import get_log_data, segments
 from openpilot.sunnypilot.selfdrive.controls.lib.braking_urgency import braking_urgency
 from openpilot.sunnypilot.selfdrive.controls.lib.engine_brake_model import COAST_LOG_DIR_ENV, engine_rpm_at
-from openpilot.sunnypilot.selfdrive.controls.lib.engine_brake_preferred import DEFAULT_COAST_TARGET, DEFAULT_HARD_FLOOR, \
-  DEFAULT_LEAD_CLOSING, DEFAULT_LEAD_TTC, lead_urgent
+from opendbc.car.structs import CLUTCH_PEDAL_UP
+from openpilot.sunnypilot.selfdrive.controls.lib.engine_brake_preferred import DEFAULT_HARD_FLOOR, DEFAULT_LEAD_CLOSING, \
+  DEFAULT_LEAD_TTC, lead_urgent
 from openpilot.tools.lib.logreader import LogReader
 
 SHIFT_SCHEDULE = [(4.5, 1), (8., 2), (12., 3), (17., 4), (23., 5)]  # upshift speeds (m/s); 6th above
@@ -61,7 +63,7 @@ def build(inject_rpm, fixed_gear=None):
       b.carState.deprecated.engineRpm = float(engine_rpm_at(gear, m.carState.vEgo))
       m = b.as_reader()
       sp = messaging.new_message('carStateSP', logMonoTime=m.logMonoTime, valid=True)
-      sp.carStateSP.clutchSignalValid, sp.carStateSP.gearRaw = True, gear
+      sp.carStateSP.clutchSignalValid, sp.carStateSP.gearRaw, sp.carStateSP.clutchPedal = True, gear, CLUTCH_PEDAL_UP
       sp = sp.as_reader()
     msgs.append(m)
     if sp is not None:
@@ -77,15 +79,15 @@ ok = True
 
 # --- controlsd -------------------------------------------------------------------------------------------------------
 cfg = next(c for c in CONFIGS if c.proc_name == "controlsd")
-cfg = dataclasses.replace(cfg, pubs=cfg.pubs + ["radarState", "carStateSP"])
+cfg = dataclasses.replace(cfg, pubs=cfg.pubs + ["radarState", "carStateSP"], subs=cfg.subs + ["carControlSP"])
 
 
-def run_controlsd(msgs, on, coast_target=None):
-  params = {"EngineBrakePreferred": True} if on else {}
-  if coast_target is not None:
-    params["EngineBrakeCoastTarget"] = coast_target
-  out = replay_process(cfg, msgs, custom_params=params or None, disable_progress=True)
-  return [m.carControl for m in out if m.which() == "carControl"]
+def run_controlsd(msgs, on, with_sp=False):
+  out = replay_process(cfg, msgs, custom_params={"EngineBrakePreferred": True} if on else None, disable_progress=True)
+  cc = [m.carControl for m in out if m.which() == "carControl"]
+  if not with_sp:
+    return cc
+  return cc, [m.carControlSP.manualLongitudinal for m in out if m.which() == "carControlSP"]
 
 
 base, off = run_controlsd(base_msgs, False), run_controlsd(rpm_msgs, False)
@@ -121,22 +123,24 @@ def urgent(i):
     lead_urgent(radar.leadTwo, cs.vEgo, DEFAULT_LEAD_TTC, DEFAULT_LEAD_CLOSING)
 
 
-# Task 16: the default coast target is -0.2 (Stage 2 C2), which this segment's gentle trims rarely go below, so the same
-# check also runs at 0.0 (the Task 6 setting) - that run must clamp something, or the proof would be vacuous
-for target, label, must_clamp in ((DEFAULT_COAST_TARGET, f"default {DEFAULT_COAST_TARGET:+.1f}", False), (0.0, "target 0.0", True)):
-  on = run_controlsd(rpm_msgs, True, None if target == DEFAULT_COAST_TARGET else target)
-  clamped = [i for i in range(n) if on[i].longActive and on[i].actuators.accel == target and
-             plans[i] is not None and plans[i].aTarget < target]
-  diff = [i for i in range(n) if on[i].actuators.accel != off[i].actuators.accel]
-  neg_off = [i for i in range(n) if off[i].longActive and off[i].actuators.accel < 0.]
-  bad = [i for i in clamped if any(urgent(j) for j in range(max(i - 2, 0), min(i + 3, n)))]
-  first_diff_is_clamp = not diff or diff[0] in clamped
-  print(f"controlsd ON ({label}): long-active frames {sum(c.longActive for c in on)}, OFF brake-range frames {len(neg_off)}, " +
-        f"clamped frames {len(clamped)}, differing frames {len(diff)}")
-  print(f"  first difference is a clamp: {first_diff_is_clamp}; clamped frames during urgency: {len(bad)}")
-  print(f"  min accel OFF {min(c.actuators.accel for c in off):.2f}, ON {min(c.actuators.accel for c in on):.2f}; " +
-        f"gears seen {sorted(Counter(gear_for(s.vEgo) for s in states if s).items())}")
-  ok &= first_diff_is_clamp and not bad and (len(clamped) > 0 or not must_clamp)
+on, ml = run_controlsd(rpm_msgs, True, with_sp=True)
+n = min(n, len(ml))
+clamped = [i for i in range(n) if on[i].longActive and ml[i].ebpSuppressing and abs(on[i].actuators.accel - ml[i].ebpFloor) < 1e-6
+           and plans[i] is not None and plans[i].aTarget < ml[i].ebpFloor]
+diff = [i for i in range(n) if on[i].actuators.accel != off[i].actuators.accel]
+not_clamp = [i for i in diff if i not in set(clamped)]
+active = [i for i in range(n) if ml[i].ebpSuppressing]
+bad = [i for i in clamped if any(urgent(j) for j in range(max(i - 2, 0), min(i + 3, n)))]
+floors = [ml[i].ebpFloor for i in active]
+gears = sorted(Counter(ml[i].ebpGear for i in active).items())
+print(f"controlsd ON: long-active frames {sum(c.longActive for c in on)}, clamp active {len(active)} (gears {gears}, " +
+      f"floor {min(floors, default=0):.2f}..{max(floors, default=0):.2f}), clamped frames {len(clamped)}, " +
+      f"differing frames {len(diff)}")
+print(f"  differing frames that are not a clamp: {len(not_clamp)}; clamped frames during urgency: {len(bad)}")
+print(f"  min accel OFF {min(c.actuators.accel for c in off):.2f}, ON {min(c.actuators.accel for c in on):.2f}")
+# the first difference may be a frame after a clamp (LoC's state carries over), so: the first must be a clamp, and the
+# clamp must actually run on this segment (or the proof is vacuous)
+ok &= bool(active) and (not diff or diff[0] in clamped) and not bad
 
 # --- plannerd --------------------------------------------------------------------------------------------------------
 pcfg = next(c for c in CONFIGS if c.proc_name == "plannerd")
