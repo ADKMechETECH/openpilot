@@ -61,7 +61,7 @@ class ManualSim:
   pitch_bias: the calibrated pose's error (rad, + = the estimate reads more uphill than the road). gear 0 = neutral."""
   def __init__(self, speed=25., v_set=25., gear=6, lead=None, grade=0., true_scale=1.0, pitch=True, pitch_bias=0.,
                ebp_code=True, transmission=TransmissionType.manual, op_long=True, force_decel=False,
-               pedal=CLUTCH_PEDAL_UP):
+               pedal=CLUTCH_PEDAL_UP, plant="measured"):
     self.CP, self.CP_SP = make_cp(transmission, op_long)
     self.params = Params()
     self.planner = LongitudinalPlanner(self.CP, self.CP_SP, init_v=speed)
@@ -79,6 +79,7 @@ class ManualSim:
     self.lead_v = self.lead["v"] if self.lead else 0.
     self.log = []
     self.brake = 0.
+    self.plant = plant
 
   def lead_decel(self):
     decel = 0.
@@ -142,19 +143,28 @@ class ManualSim:
     return plan
 
   def car_accel(self, cmd):
-    """Stage 2 (route 00000004--9b8c913b70): within ZERO_TORQUE_BAND of 0 or positive, the PCM holds torque for the
-    request (0 rolls on road load only); a negative request closes the throttle and the car slows at the stronger of its
-    TRUE closed-throttle decel and the request, the service brakes making up any difference (on the flat and downhill).
-    In neutral there is no engine braking. self.brake = the service braking used."""
+    """The car as Stage 2 measured it (route 00000004--9b8c913b70): the VSA brakes whatever the car would do beyond the
+    request - it tracks the request, on the flat and downhill:
+      - a negative request (< -ZERO_TORQUE_BAND) closes the throttle; the car slows at the stronger of its TRUE
+        closed-throttle decel and the request, the brakes making up any difference;
+      - a request within the band holds ~zero axle torque (no engine braking: -0.01 -> -0.20 flat); on a descent the
+        VSA brakes to it (descents, requests ~0 and small positive: held, with ~0.2-0.3 m/s^2 of braking);
+      - a positive request: throttle up to it, or closed throttle + brakes if the car would exceed it.
+    plant="drift" (synthetic, for the runaway backstop): no braking for requests >= -ZERO_TORQUE_BAND (the car rolls).
+    In neutral there is no engine braking and no throttle. self.brake = the service braking used."""
     a_grade = -G * math.sin(self.grade)
     a_road = -road_load(self.speed) + a_grade
-    self.brake = 0.
-    if cmd >= -ZERO_TORQUE_BAND:
-      return cmd + a_road if self.gear else min(cmd + a_road, a_road)   # neutral: no throttle reaches the wheels
     d_true = table_decel(STATIC_DECEL, self.gear, self.speed) * self.true_scale if self.gear else road_load(self.speed)
     a_closed = -d_true + a_grade
-    self.brake = max(a_closed - cmd, 0.)
-    return min(cmd, a_closed)
+    if cmd < -ZERO_TORQUE_BAND:
+      self.brake = max(a_closed - cmd, 0.)
+      return min(cmd, a_closed)
+    a_free = a_road if cmd <= ZERO_TORQUE_BAND or not self.gear else max(cmd, a_closed)   # the powertrain alone
+    if self.plant == "drift":
+      self.brake = 0.
+      return a_free
+    self.brake = max(a_free - cmd, 0.)
+    return min(cmd, a_free)
 
   def run(self, seconds):
     for _ in range(round(seconds / DT_MDL)):
@@ -350,7 +360,7 @@ class TestEngineBrakePreferred(OpenpilotTestCase):
     # neutral rolling down a descent: floor 0 can't slow it; past set + OVERSPEED_MARGIN the clamp lets go, braking
     # returns, and it re-arms only below set + half the margin
     setup(ebp=True, non_adaptive=True)
-    sim = ManualSim(speed=20., v_set=20., gear=0, grade=-0.05)
+    sim = ManualSim(speed=20., v_set=20., gear=0, grade=-0.05, plant="drift")   # a car that doesn't hold 0 downhill
     log = sim.run(25.)
     first = next(i for i, l in enumerate(log) if l["reason"] == "overspeed")
     self.assertLess(log[first]["speed"], 20. + OVERSPEED_MARGIN + 0.5 * 2.5, "after OVERSPEED_TIME over the margin")
@@ -507,3 +517,27 @@ class TestEngineBrakePreferred(OpenpilotTestCase):
   def test_coast_target_param_retired(self):
     with self.assertRaises(UnknownKeyName):
       Params().get("EngineBrakeCoastTarget")
+
+
+class TestDescentHandOff(OpenpilotTestCase):
+  """Owner (2026-10-20): when the gear's engine braking gives up on a descent, the no-service-brake sawtooth should take
+  over, not plain service braking. Structurally it does: the clamp steps aside ("descent") and the floors compose by max,
+  so NoServiceBrakeHold's coast floor / overspeed backstop is what applies. FINDING pinned here: on the car as Stage 2
+  measured it, that coast floor is braked to as well (the VSA holds -0.3, and even 0), so on a descent steeper than
+  engine braking the car never drifts up to the overspeed trigger - it holds its speed on the brakes. A brake-free coast
+  phase needs a request at the car's own closed-throttle accel (positive there): the NSB coast-follow item."""
+
+  def test_steep_descent_nsb_holds_on_the_brakes(self):
+    for floor in (0.3, 0.0):
+      with self.subTest(nsb_floor=floor):
+        setup(ebp=True, non_adaptive=True, nsb=True, NoServiceBrakeDecelFloor=floor)
+        log = ManualSim(**DESCENT_STEEP).run(20.)
+        self.assertTrue(all(l["reason"] == "descent" for l in log[50:]), "the clamp hands the descent on")
+        self.assertTrue(all(l["lower"] >= -floor - 1e-6 for l in log[50:]), "NSB's coast floor is the limit")
+        self.assertLess(max(l["speed"] for l in log), DESCENT_STEEP["v_set"] + 1.0, "no drift toward the trigger")
+        self.assertGreater(brake_integral(log[50:]), 2.0, "held on the brakes instead (needs coast-follow)")
+    # on a car that does not hold 0 downhill the same setup drifts over set speed with the brakes off
+    setup(ebp=True, non_adaptive=True, nsb=True, NoServiceBrakeDecelFloor=0.0, NoServiceBrakeOverspeedBackstop=False)
+    drift = ManualSim(**DESCENT_STEEP, plant="drift").run(20.)
+    self.assertGreater(drift[-1]["speed"], DESCENT_STEEP["v_set"] + 3.)
+    self.assertEqual(braked(drift), [])
