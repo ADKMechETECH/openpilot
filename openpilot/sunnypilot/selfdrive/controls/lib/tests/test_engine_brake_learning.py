@@ -1,12 +1,14 @@
 """
 Engine-brake learning (Task 17): collection only from brake-free coasts, the axle-torque brake check on engaged frames,
-persistence through Params, and the (not applied) table proposal rule.
+persistence through Params, and the (not applied) table proposal rule. Stage 3: the median (histogram) estimator, the
+in-coast settle, and proposals that build up across drive cycles.
 """
 import json
 import math
 import os
 import tempfile
 import time
+from unittest import mock
 
 from opendbc.car.structs import CLUTCH_PEDAL_FLOOR, CLUTCH_PEDAL_UP
 from openpilot.cereal import messaging
@@ -62,10 +64,11 @@ class Base(OpenpilotTestCase):
 class TestCollection(Base):
   def test_clean_coast_is_learned(self):
     lr = self.learner()
-    self.run_frames(lr, 6., pitch=-0.01, a=-0.45 + G * math.sin(0.01))
+    self.run_frames(lr, 8., pitch=-0.01, a=-0.45 + G * math.sin(0.01))
     cell = lr.store["stats"][4][L.v_bin(20.)]
-    self.assertGreater(cell.n, 40)
-    self.assertAlmostEqual(cell.mean, 0.45, places=3, msg="grade-corrected flat decel")
+    self.assertEqual(cell.n, round((8. - L.SETTLE_AFTER_GEAR - L.SETTLE_IN_COAST) / L.SAMPLE_PERIOD),
+                     "everything after the gear settle + the in-coast settle")
+    self.assertAlmostEqual(cell.median, 0.45, delta=L.HIST_STEP, msg="grade-corrected flat decel")
     self.assertAlmostEqual(cell.mean_e, L.K_TQ * 82., places=4, msg="the torque-based engine part")
 
   def test_settle_after_lift_and_gear_change(self):
@@ -73,6 +76,8 @@ class TestCollection(Base):
     self.run_frames(lr, 1., gas=True)
     self.run_frames(lr, L.SETTLE_AFTER_GAS - 0.1)
     self.assertEqual(lr.coast_samples, 0)
+    self.run_frames(lr, 0.1 + L.SETTLE_IN_COAST - 0.1)
+    self.assertEqual(lr.coast_samples, 0, "the first second of a coast isn't learned")
     self.run_frames(lr, 1.)
     self.assertGreater(lr.coast_samples, 0)
     lr2 = self.learner()
@@ -142,7 +147,7 @@ class TestPersistence(Base):
     self.assertEqual(stored()["version"], L.VERSION)
     lr2 = self.learner()
     c1, c2 = lr.store["stats"][4][L.v_bin(20.)], lr2.store["stats"][4][L.v_bin(20.)]
-    self.assertEqual(c1.to_list(), c2.to_list(), "survives a restart")
+    self.assertEqual(c1.to_dict(), c2.to_dict(), "survives a restart")
     self.assertEqual(lr2.store["cycles"], 2, "one drive cycle per start")
 
   def test_periodic_save(self):
@@ -152,22 +157,71 @@ class TestPersistence(Base):
     self.run_frames(lr, 2.)
     second = stored(first)
     self.assertNotEqual(first, second)
-    self.assertGreater(second["stats"]["4"][str(L.v_bin(20.))][0], 0)
+    self.assertGreater(second["stats"]["4"][str(L.v_bin(20.))]["n"], 0)
 
   def test_malformed_store_is_dropped_never_raised(self):
-    for raw in (None, "", "nope", b"\x00\xff", 5, [], {"version": 99}, {"version": 1, "stats": "x"},
-                {"version": 1, "stats": {"4": {"4": [1, 2]}}}, {"version": 1, "stats": {"9": {"4": [1, .4, 0, 1, .2]}}},
-                {"version": 1, "stats": {"4": {"40": [1, .4, 0, 1, .2]}}},
-                {"version": 1, "stats": {"4": {"4": [1, float('nan'), 0, 1, .2]}}},
-                {"version": 1, "stats": {"4": {"4": [-3, .4, 0, 1, .2]}}}, {"version": 1, "proposed": {"4": [1]}},
-                {"version": 1, "cycles": "many"}):
+    V = L.VERSION
+    ok = {"n": 3, "h": {"95": 3}, "ne": 3, "e": .2}
+    for raw in (None, "", "nope", b"\x00\xff", 5, [], {"version": 99}, {"version": V, "stats": "x"},
+                {"version": 1, "stats": {"4": {"4": [3, .4, .01, 3, .2]}}},   # a v1 (mean) store: dropped
+                {"version": V, "stats": {"4": {"4": [1, 2]}}}, {"version": V, "stats": {"9": {"4": ok}}},
+                {"version": V, "stats": {"4": {"40": ok}}}, {"version": V, "stats": {"4": {"4": {**ok, "n": float('nan')}}}},
+                {"version": V, "stats": {"4": {"4": {**ok, "n": -3}}}}, {"version": V, "stats": {"4": {"4": {**ok, "n": 4}}}},
+                {"version": V, "stats": {"4": {"4": {**ok, "h": {"999": 3}}}}},
+                {"version": V, "stats": {"4": {"4": {**ok, "h": {"x": 3}}}}},
+                {"version": V, "stats": {"4": {"4": {**ok, "h": {"95": -3}}}}}, {"version": V, "proposed": {"4": [1]}},
+                {"version": V, "cycles": "many"}):
       with self.subTest(raw=raw):
         store = L.parse_store(raw)
         self.assertFalse(any(store["stats"][g] for g in store["stats"]))
         self.assertEqual(store["proposed"], {})
-    good = L.parse_store({"version": 1, "stats": {"4": {"4": [3, .4, .01, 3, .2], "x": [1]}}, "cycles": 3})
+    good = L.parse_store({"version": V, "stats": {"4": {"4": ok, "x": [1]}}, "cycles": 3})
     self.assertEqual(good["stats"][4][4].n, 3)
+    self.assertAlmostEqual(good["stats"][4][4].median, L.HIST_LO + 95.5 * L.HIST_STEP)
     self.assertEqual(good["cycles"], 3)
+
+  def test_v1_store_is_reset_and_logged(self):
+    Params().put(L.PARAM_KEY, {"version": 1, "cycles": 2, "stats": {"4": {"4": [500, 0.5, 1.0, 500, 0.2]}}}, block=True)
+    with mock.patch.object(L.cloudlog, "event") as ev:
+      lr = self.learner()
+    self.assertFalse(any(lr.store["stats"][g] for g in lr.store["stats"]))
+    self.assertEqual(lr.store["cycles"], 1)
+    self.assertIn("engine_brake_learn_store_reset", [c.args[0] for c in ev.call_args_list])
+
+
+def store_cell(d, n):
+  """A v2 store cell holding n samples at D = d."""
+  i = int((d - L.HIST_LO) / L.HIST_STEP)
+  return {"n": n, "h": {str(i): n}, "ne": n, "e": 0.3}
+
+
+class TestEstimator(Base):
+  def test_median_ignores_the_tail(self):
+    c = L.Cell()
+    for i in range(1000):
+      c.add(1.5 if i % 10 == 0 else 0.45, None)   # 10 % long-tail samples (descent / pitch error)
+    self.assertAlmostEqual(c.median, 0.45, delta=L.HIST_STEP)
+    self.assertLess(c.lower_bound(), c.median + 1e-9)
+    self.assertGreater(c.lower_bound(), 0.44, "with 100 s of data the bound is near the median")
+
+  def test_lower_bound_tightens_with_data(self):
+    few, many = L.Cell(), L.Cell()
+    for i in range(L.MIN_SAMPLES):
+      few.add(0.3 + 0.004 * i, None)            # 0.30 .. 0.50, median ~0.40
+    for i in range(2000):
+      many.add(0.3 + 0.0001 * i, None)
+    self.assertLess(few.lower_bound(), few.median - 0.05, "5 s of coast: a low quantile")
+    self.assertGreater(many.lower_bound(), many.median - 0.02)
+
+  def test_broken_coast_settles_again(self):
+    lr = self.learner()
+    self.run_frames(lr, 3.)
+    n = lr.coast_samples
+    self.run_frames(lr, 0.2, brake=True)
+    self.run_frames(lr, L.SETTLE_IN_COAST - 0.1)
+    self.assertEqual(lr.coast_samples, n, "a new coast after a brake tap settles again")
+    self.run_frames(lr, 1.)
+    self.assertGreater(lr.coast_samples, n)
 
 
 class TestProposal(Base):
@@ -204,9 +258,28 @@ class TestProposal(Base):
 
   def test_proposal_is_stored_but_never_reaches_the_clamp(self):
     b = L.v_bin(20.)
-    Params().put(L.PARAM_KEY, {"version": 1, "cycles": 4, "stats": {"4": {str(b): [500, 0.9, 1.0, 500, 0.3]}}}, block=True)
+    Params().put(L.PARAM_KEY, {"version": L.VERSION, "cycles": 4, "stats": {"4": {str(b): store_cell(0.9, 500)}}},
+                 block=True)
     lr = self.learner()
     self.assertGreater(lr.store["proposed"][4][b], STATIC_DECEL[4][b], "a proposal exists")
     ebp = EngineBrakePreferred(make_cp()[0], Params())
     self.assertFalse(ebp.table.apply_learned)
     self.assertEqual(ebp.table.decel(4, V_MIDS[b]), STATIC_DECEL[4][b], "the clamp still reads the static table")
+
+  def test_proposals_build_up_across_drive_cycles(self):
+    # Stage 3: each plannerd start used to restart from the static table (never more than MAX_STEP from it)
+    b = L.v_bin(20.)
+    s = STATIC_DECEL[4][b]
+    Params().put(L.PARAM_KEY, {"version": L.VERSION, "cycles": 0, "stats": {"4": {str(b): store_cell(s + 0.2, 3000)}}},
+                 block=True)
+    seen = []
+    for _ in range(4):
+      lr = self.learner()
+      seen.append(lr.store["proposed"][4][b])
+      lr.save()
+      stored(timeout=0.5)
+      Params().put(L.PARAM_KEY, L.dump_store(lr.store), block=True)
+    for k, x in enumerate(seen, 1):
+      self.assertAlmostEqual(x, s + k * L.MAX_STEP, places=6, msg=f"cycle {k}")
+    self.assertEqual(L.parse_store(Params().get(L.PARAM_KEY))["cycles"], 4)
+    self.assertLess(seen[-1], s + 0.2, "still never above the measured bound")

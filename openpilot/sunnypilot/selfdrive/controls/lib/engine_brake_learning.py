@@ -25,7 +25,15 @@ Engaged frames (toggle on, longitudinal active, negative request) are logged for
 Table update rule (propose_table, NOT applied): per gear and speed bin, after >= MIN_SAMPLES coast samples, step the
 learned value toward the measured lower confidence bound by at most MAX_STEP per drive cycle; never above that bound,
 never below the static table (learned values only add decel authority). Run once per plannerd start ("drive cycle");
-the proposal is stored and logged for review.
+the proposal is stored and logged for review, and the next cycle builds on it (Stage 3: it used to restart from the
+static table every cycle, so a proposal could never move more than MAX_STEP).
+
+Estimator (Stage 3, v2 store): the MEDIAN of D per cell, from a persisted histogram (HIST_STEP bins), not the mean - the
+mean ran 0.05-0.06 m/s^2 above the analysis's settled median (a long upper tail from descents / pitch error). Its lower
+confidence bound is an order statistic: the p-quantile with p = 0.5 - Z * 0.5 / sqrt(n_eff), n_eff = the samples'
+seconds / CORRELATION_TIME (10 Hz samples of one coast aren't independent). And a coast counts only SETTLE_IN_COAST into
+it: the first second after the lift reads ~0.05 light (lift transient / fuel cut arriving). Every eligible frame still
+goes to samples.jsonl, with its time into the coast.
 
 Persistence: Params EngineBrakeLearnedTable (JSON, PERSISTENT, survives reboots), written (non-blocking) at most every
 SAVE_PERIOD while there is new data. Samples: /data/engine_brake_learn/samples.jsonl (rotating, writer thread).
@@ -46,7 +54,7 @@ from openpilot.sunnypilot.selfdrive.controls.lib.engine_brake_preferred import t
 from openpilot.sunnypilot.selfdrive.controls.lib.engine_brake_table import G, GEARS, STATIC_DECEL, V_MIDS
 
 PARAM_KEY = "EngineBrakeLearnedTable"
-VERSION = 1
+VERSION = 2                 # 2: histogram cells (median); a v1 store (mean cells) is dropped at start, logged
 V_EDGES = (3., 7., 11., 15., 19., 23., 27., 31., 40.)   # bins around engine_brake_table.V_MIDS
 assert len(V_EDGES) == len(V_MIDS) + 1
 
@@ -55,13 +63,16 @@ ROAD_LOAD = (0.188, 1.52e-4)   # m/s^2: c0 + c2*v^2, Stage 1 + Stage 3 fit (neut
 USER_BRAKE_MAX = 0.2        # VSA_STATUS.USER_BRAKE (deprecated.brake): pedal pressure above this = foot on the brake
 SETTLE_AFTER_GAS = 0.5      # s after the gas pedal is released
 SETTLE_AFTER_GEAR = 1.0     # s after the trusted gear last changed
+SETTLE_IN_COAST = 1.0       # s into an unbroken coast before its samples count (Stage 3: the first second reads light)
 MIN_COAST_SPEED = 3.        # m/s
 BRAKE_SUSPECT = 0.3         # m/s^2 of unexplained decel
 SAMPLE_PERIOD = 0.1         # s (10 Hz)
 SAVE_PERIOD = 60.           # s
 MIN_SAMPLES = 50            # coast samples (5 s at 10 Hz) in a cell before it may move
 MAX_STEP = 0.02             # m/s^2 per drive cycle
-CONFIDENCE_Z = 2.           # learned target = mean - Z * standard error (conservative)
+CONFIDENCE_Z = 2.           # learned target = a lower order-statistic bound on the median (conservative)
+CORRELATION_TIME = 1.0      # s of coast per independent sample (n_eff for the median's bound)
+HIST_LO, HIST_STEP, HIST_BINS = -0.5, 0.01, 250   # D histogram per cell: -0.5 .. +2.0 m/s^2 (ends clamp)
 LOG_MAX_BYTES = 1024 * 1024
 LOG_BACKUPS = 10
 QUEUE_MAX = 256
@@ -84,37 +95,71 @@ def road_load(v_ego: float) -> float:
 
 
 class Cell:
-  """Running stats for one gear x speed bin: Welford mean / variance of D, and the mean torque-based engine part E."""
-  __slots__ = ("n", "mean", "m2", "n_e", "mean_e")
+  """One gear x speed bin: a histogram of D (its median and quantiles) and the mean torque-based engine part E."""
+  __slots__ = ("n", "hist", "n_e", "mean_e")
 
-  def __init__(self, n=0, mean=0., m2=0., n_e=0, mean_e=0.):
-    self.n, self.mean, self.m2, self.n_e, self.mean_e = int(n), float(mean), float(m2), int(n_e), float(mean_e)
+  def __init__(self, n=0, hist=None, n_e=0, mean_e=0.):
+    self.n, self.hist, self.n_e, self.mean_e = int(n), dict(hist or {}), int(n_e), float(mean_e)
 
   def add(self, d: float, e: float | None) -> None:
+    i = min(max(int(math.floor((d - HIST_LO) / HIST_STEP)), 0), HIST_BINS - 1)
+    self.hist[i] = self.hist.get(i, 0) + 1
     self.n += 1
-    delta = d - self.mean
-    self.mean += delta / self.n
-    self.m2 += delta * (d - self.mean)
     if e is not None:
       self.n_e += 1
       self.mean_e += (e - self.mean_e) / self.n_e
 
-  def lower_bound(self) -> float:
-    var = self.m2 / (self.n - 1) if self.n > 1 else 0.
-    return self.mean - CONFIDENCE_Z * math.sqrt(var / self.n) if self.n else 0.
+  def quantile(self, p: float) -> float:
+    """D at quantile p (0..1): the centre of the bin the p*n-th sample falls in; 0 for an empty cell."""
+    if self.n == 0:
+      return 0.
+    target, acc = max(p, 0.) * self.n, 0
+    for i in sorted(self.hist):
+      acc += self.hist[i]
+      if acc >= target:
+        return HIST_LO + (i + 0.5) * HIST_STEP
+    return HIST_LO + (max(self.hist) + 0.5) * HIST_STEP
 
-  def to_list(self) -> list:
-    return [self.n, round(self.mean, 5), round(self.m2, 6), self.n_e, round(self.mean_e, 5)]
+  @property
+  def median(self) -> float:
+    return self.quantile(0.5)
+
+  def lower_bound(self) -> float:
+    """A conservative median: the quantile Z binomial standard errors below 0.5, with n_eff = coast seconds /
+    CORRELATION_TIME. 5 s of data -> the 5th percentile; 100 s -> the 40th."""
+    if self.n == 0:
+      return 0.
+    n_eff = max(self.n * SAMPLE_PERIOD / CORRELATION_TIME, 1.)
+    return self.quantile(0.5 - CONFIDENCE_Z * 0.5 / math.sqrt(n_eff))
+
+  def to_dict(self) -> dict:
+    return {"n": self.n, "h": {str(i): c for i, c in sorted(self.hist.items())}, "ne": self.n_e, "e": round(self.mean_e, 5)}
 
 
 def _valid_number(x) -> bool:
   return isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x)
 
 
+def _parse_cell(cell) -> Cell | None:
+  if not isinstance(cell, dict) or not isinstance(cell.get("h"), dict):
+    return None
+  n, n_e, e = cell.get("n"), cell.get("ne"), cell.get("e")
+  if not all(_valid_number(x) for x in (n, n_e, e)) or n < 0 or n_e < 0:
+    return None
+  hist = {}
+  for k, c in cell["h"].items():
+    if not (isinstance(k, str) and k.isdigit() and int(k) < HIST_BINS) or not _valid_number(c) or c <= 0:
+      return None
+    hist[int(k)] = int(c)
+  if sum(hist.values()) != int(n):
+    return None
+  return Cell(n, hist, n_e, e)
+
+
 def parse_store(raw) -> dict:
   """The persisted JSON (Params returns a dict for a JSON key; a str / bytes is accepted too) -> {"stats": {gear: {bin:
-  Cell}}, "proposed": {gear: [..]}, "cycles": int}. Anything malformed is dropped, never raised: a corrupt store only
-  loses learning, it can't stop plannerd."""
+  Cell}}, "proposed": {gear: [..]}, "cycles": int}. Anything malformed - or another VERSION - is dropped, never raised:
+  a corrupt store only loses learning, it can't stop plannerd."""
   out: dict = {"stats": {g: {} for g in GEARS}, "proposed": {}, "cycles": 0}
   try:
     data = json.loads(raw) if isinstance(raw, (str, bytes)) else raw
@@ -130,10 +175,9 @@ def parse_store(raw) -> dict:
         continue
       for bk, cell in bins.items():
         b = int(bk) if isinstance(bk, str) and bk.isdigit() else None
-        if b is None or not 0 <= b < len(V_MIDS) or not isinstance(cell, list) or len(cell) != 5 or \
-           not all(_valid_number(x) for x in cell) or cell[0] < 0 or cell[3] < 0 or cell[2] < 0:
-          continue
-        out["stats"][g][b] = Cell(*cell)
+        c = _parse_cell(cell) if b is not None and 0 <= b < len(V_MIDS) else None
+        if c is not None:
+          out["stats"][g][b] = c
   proposed = data.get("proposed")
   if isinstance(proposed, dict):
     for gk, row in proposed.items():
@@ -147,7 +191,7 @@ def parse_store(raw) -> dict:
 
 def dump_store(store: dict) -> dict:
   return {"version": VERSION, "cycles": store["cycles"],
-          "stats": {str(g): {str(b): c.to_list() for b, c in bins.items()} for g, bins in store["stats"].items() if bins},
+          "stats": {str(g): {str(b): c.to_dict() for b, c in bins.items()} for g, bins in store["stats"].items() if bins},
           "proposed": {str(g): [round(x, 3) for x in row] for g, row in store["proposed"].items()}}
 
 
@@ -246,12 +290,16 @@ class EngineBrakeLearner:
     self.dt = dt
     self.params = params or Params()
     self.writer = _JsonlWriter(log_dir)
-    self.store = parse_store(self.params.get(PARAM_KEY)) if available else parse_store(None)
+    raw = self.params.get(PARAM_KEY) if available else None
+    self.store = parse_store(raw)
+    if isinstance(raw, dict) and raw.get("version") not in (None, VERSION):
+      cloudlog.event("engine_brake_learn_store_reset", found=raw.get("version"), version=VERSION)
     self._since_sample = SAMPLE_PERIOD
     self._since_save = 0.
     self._dirty = False
     self._since_gas = self._since_gear = 0.
     self._last_gear = 0
+    self._coast_run = 0.   # s into the current unbroken coast (SETTLE_IN_COAST)
     self.coast_samples = self.engaged_samples = self.brake_suspect = 0
     if available:
       self._new_cycle()
@@ -259,7 +307,7 @@ class EngineBrakeLearner:
   def _new_cycle(self) -> None:
     """Once per plannerd start: the proposal from everything collected so far, stored and logged for review only."""
     self.store["cycles"] += 1
-    proposed, notes = propose_table(self.store["stats"])
+    proposed, notes = propose_table(self.store["stats"], learned_prev=self.store["proposed"] or None)   # builds up
     self.store["proposed"] = proposed
     moved = sum(abs(proposed[g][b] - STATIC_DECEL[g][b]) > 1e-6 for g in GEARS for b in range(len(V_MIDS)))
     cells = sum(c.n >= MIN_SAMPLES for bins in self.store["stats"].values() for c in bins.values())
@@ -288,6 +336,7 @@ class EngineBrakeLearner:
       return
     self._since_sample = 0.
     if not clutch_valid or pitch is None or not math.isfinite(pitch):
+      self._coast_run = 0.
       return
 
     v, torque = float(CS.vEgo), float(CS_SP.engineTorqueAxle)
@@ -301,13 +350,20 @@ class EngineBrakeLearner:
                  pedal < USER_BRAKE_MAX and e is not None and torque < 0. and \
                  self._since_gas >= SETTLE_AFTER_GAS and self._since_gear >= SETTLE_AFTER_GEAR
       if coasting:
-        self.store["stats"][gear].setdefault(b, Cell()).add(d, e)
-        self._dirty = True
-        self.coast_samples += 1
+        learned = self._coast_run >= SETTLE_IN_COAST - 1e-6
+        if learned:
+          self.store["stats"][gear].setdefault(b, Cell()).add(d, e)
+          self._dirty = True
+          self.coast_samples += 1
         self.writer.put({"src": "coast", "t": round(time.monotonic(), 2), "gear": gear, "v": round(v, 3),
                          "a_ego": round(float(CS.aEgo), 4), "pitch": round(pitch, 5), "tq": round(torque, 1),
-                         "rpm": round(float(CS.deprecated.engineRpm), 1), "d": round(d, 4), "e": round(e, 4)})
+                         "rpm": round(float(CS.deprecated.engineRpm), 1), "d": round(d, 4), "e": round(e, 4),
+                         "run": round(self._coast_run, 1), "learned": learned})
+        self._coast_run += SAMPLE_PERIOD
+      else:
+        self._coast_run = 0.
       return
+    self._coast_run = 0.
 
     # engaged, for review only: every negative-request frame while the toggle is latched on
     if ebp_on and long_active and sent_accel < 0.:
