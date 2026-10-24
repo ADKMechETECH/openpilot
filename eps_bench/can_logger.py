@@ -29,9 +29,11 @@ from eps_bench import common  # noqa: E402
 NAME = "can_logger"
 
 # IDs the firmware-RE analysis focuses on (for the header only - we log EVERYTHING).
-INJECT_ID = 0x0E4
-EPS_TX_IDS = [0x324, 0x326, 0x328, 0x32F, 0x33D, 0x374, 0x3A1, 0x516, 0x78E]
-STEER_STATUS_ID = 0x18F  # LKAS-active / handback / low_speed_lockout tell-tale
+INJECT_ID = 0x0E4        # STEERING_CONTROL (injected)
+SENSORS_ID = 0x094       # STEERING_SENSORS (hand-wheel angle/torque)
+SPEED_ID = 0x158         # speed (also the injector's interlock source)
+STEER_STATUS_ID = 0x18F  # STEER_STATUS - delivered-torque candidate / LKAS-active / low_speed_lockout
+EPS_TX_IDS = [0x324, 0x326, 0x328, 0x32F, 0x33D, 0x374, 0x3A1, 0x516, 0x78E]  # EPS-TX status set
 
 
 def main() -> None:
@@ -59,8 +61,12 @@ def main() -> None:
   with open(path, "w", buffering=1) as f:
     f.write(f"# EPS bench CAN log\n")
     f.write(f"# wall_clock_start={datetime.now(timezone.utc).isoformat()}\n")
-    f.write(f"# inject_id=0x{INJECT_ID:X} steer_status=0x{STEER_STATUS_ID:X} "
+    f.write(f"# analysis_ids: inject=0x{INJECT_ID:X} handwheel=0x{SENSORS_ID:X} "
+            f"speed=0x{SPEED_ID:X} steer_status=0x{STEER_STATUS_ID:X} "
             f"eps_tx={','.join(f'0x{i:X}' for i in EPS_TX_IDS)}\n")
+    f.write(f"# delivered-torque candidates: 0x{STEER_STATUS_ID:X} + the EPS-TX set - watch for "
+            f"saturation vs the rising 0x{INJECT_ID:X} (firmware cap +/-0x2b4e = 34%)\n")
+    f.write("# NOTE: all buses are logged in full; the IDs above are the analysis focus only\n")
     f.write("monotonic_ts,bus,addr_hex,len,data_hex\n")
 
     common.write_status(cfg, NAME, {"state": "LOGGING", "file": path, "frames": 0, "bytes": 0})
