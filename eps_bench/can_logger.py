@@ -51,6 +51,8 @@ def main() -> None:
 
   signal.signal(signal.SIGINT, _stop)
   signal.signal(signal.SIGTERM, _stop)
+  if hasattr(signal, "SIGHUP"):
+    signal.signal(signal.SIGHUP, _stop)  # SSH drop -> flush + close the log cleanly
 
   can_sock = messaging.sub_sock("can", timeout=100)
 

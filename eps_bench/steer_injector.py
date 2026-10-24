@@ -100,6 +100,8 @@ def main() -> None:
 
   signal.signal(signal.SIGINT, _sig)
   signal.signal(signal.SIGTERM, _sig)
+  if hasattr(signal, "SIGHUP"):
+    signal.signal(signal.SIGHUP, _sig)  # SSH drop -> graceful ramp-to-0, not an instant cut
 
   cmd = 0.0                 # actual commanded STEER_TORQUE (rate-limited)
   last_speed = None
