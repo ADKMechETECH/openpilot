@@ -124,4 +124,21 @@ procs = [
   PythonProcess("joystick", "openpilot.tools.joystick.joystick_control", and_(joystick, iscar)),
 ]
 
+# --- EPS parked-bench mode (isolated; EPS_BENCH set only by the bench launch) ---
+# Strip every autonomy / control / model / sendcan-publishing process so the bench
+# injector is the SOLE `sendcan` publisher and nothing else commands steering or
+# longitudinal. Keep pandad (sendcan->panda + can + heartbeat) and hardwared
+# (ignition -> onroad, which pandad needs to hold ALLOUTPUT) plus the base
+# logging/system procs. See eps_bench/README.md.
+if os.getenv("EPS_BENCH") is not None:
+  _EPS_BENCH_DISABLE = {
+    "controlsd", "plannerd", "selfdrived", "card", "radard", "modeld",
+    "dmonitoringmodeld", "dmonitoringd", "navd", "mapsd", "locationd",
+    "paramsd", "lagd", "torqued", "calibrationd", "maneuversd",
+    "lateral_maneuversd", "joystickd", "joystick", "bridge", "webrtcd",
+  }
+  for _p in procs:
+    if _p.name in _EPS_BENCH_DISABLE:
+      _p.enabled = False
+
 managed_processes = {p.name: p for p in procs}

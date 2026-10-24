@@ -1,8 +1,30 @@
+#include <cstdlib>
+
 #include "selfdrive/pandad/pandad.h"
 #include "openpilot/cereal/messaging/messaging.h"
 #include "common/swaglog.h"
 
 void PandaSafety::configureSafetyMode(bool is_onroad) {
+  // --- EPS parked-bench mode (isolated, reversible) ---------------------------
+  // When the bench launch sets EPS_BENCH, hold SAFETY_ALLOUTPUT (param 0) instead
+  // of the car's safety model. ALLOUTPUT: controls_allowed=true (steer TX allowed
+  // at standstill), relay OPEN/intercept (default branch of set_safety_mode -> the
+  // camera's bus-2 0x0E4 is isolated from the EPS), and param 0 => disable_forwarding
+  // (the camera's 0x0E4 is not bridged to bus 0 either). Bus-0 car traffic (speed
+  // 0x158, sensors, 0x18F) stays native. No CarParams / ControlsReady dependency,
+  // so controlsd/card need not run. See eps_bench/README.md.
+  static const bool eps_bench = (std::getenv("EPS_BENCH") != nullptr);
+  if (eps_bench) {
+    if (is_onroad && !safety_configured_) {
+      LOGW("EPS_BENCH: setting SAFETY_ALLOUTPUT (param 0) - PARKED STEER BENCH ONLY");
+      panda_->set_safety_model(cereal::CarParams::SafetyModel::ALL_OUTPUT, 0U);
+      safety_configured_ = true;
+    } else if (!is_onroad) {
+      safety_configured_ = false;
+    }
+    return;
+  }
+
   if (is_onroad && !safety_configured_) {
     updateMultiplexingMode();
 
