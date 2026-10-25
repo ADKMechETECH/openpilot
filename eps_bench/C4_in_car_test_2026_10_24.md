@@ -188,3 +188,14 @@ Full detail: `eps_bench/LOWSPEED_MODE.md` (mirrored to Dropbox `EPS_Testing/`). 
 configs now exist (`config.{lowspeed,parked}.sample.json`) so the device never lacks a `config.json`.
 **Device bench step next:** copy `config.lowspeed.sample.json`→`config.json`, confirm parked it ARMs
 on a clutch cycle but never STARTs (speed 0). Closed course only after that. Commit not yet pushed.
+
+---
+
+## DEVICE LOADED & READY (2026-10-25) — low-speed mode
+Device (`eps-bench-parked`) fast-forwarded `c7f6f0859` → **`c80b44cb3`** (Run-1 hot-patch discarded —
+it's in history now; `openpilot/sunnypilot/` untracked leftover left alone). **All 15 bench tests pass
+on-device** under `/usr/local/venv/bin/python`. `config.json` set to the **low-speed** sample
+(MODE lowspeed, band 12–20 km/h, TARGET 300 / MAX_CMD 600). Pure-Python update, no rebuild needed.
+**Next test session:** launch the stack → parked trigger check (ARM on a clutch cycle, never START),
+then closed-course low-TARGET runs. Restore parked (Run-1) mode any time with
+`cp eps_bench/config.parked.sample.json eps_bench/config.json`.
