@@ -173,3 +173,16 @@ NOT restored to `civic-6mt-dev-test`. Device unplugged after the run. To resume:
 parked, re-attach tmux (or relaunch `./eps_bench/launch_eps_bench.sh` + `eps_menu.py`), confirm
 `config.json` still present. To return to cruise later: `git checkout civic-6mt-dev-test &&
 git submodule update --init --recursive && sudo reboot` (rebuilds on AGNOS 20.1 — unvalidated there).
+
+---
+
+## NEXT BUILD DONE — low-speed-band mode (2026-10-25, commit `9151118b1`)
+Per the firmware team's `CLOSED_COURSE_TEST_DIRECTIVE_2026-10-25.md` + `SP_DEV_HANDOFF_CLOSED_COURSE`,
+added `MODE=lowspeed` to the injector (parked mode unchanged/default). Inverse interlock: commands
+`0x0E4` only inside [V_MIN,V_MAX], ARM on the clutch-released `0x130` bit 50 (read raw), speed-gated
+START, single bounded ramp toward the cap, auto-stop + ramp-to-0. Pure state machine `lowspeed.py`;
+bench test `test_lowspeed.py` (13 cases, simulated speed+clutch, no motion) — ALL PASS on the PC.
+Full detail: `eps_bench/LOWSPEED_MODE.md` (mirrored to Dropbox `EPS_Testing/`). Tracked sample
+configs now exist (`config.{lowspeed,parked}.sample.json`) so the device never lacks a `config.json`.
+**Device bench step next:** copy `config.lowspeed.sample.json`→`config.json`, confirm parked it ARMs
+on a clutch cycle but never STARTs (speed 0). Closed course only after that. Commit not yet pushed.
