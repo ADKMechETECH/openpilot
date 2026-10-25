@@ -84,18 +84,27 @@ def main() -> None:
   inj = Worker(INJECTOR, "steer_injector.py")
   log = Worker(LOGGER, "can_logger.py")
 
+  mode = str(cfg.get("MODE", "parked")).lower()
   print("=" * 64)
-  print(" EPS PARKED BENCH - keep hands clear of wheel spokes; kill reachable")
-  print(f" inject 0x0E4 bus {cfg['BUS']} | TARGET {cfg['TARGET']} | MAX_CMD {cfg['MAX_CMD']}"
-        f" | speed-abort {cfg['SPEED_ABORT_KPH']} kph")
+  if mode == "lowspeed":
+    print(" EPS LOW-SPEED BENCH - CLOSED COURSE; safety driver ready to abort")
+    print(f" inject 0x0E4 bus {cfg['BUS']} | mode LOWSPEED | band "
+          f"[{cfg.get('V_MIN', 12)},{cfg.get('V_MAX', 20)}] km/h"
+          f" | TARGET {cfg['TARGET']} | MAX_CMD {cfg['MAX_CMD']} | T_MAX {cfg.get('T_MAX', 1.5)}s")
+    print(" ARM on clutch-released; START auto when speed in band; A = enable/disable injector")
+  else:
+    print(" EPS PARKED BENCH - keep hands clear of wheel spokes; kill reachable")
+    print(f" inject 0x0E4 bus {cfg['BUS']} | mode PARKED | TARGET {cfg['TARGET']}"
+          f" | MAX_CMD {cfg['MAX_CMD']} | speed-abort {cfg.get('SPEED_ABORT_KPH', 0.5)} kph")
   print("=" * 64)
 
+  a_label = "LOW-SPEED INJECTOR" if mode == "lowspeed" else "STEER RAMP TEST  "
   try:
     while True:
       a = "STOP " if inj.running() else "START"
       b = "STOP " if log.running() else "START"
       print()
-      print(f" [A] {a} STEER RAMP TEST : {fmt_status(cfg, INJECTOR)}")
+      print(f" [A] {a} {a_label} : {fmt_status(cfg, INJECTOR)}")
       print(f" [B] {b} CAN LOG         : {fmt_status(cfg, LOGGER)}")
       print(f" [S] STOP / ABORT (ramp to 0)   [Q] QUIT")
       try:

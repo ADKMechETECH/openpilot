@@ -20,6 +20,18 @@ CONFIG_PATH = os.path.join(HERE, "config.json")
 SPEED_ADDR = 0x158
 SPEED_BUS = 0
 
+# ---- 0x130 clutch pedal (fork-discovered layout; low-speed mode trigger) ----
+# GAS_PEDAL_2 (0x130 = 304), bus 0. CLUTCH_PEDAL_UP = DBC bit 50, CLUTCH_PEDAL_FLOOR
+# = bit 51 (both 1-bit, so endianness is moot). Discovered on the 2024 Civic 6MT
+# Bosch-radarless car and defined by name in the SEPARATE cruise fork's
+# _honda_common.dbc; here we read the raw bits DBC-free (same approach as the speed
+# interlock) so the bench harness stays independent of that fork. DBC bit N -> byte
+# N//8, bit N%8: bit 50 -> byte 6 bit 2; bit 51 -> byte 6 bit 3.
+CLUTCH_ADDR = 0x130
+CLUTCH_BUS = 0
+_CLUTCH_UP_BYTE, _CLUTCH_UP_BIT = 50 // 8, 50 % 8        # (6, 2)
+_CLUTCH_FLOOR_BYTE, _CLUTCH_FLOOR_BIT = 51 // 8, 51 % 8  # (6, 3)
+
 
 def load_config() -> dict:
   with open(CONFIG_PATH) as f:
@@ -93,3 +105,21 @@ def parse_speed_kph(addr: int, src: int, data: bytes) -> float | None:
     return None
   raw = (data[4] << 8) | data[5]
   return raw * 0.01
+
+
+def parse_clutch(addr: int, src: int, data: bytes) -> tuple[bool, bool] | None:
+  """Raw read of 0x130 clutch bits. Returns (pedal_up, pedal_floor), or None if
+  this frame isn't 0x130 on bus 0 / is too short.
+
+  pedal_up   = CLUTCH_PEDAL_UP (bit 50): clutch fully released (armable).
+  pedal_floor= CLUTCH_PEDAL_FLOOR (bit 51): clutch on the floor.
+  DBC-free on purpose (see the constants above). If both bits are set the frame is
+  inconsistent -> the caller should treat clutch as unknown.
+  """
+  if addr != CLUTCH_ADDR or src != CLUTCH_BUS:
+    return None
+  if len(data) <= _CLUTCH_UP_BYTE:
+    return None
+  up = bool((data[_CLUTCH_UP_BYTE] >> _CLUTCH_UP_BIT) & 1)
+  floor = bool((data[_CLUTCH_FLOOR_BYTE] >> _CLUTCH_FLOOR_BIT) & 1)
+  return up, floor

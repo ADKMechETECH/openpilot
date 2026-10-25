@@ -38,6 +38,7 @@ from opendbc.can import CANPacker  # noqa: E402
 from openpilot.cereal import messaging  # noqa: E402
 from openpilot.selfdrive.pandad import can_capnp_to_list, can_list_to_can_capnp  # noqa: E402
 from eps_bench import common  # noqa: E402
+from eps_bench import lowspeed  # noqa: E402
 
 NAME = "steer_injector"
 
@@ -66,9 +67,167 @@ def setpoint_at(segs: list[tuple[float, float, float]], t: float) -> tuple[float
   return 0.0, True
 
 
+def run_lowspeed(cfg: dict) -> None:
+  """Low-speed-band mode (closed course). The INVERSE of the parked interlock:
+  commands ONLY inside [V_MIN, V_MAX], armed by the clutch-released signal and a
+  speed-gated start. Pure decisions live in lowspeed.LowSpeedController; this just
+  wires cereal to it and logs. See CLOSED_COURSE_TEST_DIRECTIVE_2026-10-25.md.
+  """
+  d = common.log_dir(cfg)
+  bus = int(cfg["BUS"])
+  rate = float(cfg["RATE_HZ"])
+  dt = 1.0 / rate
+  speed_stale = float(cfg.get("SPEED_STALE_S", 0.5))
+  clutch_stale = float(cfg.get("CLUTCH_STALE_S", 0.3))
+  down_to_zero = bool(cfg.get("SET_STEER_DOWN_TO_ZERO", False))
+
+  lscfg = lowspeed.LowSpeedConfig.from_dict(cfg)
+  packer = CANPacker(cfg["DBC_NAME"])
+  pm = messaging.PubMaster(["sendcan"])
+  can_sock = messaging.sub_sock("can", timeout=5)
+
+  abort = {"flag": False}
+
+  def _sig(*_a):
+    abort["flag"] = True
+
+  signal.signal(signal.SIGINT, _sig)
+  signal.signal(signal.SIGTERM, _sig)
+  if hasattr(signal, "SIGHUP"):
+    signal.signal(signal.SIGHUP, _sig)
+
+  last_speed = None
+  last_speed_t = 0.0
+  last_clutch = None          # (up, floor)
+  last_clutch_t = 0.0
+
+  stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+  cmdlog_path = os.path.join(d, f"cmdlog_lowspeed_{stamp}.csv")
+  cmdlog = open(cmdlog_path, "w", buffering=1)
+  cmdlog.write("monotonic_ts,state,setpoint,cmd,request,speed_kph,clutch_up,reason,marker\n")
+
+  def drain():
+    nonlocal last_speed, last_speed_t, last_clutch, last_clutch_t
+    now = time.monotonic()
+    for nanos, can_list in can_capnp_to_list(messaging.drain_sock_raw(can_sock), "can"):
+      for addr, data, src in can_list:
+        b = bytes(data)
+        sp = common.parse_speed_kph(addr, src, b)
+        if sp is not None:
+          last_speed, last_speed_t = sp, now
+          continue
+        cl = common.parse_clutch(addr, src, b)
+        if cl is not None:
+          last_clutch, last_clutch_t = cl, now
+
+  def fresh_speed(now):
+    if last_speed is None or (now - last_speed_t) > speed_stale:
+      return None
+    return last_speed
+
+  def fresh_clutch_up(now):
+    # unknown if stale or both bits set (inconsistent frame)
+    if last_clutch is None or (now - last_clutch_t) > clutch_stale:
+      return None
+    up, floor = last_clutch
+    if up and floor:
+      return None
+    return up
+
+  def send(step, marker=""):
+    values = {"STEER_TORQUE": int(round(step.cmd)),
+              "STEER_TORQUE_REQUEST": 1 if step.request else 0}
+    if down_to_zero:
+      values["STEER_DOWN_TO_ZERO"] = 1 if step.request else 0
+    addr, data, _ = packer.make_can_msg(cfg["STEER_MSG"], bus, values)
+    pm.send("sendcan", can_list_to_can_capnp([(addr, data, bus)], msgtype="sendcan"))
+    now = time.monotonic()
+    spk = fresh_speed(now)
+    cu = fresh_clutch_up(now)
+    sp_str = "" if spk is None else f"{spk:.2f}"
+    cu_str = "" if cu is None else ("1" if cu else "0")
+    cmdlog.write(f"{now:.6f},{step.state},{step.setpoint:.1f},{step.cmd:.1f},"
+                 f"{1 if step.request else 0},{sp_str},{cu_str},{step.reason},{marker}\n")
+
+  t0 = time.monotonic()
+  ctrl = lowspeed.LowSpeedController(lscfg, t0)
+  common.write_status(cfg, NAME, {"state": "IDLE", "mode": "lowspeed", "cmd": 0,
+                                  "file": cmdlog_path, "reason": ""})
+  print(f"[steer_injector] lowspeed mode armed-by-clutch; band "
+        f"[{lscfg.v_min},{lscfg.v_max}] km/h start>={lscfg.v_min+lscfg.v_start_margin} "
+        f"TARGET {lscfg.target} MAX_CMD {lscfg.max_cmd} T_MAX {lscfg.t_max}s -> {cmdlog_path}")
+
+  try:
+    next_t = time.monotonic()
+    while True:
+      drain()
+      now = time.monotonic()
+      ui = abort["flag"] or common.abort_requested(cfg, NAME)
+      step = ctrl.update(now, fresh_speed(now), fresh_clutch_up(now), ui)
+
+      marker = ""
+      if step.armed_edge:
+        marker = "ARM"
+      elif step.started_edge:
+        marker = "START"
+      send(step, marker)
+
+      common.write_status(cfg, NAME, {
+        "state": step.state, "mode": "lowspeed", "cmd": round(step.cmd, 1),
+        "setpoint": round(step.setpoint, 1),
+        "speed_kph": round(last_speed, 2) if last_speed is not None else None,
+        "clutch_up": (None if fresh_clutch_up(now) is None else bool(fresh_clutch_up(now))),
+        "elapsed": round(now - t0, 1), "file": cmdlog_path, "reason": step.reason,
+      })
+
+      if step.state == lowspeed.DONE:
+        break
+
+      next_t += dt
+      sleep = next_t - time.monotonic()
+      if sleep > 0:
+        time.sleep(sleep)
+      else:
+        next_t = time.monotonic()
+
+  except Exception as e:
+    # bounded ramp-to-zero then release
+    reason = f"exception:{type(e).__name__}"
+    guard = int(rate * 5)
+    while abs(ctrl.cmd) >= 1.0 and guard > 0:
+      step = ctrl.update(time.monotonic(), fresh_speed(time.monotonic()),
+                         fresh_clutch_up(time.monotonic()), True)
+      send(step, "exc")
+      time.sleep(dt)
+      guard -= 1
+    common.write_status(cfg, NAME, {"state": "ABORTED", "mode": "lowspeed", "cmd": 0,
+                                    "reason": reason, "file": cmdlog_path})
+    raise
+  finally:
+    for _ in range(5):
+      values = {"STEER_TORQUE": 0, "STEER_TORQUE_REQUEST": 0}
+      if down_to_zero:
+        values["STEER_DOWN_TO_ZERO"] = 0
+      addr, data, _ = packer.make_can_msg(cfg["STEER_MSG"], bus, values)
+      pm.send("sendcan", can_list_to_can_capnp([(addr, data, bus)], msgtype="sendcan"))
+      cmdlog.write(f"{time.monotonic():.6f},STOPPED,0.0,0.0,0,,,{ctrl.reason},zero\n")
+      time.sleep(dt)
+    end = "ABORTED" if ctrl.reason and ctrl.reason not in ("ui_abort", "signal") else "DONE"
+    common.write_status(cfg, NAME, {"state": end, "mode": "lowspeed", "cmd": 0,
+                                    "reason": ctrl.reason, "file": cmdlog_path})
+    common.clear_abort(cfg, NAME)
+    cmdlog.close()
+    print(f"[steer_injector] lowspeed {end} (reason={ctrl.reason or 'none'}) -> {cmdlog_path}")
+
+
 def main() -> None:
   cfg = common.load_config()
   common.clear_abort(cfg, NAME)
+
+  if str(cfg.get("MODE", "parked")).lower() == "lowspeed":
+    run_lowspeed(cfg)
+    return
+
   d = common.log_dir(cfg)
 
   bus = int(cfg["BUS"])

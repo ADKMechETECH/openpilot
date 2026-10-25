@@ -1,0 +1,21 @@
+{
+  "_README": "EPS PARKED bench config (Run 1 mode). Copy to config.json to use. MODE=parked commands only at standstill (speed <= SPEED_ABORT_KPH) and runs the +/-TARGET sweep x N_CYCLES. STEER_TORQUE full-scale +/-4096; cap ref +/-0x2b4e (34% ~= 11086) - do NOT hardcode, sweep and observe.",
+  "MODE": "parked",
+  "BUS": 0,
+  "DBC_NAME": "honda_bosch_radarless_generated",
+  "STEER_MSG": "STEERING_CONTROL",
+  "STEER_ADDR": 228,
+  "RATE_HZ": 100,
+  "TARGET": 600,
+  "MAX_CMD": 1000,
+  "MAX_RATE": 400,
+  "RAMP_S": 1.5,
+  "DWELL_S": 2.0,
+  "PAUSE_S": 1.5,
+  "N_CYCLES": 2,
+  "SET_STEER_DOWN_TO_ZERO": false,
+  "SPEED_ABORT_KPH": 0.5,
+  "SPEED_STALE_S": 0.5,
+  "SESSION_TIMEOUT_S": 120,
+  "LOG_DIR": "/data/eps_bench"
+}

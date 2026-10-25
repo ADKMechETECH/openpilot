@@ -1,0 +1,50 @@
+{
+  "_README": "EPS LOW-SPEED-BAND bench config (closed course). Copy to config.json to use. MODE=lowspeed inverts the parked interlock: commands ONLY inside [V_MIN,V_MAX] km/h, armed by the clutch-released signal and a speed-gated START. Run 1 proved the EPS won't actuate parked (engage ~=10 km/h). Method: CLOSED_COURSE_TEST_DIRECTIVE_2026-10-25.md. START SMALL; raise TARGET/MAX_CMD deliberately across runs toward the +/-0x2b4e (34% ~= 11086) cap, never near the ~2048/50% motor ceiling without firmware-team sign-off. STEER_TORQUE full-scale +/-4096.",
+
+  "MODE": "lowspeed",
+  "_MODE": "parked | lowspeed. Selects which injector state machine runs.",
+
+  "BUS": 0,
+  "DBC_NAME": "honda_bosch_radarless_generated",
+  "STEER_MSG": "STEERING_CONTROL",
+  "STEER_ADDR": 228,
+  "RATE_HZ": 100,
+
+  "V_MIN": 12.0,
+  "_V_MIN": "km/h. Engage-band floor (firmware min engage ~10; keep margin). START requires speed >= V_MIN + V_START_MARGIN.",
+  "V_MAX": 20.0,
+  "_V_MAX": "km/h. Hard band ceiling - abort (ramp to 0) above this.",
+  "V_START_MARGIN": 1.0,
+  "_V_START_MARGIN": "km/h above V_MIN required to START (EPS provably engaged).",
+  "V_DROP": 2.0,
+  "_V_DROP": "km/h below V_MIN that aborts a run (EPS would disengage anyway).",
+
+  "T_MAX": 1.5,
+  "_T_MAX": "s. Max duration of a commanded run, from the RUNNING start. Auto-stop.",
+
+  "TARGET": 300,
+  "_TARGET": "raw |STEER_TORQUE| peak of the single-direction ramp. First runs well BELOW the cap (300 ~= 7%). Raise deliberately.",
+  "MAX_CMD": 600,
+  "_MAX_CMD": "HARD magnitude ceiling, independent of TARGET. Raise deliberately; never near the ~2048 motor ceiling without sign-off.",
+  "MAX_RATE": 400,
+  "_MAX_RATE": "raw units/s anti-slam rate limit (applies to ramp-up and ramp-out). Never a step.",
+  "RAMP_S": 1.0,
+  "_RAMP_S": "intended 0 -> TARGET ramp time; the per-frame step is the stricter of MAX_RATE and TARGET/RAMP_S.",
+  "DIRECTION": 1,
+  "_DIRECTION": "+1 or -1: single-direction ramp. Do single-direction runs first; add the opposite direction only after they are clean.",
+
+  "SET_STEER_DOWN_TO_ZERO": false,
+  "_SET_STEER_DOWN_TO_ZERO": "stock non-TJA frame. ASK the firmware team before enabling.",
+
+  "SPEED_STALE_S": 0.5,
+  "_SPEED_STALE_S": "0x158 older than this = speed unknown -> no START / abort a run.",
+  "CLUTCH_STALE_S": 0.3,
+  "_CLUTCH_STALE_S": "0x130 older than this (or both clutch bits set) = clutch unknown.",
+  "ARM_REQUIRES_CLUTCH": true,
+  "_ARM_REQUIRES_CLUTCH": "true = ARM only on the clutch-released rising edge (closed-course default). false = auto-arm (BENCH/DEBUG only).",
+
+  "SESSION_TIMEOUT_S": 60,
+  "_SESSION_TIMEOUT_S": "global watchdog from injector start -> ramp to 0.",
+
+  "LOG_DIR": "/data/eps_bench"
+}
