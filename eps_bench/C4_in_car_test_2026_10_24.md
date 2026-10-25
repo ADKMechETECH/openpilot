@@ -109,3 +109,67 @@ sudo reboot
 - `run_bench.sh` one-shot (stop manager + bring up stack + menu in one line) — offered, not built.
 - Push happens via the laptop (`git push --no-verify adk eps-bench-parked`); Claude's env is blocked
   from pushing and can't SSH the car.
+
+---
+
+## RESULTS — first run (2026-10-25, parked, engine running)
+
+**Outcome: NULL RESULT at standstill (the directive's "off-image standstill gate").**
+The EPS accepts our `0x0E4` stream and clears its own fault while we send it, but applies
+**no motor torque** at a standstill. Per directive §8/§11 we stopped here; next step is the
+firmware team's separate low-speed plan. Did NOT escalate TARGET/MAX_CMD.
+
+### What we ran
+- Stack: `eps-bench-parked` @ `c7f6f0859` + one on-car fix (below). `EPS_BENCH=1`,
+  panda `allOutput` param 0 confirmed live (`ignition True`), autonomy procs stripped.
+- Stage 1 passed: camera isolated (no `0x0E4` on bus 0; it stays on bus 2), bus-0
+  `0x158`/`0x18F` live; `0x158` bytes 4-5 speed-decode tracks real motion (0.00 parked,
+  1.5 kph rolling, back to 0.00 — Honda wheel-speed floor ~1.5 kph, so PARK BRAKE is the
+  real standstill guarantee, not the 0.5 kph interlock).
+- Stage 2: one ramp at defaults TARGET 600 / MAX_CMD 1000, 2 cycles +/-600, ~25 s, completed
+  `DONE` reason none.
+
+### Logs handed off (in Dropbox `…/CommaAI/EPS_Testing/`)
+- `canlog_20261025_011420.csv` (34 MB, all buses, full session incl. engine-off/on and the ramp)
+- `cmdlog_20261025_012004.csv` (the ramp that ran: ts, phase, setpoint, commanded torque, request, speed)
+
+### Findings (from `analyze.py` over the logs)
+- **Frames reached the EPS.** Panda echo on bus 0x80(=128) = 2589 frames, torque min/max -600/+600,
+  `STEER_TORQUE_REQUEST=1` on 2583 of them. Panda `safetyTxBlocked = 0` (nothing blocked).
+  Camera's `0x0E4` on bus 2 stayed torque 0 (relay open, no command fight).
+- **No actuation.** Steer angle 2.4–2.5° flat through the whole ramp; `0x18F` torque sensor
+  116–123 flat; `0x18F` STEER_CONTROL_ACTIVE bit never set.
+- **`0x18F` STEER_STATUS timeline (0=normal,3=low_speed_lockout,5=fault_1):** ~8.5 s after each
+  engine start (camera isolated, no steering stream) it goes 3→5 (fault). At ramp start (t≈0.07 s)
+  it returns to **0 (normal)** and holds normal for the entire ramp. ~8.5 s after our stream stops
+  (t≈26.6→35 s) it goes 3→5 again. So the EPS tracks presence of a `0x0E4` stream, and the dash
+  **"Steering assist reduced, see dealer"** warning is the fault from the *missing* stream (engine-on
+  with camera isolated and injector not running), NOT from the torque we sent. It cleared on a normal
+  ignition off/on cycle — temporary fault, no scan tool needed.
+
+### Interpretation for the firmware team
+- Mode-0 34% LKAS assist does **not** apply torque at 0 kph with a bare `0x0E4`
+  (`STEER_TORQUE_REQUEST=1`, `STEER_DOWN_TO_ZERO=false`). The EPS "honors the stream" (clears
+  low_speed_lockout→normal while present) but gates actuation at standstill — consistent with a
+  speed/vehicle-moving actuation gate inside the EPS, not a panda/relay/command-delivery problem
+  (all of those were verified good).
+- Open levers NOT tried this run (ask the firmware team before any): `SET_STEER_DOWN_TO_ZERO=true`
+  (TJA frame), rolling >~1.5 kph (needs a separate low-speed driving plan + interlock rethink, out of
+  scope for the parked bench), the `0x55AA` 17% sub-mode handshake.
+
+### Code fix made on-car (committed `06554c51f`)
+`steer_injector.py`: wait up to 3 s for the first `0x158` frame before starting the ramp clock.
+A fresh `can` subscriber drains empty on its first loop → `last_speed=None` → the HARD interlock
+latched `speed_unknown_or_stale` at t=0 and the first ramp aborted instantly (0 torque). After the
+fix the second ramp ran full with speed read as 0.00 throughout. **The device copy was hot-patched
+in place** (`/data/openpilot/eps_bench/steer_injector.py`); also committed to the WSL repo. If the
+device is ever re-checked-out/reset, re-apply (or `git pull` once the commit is pushed with
+`git push --no-verify adk eps-bench-parked`). **`config.json` is .gitignore'd** so it was absent on
+the device — recreated by hand at `/data/openpilot/eps_bench/config.json` (defaults above); it will
+need recreating again on any fresh checkout.
+
+### Device left AS-IS for further bench testing (owner, 2026-10-25)
+NOT restored to `civic-6mt-dev-test`. Device unplugged after the run. To resume: replug, engine on
+parked, re-attach tmux (or relaunch `./eps_bench/launch_eps_bench.sh` + `eps_menu.py`), confirm
+`config.json` still present. To return to cruise later: `git checkout civic-6mt-dev-test &&
+git submodule update --init --recursive && sudo reboot` (rebuilds on AGNOS 20.1 — unvalidated there).
