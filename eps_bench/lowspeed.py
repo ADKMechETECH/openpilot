@@ -38,16 +38,14 @@ ARMED = "ARMED"
 RUNNING = "RUNNING"
 STOPPING = "STOPPING"
 DONE = "DONE"
-BLOCKED = "BLOCKED"   # refuses to arm/inject (escalation guard tripped)
 
-# HARD escalation guard (RE team, 2026-10-25). Below ~half the ~1393 (0x0E4-unit)
-# cap the car barely turns over a <=1.5 s creep run and the safety driver is the
-# backstop; above it the car turns meaningfully and a yaw/heading excursion abort
-# MUST be in place. That abort is deferred until first-run logs pin the yaw source
-# and real excursion - until it is built AND bench-tested, this guard REFUSES any
-# run whose TARGET or MAX_CMD exceeds the line. Do NOT set YAW_ABORT_READY true to
-# bypass it: it must only be flipped by the pass that actually implements the abort.
-ESCALATION_GUARD = 700.0
+# Advisory high-command threshold (0x0E4 units). Above ~half the ~1393 cap the car
+# turns more; the RE team suggested a yaw/excursion abort before crossing it. Owner
+# decision (2026-10-25): NOT a blocker at creep speed (~3 m/s, bounded <=1.5 s run,
+# driver on the brake + clutch + kill) - the human + T_MAX + band are the backstop.
+# So this is an ADVISORY ONLY: the injector prints a one-line note above it and runs
+# normally. If the yaw abort is ever built it can gate here instead.
+ESCALATION_ADVISORY = 700.0
 
 
 @dataclass
@@ -66,8 +64,6 @@ class LowSpeedConfig:
   speed_stale_s: float = 0.5     # s, speed older than this = unknown
   session_timeout_s: float = 60.0  # s, global watchdog from controller start
   arm_requires_clutch: bool = True  # if False, ARM is automatic (bench/debug only)
-  yaw_abort_ready: bool = False     # lifts the escalation guard - ONLY the pass that
-                                    # builds+bench-tests the yaw abort may default this true
 
   @classmethod
   def from_dict(cls, cfg: dict) -> "LowSpeedConfig":
@@ -86,21 +82,17 @@ class LowSpeedConfig:
       speed_stale_s=float(cfg.get("SPEED_STALE_S", 0.5)),
       session_timeout_s=float(cfg.get("SESSION_TIMEOUT_S", 60.0)),
       arm_requires_clutch=bool(cfg.get("ARM_REQUIRES_CLUTCH", True)),
-      yaw_abort_ready=bool(cfg.get("YAW_ABORT_READY", False)),
     )
 
 
-def escalation_blocked(cfg: "LowSpeedConfig") -> str | None:
-  """Return a reason string if this config may NOT run under the escalation guard,
-  else None. TARGET or MAX_CMD past ESCALATION_GUARD requires the yaw/excursion
-  abort to be in place (yaw_abort_ready). See ESCALATION_GUARD above."""
-  if cfg.yaw_abort_ready:
-    return None
+def escalation_note(cfg: "LowSpeedConfig") -> str | None:
+  """Advisory only (not a gate). Returns a one-line note to print if TARGET/MAX_CMD
+  is in the higher-command region (> ESCALATION_ADVISORY), else None. The run is not
+  blocked - the safety driver + T_MAX + band are the backstop at creep speed."""
   worst = max(abs(cfg.target), abs(cfg.max_cmd))
-  if worst > ESCALATION_GUARD:
-    return (f"escalation_guard: TARGET/MAX_CMD {worst:.0f} > {ESCALATION_GUARD:.0f} "
-            f"requires the yaw/excursion abort (not built). Keep <= {ESCALATION_GUARD:.0f} "
-            f"for first runs, or implement the abort and set YAW_ABORT_READY.")
+  if worst > ESCALATION_ADVISORY:
+    return (f"high command: TARGET/MAX_CMD {worst:.0f} > {ESCALATION_ADVISORY:.0f} "
+            f"(car turns more at speed; driver ready to brake/clutch, {cfg.t_max:.1f}s T_MAX)")
   return None
 
 
@@ -121,13 +113,9 @@ class LowSpeedController:
   def __init__(self, cfg: LowSpeedConfig, t0: float):
     self.cfg = cfg
     self.t0 = t0
-    # HARD escalation guard: if TARGET/MAX_CMD exceed the line without the yaw abort,
-    # the controller starts BLOCKED and never arms/commands (defense in depth; the
-    # injector also refuses to start). cmd stays 0, REQUEST 0.
-    self.blocked_reason = escalation_blocked(cfg)
-    self.state = BLOCKED if self.blocked_reason else IDLE
+    self.state = IDLE
     self.cmd = 0.0
-    self.reason = self.blocked_reason or ""
+    self.reason = ""
     self.prev_clutch_up = None   # type: bool | None
     self.t_arm = None            # type: float | None
     self.t_run = None            # type: float | None
@@ -167,13 +155,6 @@ class LowSpeedController:
     cfg = self.cfg
     armed_edge = False
     started_edge = False
-
-    # --- escalation guard: never arm or command ---
-    if self.state == BLOCKED:
-      self.cmd = 0.0
-      self.prev_clutch_up = clutch_up
-      return Step(cmd=0.0, request=False, state=BLOCKED, setpoint=0.0,
-                  reason=self.reason, armed_edge=False, started_edge=False)
 
     # --- global watchdog + UI abort apply in every live state ---
     if self.state in (IDLE, ARMED, RUNNING):

@@ -2,11 +2,9 @@
 
 **NEXT STEP = IN-CAR TESTING of the low-speed-band mode.** RE team APPROVED to proceed (2026-10-25);
 their corrections are applied (cap scale ~1393 not 11086, pre-roll REQUEST=1 from ARM). Code built,
-bench-tested (14/14), pushed. Nothing else to write before the car — EXCEPT a yaw/heading excursion
-abort is required *before* raising TARGET past ~700 (half cap). **This is now a HARD GATE enforced in
-code** — the injector REFUSES TARGET/MAX_CMD > 700 until the abort is built (`YAW_ABORT_READY`). First
-low-TARGET runs (≤ 700) are fine without it; build the abort from the first-run logs (yaw source = a
-Honda VSA yaw-rate frame, pinned from the all-bus capture).
+bench-tested (14/14), pushed. Nothing else to write before the car — Nothing else before the car. (The yaw/excursion abort the RE team suggested is **not pursued** — owner
+decided it's unnecessary at creep speed given instant brake/clutch/kill; the code keeps only a one-line
+advisory above TARGET ~700, no block. Owner is notifying the RE team.)
 
 ## The next two things, in order
 1. **Device bench (engine on, PARKED, zero risk) — validate the trigger wiring.**

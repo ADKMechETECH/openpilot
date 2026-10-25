@@ -20,12 +20,12 @@
   "_V_DROP": "km/h below V_MIN that aborts a run (EPS would disengage anyway).",
 
   "T_MAX": 1.5,
-  "_T_MAX": "s. Max duration of a commanded run, from the RUNNING start. Auto-stop.",
+  "_T_MAX": "s. Max duration of a commanded run, from the RUNNING start. Auto-stop. NOTE: the command can only reach MAX_RATE*T_MAX - at MAX_RATE 400/s, 1.5 s tops out at 600; cap-region runs (toward ~1393) need a longer T_MAX and/or higher MAX_RATE.",
 
   "TARGET": 300,
   "_TARGET": "raw |STEER_TORQUE| peak of the single-direction ramp (0x0E4 units, +/-4096 FS). First runs well BELOW the cap (300 ~= 7%). Cap runs: raise toward ~1393 (~34%). RE sign-off needed past ~700 (add a yaw/heading abort first).",
   "MAX_CMD": 600,
-  "_MAX_CMD": "HARD magnitude ceiling, independent of TARGET. First runs 600. For CAP runs set ABOVE the ~1393 cap (~1500-1600) so TARGET can cross it. Never near the ~2048 motor ceiling without sign-off.",
+  "_MAX_CMD": "HARD magnitude ceiling, independent of TARGET. First runs 600. For CAP runs set ABOVE the ~1393 cap (~1500-1600) so TARGET can cross it. Above ~700 the injector prints an ADVISORY note (not a block; driver + T_MAX + band are the backstop at creep speed - owner decision 2026-10-25). Never near the ~2048 motor ceiling without sign-off.",
   "MAX_RATE": 400,
   "_MAX_RATE": "raw units/s anti-slam rate limit (applies to ramp-up and ramp-out). Never a step.",
   "RAMP_S": 1.0,
@@ -43,8 +43,6 @@
   "ARM_REQUIRES_CLUTCH": true,
   "_ARM_REQUIRES_CLUTCH": "true = ARM only on the clutch-released rising edge (closed-course default). false = auto-arm (BENCH/DEBUG only).",
 
-  "YAW_ABORT_READY": false,
-  "_YAW_ABORT_READY": "HARD GATE (RE team 2026-10-25). false = the injector REFUSES any run with TARGET or MAX_CMD > 700 (half the ~1393 cap), because the yaw/heading excursion abort is NOT built yet. Keep <= 700 for first runs. Do NOT set true to bypass - it may only be set by the pass that actually builds + bench-tests the yaw abort (yaw source = a Honda VSA yaw-rate CAN frame; pin it from the first-run all-bus log).",
   "SESSION_TIMEOUT_S": 60,
   "_SESSION_TIMEOUT_S": "global watchdog from injector start -> ramp to 0.",
 

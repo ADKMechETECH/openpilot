@@ -11,10 +11,10 @@
 > - **Clip-vs-track field (flag 3):** analysis reads `0x18F` **STEER_TORQUE_MOTOR** (delivered), not
 >   STEER_TORQUE_SENSOR (handwheel). We log raw full frames so either decodes.
 > - **V_MIN:** [12,20] signed off; raise V_MIN to ~16 if actuation looks partial at 12 (windows ~13/15).
-> - **Yaw/excursion abort (Q4):** deferred per RE direction; first-run logs pin the yaw source (Honda
->   VSA yaw-rate frame) + real excursion, then it is built as its own pass. **HARD GATE now enforced in
->   code** (`escalation_blocked`, `ESCALATION_GUARD=700`): the injector REFUSES any run with TARGET or
->   MAX_CMD > 700 until the abort exists and `YAW_ABORT_READY` is set. First runs (≤ 700) unaffected.
+> - **Yaw/excursion abort (Q4):** **not pursued** (owner decision 2026-10-25, RE team being notified).
+>   Judged unnecessary at creep speed (~3 m/s) given the bounded `T_MAX` run and instant driver
+>   brake/clutch/kill. Code keeps an **advisory only** (`escalation_note`, `ESCALATION_ADVISORY=700`):
+>   a one-line note above 700, no block. (If revisited, yaw source = a Honda VSA yaw-rate CAN frame.)
 > - **Duration hand-back (flag 2):** separate longer sustained run later; `T_MAX` 1.5 s won't capture it.
 > - Q1 clutch bits accepted; Q3 CCP stays out of the fork (CAN-only first); Q5 `SET_STEER_DOWN_TO_ZERO`
 >   stays false.

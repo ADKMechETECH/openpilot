@@ -83,15 +83,11 @@ def run_lowspeed(cfg: dict) -> None:
 
   lscfg = lowspeed.LowSpeedConfig.from_dict(cfg)
 
-  # HARD escalation guard: refuse to inject at all if TARGET/MAX_CMD exceed the line
-  # without the (not-yet-built) yaw/excursion abort. Nothing is sent.
-  blocked = lowspeed.escalation_blocked(lscfg)
-  if blocked:
-    common.write_status(cfg, NAME, {"state": "BLOCKED", "mode": "lowspeed", "cmd": 0,
-                                    "reason": blocked, "file": ""})
-    print(f"[steer_injector] REFUSED to start (lowspeed): {blocked}")
-    common.clear_abort(cfg, NAME)
-    return
+  # Advisory only (not a gate): note a higher-command run. Driver + T_MAX + band are
+  # the backstop at creep speed (owner decision 2026-10-25).
+  note = lowspeed.escalation_note(lscfg)
+  if note:
+    print(f"[steer_injector] NOTE {note}")
 
   packer = CANPacker(cfg["DBC_NAME"])
   pm = messaging.PubMaster(["sendcan"])
