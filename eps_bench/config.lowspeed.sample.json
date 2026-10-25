@@ -43,6 +43,8 @@
   "ARM_REQUIRES_CLUTCH": true,
   "_ARM_REQUIRES_CLUTCH": "true = ARM only on the clutch-released rising edge (closed-course default). false = auto-arm (BENCH/DEBUG only).",
 
+  "YAW_ABORT_READY": false,
+  "_YAW_ABORT_READY": "HARD GATE (RE team 2026-10-25). false = the injector REFUSES any run with TARGET or MAX_CMD > 700 (half the ~1393 cap), because the yaw/heading excursion abort is NOT built yet. Keep <= 700 for first runs. Do NOT set true to bypass - it may only be set by the pass that actually builds + bench-tests the yaw abort (yaw source = a Honda VSA yaw-rate CAN frame; pin it from the first-run all-bus log).",
   "SESSION_TIMEOUT_S": 60,
   "_SESSION_TIMEOUT_S": "global watchdog from injector start -> ramp to 0.",
 

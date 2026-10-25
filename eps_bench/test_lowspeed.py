@@ -19,7 +19,8 @@ sys.path.insert(0, os.path.dirname(HERE))
 
 from eps_bench import common  # noqa: E402
 from eps_bench.lowspeed import (  # noqa: E402
-  LowSpeedConfig, LowSpeedController, IDLE, ARMED, RUNNING, STOPPING, DONE,
+  LowSpeedConfig, LowSpeedController, escalation_blocked, ESCALATION_GUARD,
+  IDLE, ARMED, RUNNING, STOPPING, DONE, BLOCKED,
 )
 
 HZ = 100.0
@@ -107,6 +108,27 @@ def test_happy_path():
   nrun = sum(1 for s in steps if s.state == RUNNING)
   check(145 <= nrun <= 156, f"RUNNING ~ t_max*hz=150 frames (got {nrun})")
   check(steps[-1].reason == "t_max", f"stop reason t_max (got {steps[-1].reason})")
+
+
+def test_escalation_guard():
+  print("test_escalation_guard: TARGET/MAX_CMD > ~700 refused without the yaw abort")
+  # first-run config (300/600) is allowed
+  check(escalation_blocked(cfg(target=300, max_cmd=600)) is None, "first-run 300/600 allowed")
+  check(escalation_blocked(cfg(target=700, max_cmd=700)) is None, "at the line 700/700 allowed")
+  # cap-region TARGET refused
+  check(escalation_blocked(cfg(target=1000, max_cmd=1500)) is not None, "cap-region TARGET blocked")
+  # raising only MAX_CMD past the line is also refused (it permits crossing)
+  check(escalation_blocked(cfg(target=600, max_cmd=1500)) is not None, "MAX_CMD>700 blocked")
+  # the yaw-abort-ready flag lifts it
+  check(escalation_blocked(cfg(target=1000, max_cmd=1500, yaw_abort_ready=True)) is None,
+        "yaw_abort_ready lifts the guard")
+  # a blocked controller never arms or commands, even with a perfect ARM+speed sequence
+  c = LowSpeedController(cfg(target=1200, max_cmd=1500), t0=0.0)
+  check(c.state == BLOCKED, "controller starts BLOCKED")
+  frames = [(0.0, True, False)] * 5 + [(15.0, True, False)] * 200
+  steps = run(c, frames)
+  check(all(s.state == BLOCKED for s in steps), "stays BLOCKED through ARM+in-band speed")
+  check(all(s.cmd == 0.0 and s.request is False for s in steps), "never commands / never asserts request")
 
 
 def test_preroll_request_from_arm():

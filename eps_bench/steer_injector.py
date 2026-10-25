@@ -82,6 +82,17 @@ def run_lowspeed(cfg: dict) -> None:
   down_to_zero = bool(cfg.get("SET_STEER_DOWN_TO_ZERO", False))
 
   lscfg = lowspeed.LowSpeedConfig.from_dict(cfg)
+
+  # HARD escalation guard: refuse to inject at all if TARGET/MAX_CMD exceed the line
+  # without the (not-yet-built) yaw/excursion abort. Nothing is sent.
+  blocked = lowspeed.escalation_blocked(lscfg)
+  if blocked:
+    common.write_status(cfg, NAME, {"state": "BLOCKED", "mode": "lowspeed", "cmd": 0,
+                                    "reason": blocked, "file": ""})
+    print(f"[steer_injector] REFUSED to start (lowspeed): {blocked}")
+    common.clear_abort(cfg, NAME)
+    return
+
   packer = CANPacker(cfg["DBC_NAME"])
   pm = messaging.PubMaster(["sendcan"])
   can_sock = messaging.sub_sock("can", timeout=5)

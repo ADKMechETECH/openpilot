@@ -59,8 +59,12 @@ not a 0x0E4 value; raise toward ~1393 and set `MAX_CMD` above it for cap runs), 
   V_MIN to ~16.
 - **Clip-vs-track is read from `0x18F` `STEER_TORQUE_MOTOR`** (delivered motor torque) vs commanded
   `0x0E4` — **not** `STEER_TORQUE_SENSOR` (handwheel). We log raw full frames, so either field decodes.
-- **Yaw/heading excursion abort:** not needed for first low-`TARGET` runs; **required before escalating
-  `TARGET` past ~700** (half cap). Not yet implemented — next build item, needs a confirmed yaw source.
+- **Yaw/heading excursion abort:** deferred (RE team 2026-10-25) — first-run logs will pin the yaw
+  source (a Honda VSA yaw-rate CAN frame; not an EPS/RE fact — read it from the all-bus log or the
+  fork DBC and validate the scale) and the real excursion, so the thresholds come from data not guesses.
+  **HARD GATE, enforced in code (`escalation_blocked`, `ESCALATION_GUARD=700`):** the injector REFUSES
+  any run with `TARGET` or `MAX_CMD` > 700 until the abort is built + bench-tested and `YAW_ABORT_READY`
+  is set. First runs (≤ 700) run normally; cap-region runs are blocked until then.
 - **756-count duration hand-back** (bail-cause B) is a separate, longer sustained-engagement run on a
   bigger course, after the cap is characterized — `T_MAX` 1.5 s won't capture it.
 - CCP stays out of the fork (CAN-only for first runs); `SET_STEER_DOWN_TO_ZERO` stays false.
