@@ -127,6 +127,20 @@ def main() -> None:
                                   "file": cmdlog_path, "reason": ""})
   phase = "RUNNING"
 
+  # Wait for the first 0x158 speed frame before starting the ramp clock. A freshly created
+  # subscriber gets nothing on its first drain, which latched speed_unknown_or_stale at t=0.
+  # Nothing is sent while waiting; if no speed arrives in 3 s the interlock below aborts as before.
+  t_wait = time.monotonic()
+  while last_speed is None and time.monotonic() - t_wait < 3.0:
+    for nanos, can_list in can_capnp_to_list(messaging.drain_sock_raw(can_sock), "can"):
+      for addr, data, src in can_list:
+        sp = common.parse_speed_kph(addr, src, bytes(data))
+        if sp is not None:
+          last_speed = sp
+          last_speed_t = time.monotonic()
+    time.sleep(0.01)
+  t_start = time.monotonic()
+
   try:
     next_t = time.monotonic()
     while True:
