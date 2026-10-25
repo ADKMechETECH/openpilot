@@ -20,6 +20,8 @@ synthetic inputs (the directive s8 bench test - no motion).
 State machine:
   IDLE  --clutch released (rising edge)-->  ARMED
   ARMED --speed >= V_MIN + V_START_MARGIN (fresh)-->  RUNNING   (clutch pressed -> IDLE)
+         (ARMED pre-rolls REQUEST=1 at torque 0 so the stream/counter is continuous
+          before the ramp - no cold-start step at the engage crossing; RE flag 1)
   RUNNING --single bounded ramp toward DIRECTION*TARGET; auto-stop on the tightest of
             T_MAX / speed>V_MAX / speed<V_MIN-V_DROP / clutch-in / stale speed /
             session timeout / ui-abort / exception-->  STOPPING
@@ -197,12 +199,18 @@ class LowSpeedController:
       if self.cmd != 0.0:
         self._slew(0.0, self.stop_max_step)
 
-    # REQUEST stays 1 until cmd has fully reached 0 in STOPPING; 0 when idle/armed/done
-    if self.state in (RUNNING, STOPPING):
+    # REQUEST assertion:
+    #  ARMED  -> pre-roll: REQUEST=1 at torque 0 so the counter/stream and the
+    #           request bit are continuous BEFORE the ramp, removing any cold-start
+    #           step at the engage crossing (RE-team flag 1, 2026-10-25).
+    #  RUNNING/STOPPING -> REQUEST=1 (stays 1 through the ramp-out until cmd hits 0).
+    #  IDLE   -> not streaming an asserted request (REQUEST=0), except to bleed a residual.
+    #  DONE   -> explicit release (REQUEST=0).
+    if self.state in (ARMED, RUNNING, STOPPING):
       request = True
     elif self.state == DONE:
       request = False
-    else:  # IDLE / ARMED: not injecting
+    else:  # IDLE
       request = abs(self.cmd) >= 1.0  # only if bleeding a residual
 
     self.prev_clutch_up = clutch_up

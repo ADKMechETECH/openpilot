@@ -1,7 +1,10 @@
 # RUN ME NEXT — EPS bench (updated 2026-10-25)
 
-**NEXT STEP = IN-CAR TESTING of the low-speed-band mode.** The code is built, bench-tested (13/13),
-committed and pushed. Nothing else to write before the car.
+**NEXT STEP = IN-CAR TESTING of the low-speed-band mode.** RE team APPROVED to proceed (2026-10-25);
+their corrections are applied (cap scale ~1393 not 11086, pre-roll REQUEST=1 from ARM). Code built,
+bench-tested (14/14), pushed. Nothing else to write before the car — EXCEPT a yaw/heading excursion
+abort is required *before* raising TARGET past ~700 (half cap); fine to run the first low-TARGET
+closed-course runs without it.
 
 ## The next two things, in order
 1. **Device bench (engine on, PARKED, zero risk) — validate the trigger wiring.**
@@ -12,10 +15,10 @@ committed and pushed. Nothing else to write before the car.
    - Press **B** (CAN LOG), then **A** (enable injector). Parked, it must **ARM on a clutch cycle but
      NEVER START** (speed stays 0) and command nothing. That proves the clutch+speed triggers.
 2. **Closed course (safety driver, 2nd-gear idle creep).** Only after step 1. Injector auto-STARTs in
-   the band, one bounded ramp, ramps to 0. Start `TARGET` low (300), raise deliberately toward the
-   ±0x2b4e cap. Hand back `canlog_*.csv` + `cmdlog_lowspeed_*.csv` per run.
+   the band, one bounded ramp, ramps to 0. Start `TARGET` low (300), raise deliberately toward **~1393** (34% in 0x0E4 units; set
+   `MAX_CMD` ~1500-1600 for cap runs). A yaw/heading abort is required before TARGET > ~700. Hand back `canlog_*.csv` + `cmdlog_lowspeed_*.csv` per run.
 
-## Before the closed-course day
+## Open items before the closed-course day
 Get the RE team's answers to **Q1–Q5** in `EPS_LOWSPEED_PRETEST_REVIEW.md` (clutch bits, band +
 escalation sign-off, CCP-in-parallel?, excursion budget?, TJA-frame?).
 

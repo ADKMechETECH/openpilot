@@ -47,7 +47,8 @@ and ready; no testing has been run yet.** Next time, start at "NEXT STEPS."
   context frame needed. Keep engine running so bus-0 speed/sensor health flows.
 - **`SET_STEER_DOWN_TO_ZERO=false` for run 1** (basic LKAS assist = firmware "mode 0 / 34%").
 - Delivered-torque tell-tale = **`0x18F` STEER_STATUS** + the EPS-TX set
-  (`0x324/326/328/32F/33D/374/3A1/516/78E`). Firmware cap = **±0x2b4e = 11086 = 34%**; 17% sub-mode is a
+  (`0x324/326/328/32F/33D/374/3A1/516/78E`). Firmware cap = **±0x2b4e = 11086 = 34% on the INTERNAL ±32767 Q15 scale** (= ~1393 in 0x0E4
+  ±4096 units, the value TARGET ramps toward); 17% sub-mode is a
   separate `0x55AA`-handshake path the ramp never reaches (mode-word bit 0x800). Run 1 = mode-0 34% cap only.
 - **CCP internal reads are NOT in the fork** (firmware team reads internals on their own CAN interface).
 - **No fingerprint, no calibration needed** for the bench (card/modeld/calibrationd are stripped;
@@ -85,8 +86,9 @@ abort the test (the injector also handles SIGHUP with a graceful ramp-to-0).
    - Optional: arm STEER RAMP while rolling to confirm the interlock **aborts to 0 immediately** (hands ready).
 5. **Stage 2 (parked ramp):** park, confirm `0x158` ≈ 0, start **STEER RAMP** at the conservative
    defaults (`config.json`: `TARGET 600 / MAX_CMD 1000`). Watch `0x18F`/EPS-TX torque saturate against
-   the rising `0x0E4`. Raise `TARGET`/`MAX_CMD` deliberately between runs toward the 34% cap (±0x2b4e),
-   staying under the ~50% motor ceiling. **If no EPS response: STOP and report — do NOT escalate** (§11).
+   the rising `0x0E4`. Raise `TARGET`/`MAX_CMD` deliberately between runs toward the 34% cap (**~1393 in 0x0E4
+   units** - ±0x2b4e/11086 is the INTERNAL Q15 value on ±32767, NOT a 0x0E4 target; parked never
+   reaches it anyway), staying under the ~50% motor ceiling (~2048). **If no EPS response: STOP and report — do NOT escalate** (§11).
 6. **Hand back:** `/data/eps_bench/canlog_*.csv` (all buses) + `cmdlog_*.csv` (commanded torque). Copy
    them off the device (route-pull style: the firmware team analyzes clip-vs-track from `0x18F`).
 

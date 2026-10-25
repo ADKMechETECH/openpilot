@@ -1,5 +1,23 @@
 # EPS low-speed-band harness — pre-test review (for the firmware-RE team)
 
+> **STATUS: APPROVED to proceed (RE team, 2026-10-25).** Corrections applied in build after `eabd798ef`.
+> Resolution summary (details inline below have been updated to match):
+> - **Cap scale fixed:** ramp `TARGET` toward **~1393** (34% in 0x0E4 ±4096 units), `MAX_CMD` ~1500–1600
+>   for cap runs — **not** 11086 (that is the internal Q15 cap on ±32767). Defaults 300/600 stay for
+>   first runs. ~1393 is approximate (unity-gain assumption) — ramp past it and watch the `0x18F` motor-
+>   torque flat-top.
+> - **Pre-roll added (flag 1):** ARMED now streams `0x0E4` REQUEST=1 at torque 0 so the stream/counter
+>   is continuous before the ramp — no cold-start step at engage. Tested (`test_lowspeed.py`, now 14/14).
+> - **Clip-vs-track field (flag 3):** analysis reads `0x18F` **STEER_TORQUE_MOTOR** (delivered), not
+>   STEER_TORQUE_SENSOR (handwheel). We log raw full frames so either decodes.
+> - **V_MIN:** [12,20] signed off; raise V_MIN to ~16 if actuation looks partial at 12 (windows ~13/15).
+> - **Yaw/excursion abort (Q4):** not needed for first low-`TARGET` runs; **required before escalating
+>   `TARGET` past ~700.** Next build item (needs a confirmed yaw source) — not yet implemented.
+> - **Duration hand-back (flag 2):** separate longer sustained run later; `T_MAX` 1.5 s won't capture it.
+> - Q1 clutch bits accepted; Q3 CCP stays out of the fork (CAN-only first); Q5 `SET_STEER_DOWN_TO_ZERO`
+>   stays false.
+
+
 **Prepared:** 2026-10-25 · **Vehicle:** 2024 Honda Civic Sport Hatchback 6MT (K20C2), comma four,
 Bosch radarless harness · **Build:** `ADKMechETECH/openpilot` branch `eps-bench-parked` @ `edd181148`
 (low-speed mode at `9151118b1`) · **Purpose of this doc:** everything to review **before** the first
@@ -99,8 +117,8 @@ yaw-integrated budget if you want one — **decision Q4**.
 | `SESSION_TIMEOUT_S` | 60 s | global watchdog |
 
 **Escalation plan (for your sign-off, Q2):** start at `TARGET` 300, confirm it engages and steers
-gently at speed, then raise `TARGET`/`MAX_CMD` across short runs **toward the ±0x2b4e (11086 ≈ 34%)
-cap** — never near the ~2048/50% motor ceiling without your explicit OK. Reaching the cap in the
+gently at speed, then raise `TARGET`/`MAX_CMD` across short runs **toward the ~1393 (34% in 0x0E4 units) cap** (0x2b4e/11086 is the internal Q15 value on
+±32767, not a 0x0E4 value; set `MAX_CMD` ~1500–1600 to cross it) — never near the ~2048/50% motor ceiling without your explicit OK. Reaching the cap in the
 *command* is what reveals the clip.
 
 ## 7. What we log / deliverables per run
@@ -108,8 +126,8 @@ cap** — never near the ~2048/50% motor ceiling without your explicit OK. Reach
   **128** (= 0x80, bus-0 transmit echo); camera on bus 2.
 - `cmdlog_lowspeed_*.csv` — `monotonic_ts,state,setpoint,cmd,request,speed_kph,clutch_up,reason,marker`
   with `ARM`/`START` markers for alignment.
-- The analysis is yours: commanded `0x0E4` vs delivered **`0x18F`** motor torque (flat-top while the
-  command keeps rising = ±0x2b4e cap binding, vs tracking); time-to-handback (the ~756-count duration
+- The analysis is yours: commanded `0x0E4` vs delivered `0x18F` **STEER_TORQUE_MOTOR** (flat-top while the
+  command keeps rising = cap binding at ~1393, vs tracking) — NOT STEER_TORQUE_SENSOR (handwheel); time-to-handback (the ~756-count duration
   cause); EPS-TX status set (`0x324/326/328/32F/33D/374/3A1/516/78E`); any DTC / validity flip.
 - **Known gap (Q3):** we have **no confirmed CAN "service-brake/torque-applied" or engaged tell-tale**
   beyond `0x18F` STEER_STATUS / STEER_CONTROL_ACTIVE and the torque sensor. If you want the internal
@@ -142,7 +160,7 @@ The cereal wiring of the device loop is validated on the **device bench** (step 
 ## 10. Decisions we need from you before the closed-course day
 - **Q1.** Confirm `0x130` `CLUTCH_PEDAL_UP`/`FLOOR` bit 50/51 on this car (we read raw).
 - **Q2.** Sign off the band [12, 20] km/h, `T_MAX` 1.5 s, and the `TARGET`/`MAX_CMD` escalation toward
-  ±0x2b4e. Any different starting point?
+  ~1393 (the 0x0E4-unit cap; MAX_CMD ~1500-1600 to cross it). Any different starting point?
 - **Q3.** Will you run your CCP internal-read rig in parallel (so we mark the logs), or is the CAN-only
   `0x18F`-vs-`0x0E4` clip read sufficient for the first runs?
 - **Q4.** Do you want a yaw/heading excursion-budget auto-stop added, or are band + `T_MAX` + bounded

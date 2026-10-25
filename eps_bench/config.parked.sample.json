@@ -1,5 +1,5 @@
 {
-  "_README": "EPS PARKED bench config (Run 1 mode). Copy to config.json to use. MODE=parked commands only at standstill (speed <= SPEED_ABORT_KPH) and runs the +/-TARGET sweep x N_CYCLES. STEER_TORQUE full-scale +/-4096; cap ref +/-0x2b4e (34% ~= 11086) - do NOT hardcode, sweep and observe.",
+  "_README": "EPS PARKED bench config (Run 1 mode). Copy to config.json to use. MODE=parked commands only at standstill (speed <= SPEED_ABORT_KPH) and runs the +/-TARGET sweep x N_CYCLES. STEER_TORQUE full-scale +/-4096. Cap in 0x0E4 units ~34% ~= 1393 (0x2b4e=11086 is the INTERNAL Q15 cap on +/-32767, NOT a 0x0E4 value); other refs ~17% ~= 696, ~50% ceiling ~= 2048 - do NOT hardcode, sweep and observe.",
   "MODE": "parked",
   "BUS": 0,
   "DBC_NAME": "honda_bosch_radarless_generated",

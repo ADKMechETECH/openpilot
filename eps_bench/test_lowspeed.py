@@ -109,6 +109,27 @@ def test_happy_path():
   check(steps[-1].reason == "t_max", f"stop reason t_max (got {steps[-1].reason})")
 
 
+def test_preroll_request_from_arm():
+  print("test_preroll_request_from_arm: ARMED streams REQUEST=1 at torque 0; IDLE REQUEST=0")
+  c = LowSpeedController(cfg(), t0=0.0)
+  # idle (clutch down), then armed (clutch released), speed never in band -> stays ARMED
+  frames = [(0.0, False, False)] * 5 + [(0.0, True, False)] * 20
+  steps = run(c, frames)
+  idle = [s for s in steps if s.state == IDLE]
+  armed = [s for s in steps if s.state == ARMED]
+  check(len(idle) >= 1 and all(s.request is False for s in idle), "IDLE: REQUEST=0 (no pre-roll)")
+  check(len(armed) >= 1, "reached ARMED")
+  check(all(s.request is True for s in armed), "ARMED: REQUEST=1 (pre-roll)")
+  check(all(s.cmd == 0.0 for s in armed), "ARMED: torque 0 during pre-roll")
+  # continuity: once armed, request stays 1 through RUNNING and STOPPING until DONE
+  c2 = LowSpeedController(cfg(), t0=0.0)
+  frames2 = [(0.0, True, False)] * 5 + [(13.0, True, False)] * 160
+  steps2 = run(c2, frames2)
+  after_arm = steps2[[s.state for s in steps2].index(ARMED):]
+  pre_done = [s for s in after_arm if s.state != DONE]
+  check(all(s.request is True for s in pre_done), "REQUEST=1 continuous ARMED->RUNNING->STOPPING")
+
+
 def test_no_start_on_clutch_alone():
   print("test_no_start_on_clutch_alone: clutch released but speed never in band -> never RUNNING")
   c = LowSpeedController(cfg(), t0=0.0)

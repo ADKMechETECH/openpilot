@@ -1,5 +1,5 @@
 {
-  "_README": "EPS LOW-SPEED-BAND bench config (closed course). Copy to config.json to use. MODE=lowspeed inverts the parked interlock: commands ONLY inside [V_MIN,V_MAX] km/h, armed by the clutch-released signal and a speed-gated START. Run 1 proved the EPS won't actuate parked (engage ~=10 km/h). Method: CLOSED_COURSE_TEST_DIRECTIVE_2026-10-25.md. START SMALL; raise TARGET/MAX_CMD deliberately across runs toward the +/-0x2b4e (34% ~= 11086) cap, never near the ~2048/50% motor ceiling without firmware-team sign-off. STEER_TORQUE full-scale +/-4096.",
+  "_README": "EPS LOW-SPEED-BAND bench config (closed course). Copy to config.json to use. MODE=lowspeed inverts the parked interlock: commands ONLY inside [V_MIN,V_MAX] km/h, armed by the clutch-released signal and a speed-gated START. Run 1 proved the EPS won't actuate parked (engage ~=10 km/h). Method: CLOSED_COURSE_TEST_DIRECTIVE_2026-10-25.md. START SMALL; raise TARGET/MAX_CMD deliberately across runs toward the EPS cap. CAP SCALE (RE team 2026-10-25): 0x2b4e=11086 is the INTERNAL Q15 cap on the +/-32767 scale; in 0x0E4 units (+/-4096) the cap is ~34% ~= 1393 (=11086/32767*4096). So ramp TARGET toward ~1393 and set MAX_CMD above it (~1500-1600) to cross it and see the clip. ~1393 is approximate (assumes unity full-scale gain) - ramp past it and watch 0x18F motor torque flat-top. Never near ~2048/50% motor ceiling without sign-off.",
 
   "MODE": "lowspeed",
   "_MODE": "parked | lowspeed. Selects which injector state machine runs.",
@@ -11,7 +11,7 @@
   "RATE_HZ": 100,
 
   "V_MIN": 12.0,
-  "_V_MIN": "km/h. Engage-band floor (firmware min engage ~10; keep margin). START requires speed >= V_MIN + V_START_MARGIN.",
+  "_V_MIN": "km/h. Engage-band floor (firmware min engage ~10; keep margin). START requires speed >= V_MIN + V_START_MARGIN. RE note: related windows sit at ~13/15 km/h - if actuation looks partial at 12, raise V_MIN to ~16 (2nd-gear creep still reaches it).",
   "V_MAX": 20.0,
   "_V_MAX": "km/h. Hard band ceiling - abort (ramp to 0) above this.",
   "V_START_MARGIN": 1.0,
@@ -23,9 +23,9 @@
   "_T_MAX": "s. Max duration of a commanded run, from the RUNNING start. Auto-stop.",
 
   "TARGET": 300,
-  "_TARGET": "raw |STEER_TORQUE| peak of the single-direction ramp. First runs well BELOW the cap (300 ~= 7%). Raise deliberately.",
+  "_TARGET": "raw |STEER_TORQUE| peak of the single-direction ramp (0x0E4 units, +/-4096 FS). First runs well BELOW the cap (300 ~= 7%). Cap runs: raise toward ~1393 (~34%). RE sign-off needed past ~700 (add a yaw/heading abort first).",
   "MAX_CMD": 600,
-  "_MAX_CMD": "HARD magnitude ceiling, independent of TARGET. Raise deliberately; never near the ~2048 motor ceiling without sign-off.",
+  "_MAX_CMD": "HARD magnitude ceiling, independent of TARGET. First runs 600. For CAP runs set ABOVE the ~1393 cap (~1500-1600) so TARGET can cross it. Never near the ~2048 motor ceiling without sign-off.",
   "MAX_RATE": 400,
   "_MAX_RATE": "raw units/s anti-slam rate limit (applies to ramp-up and ramp-out). Never a step.",
   "RAMP_S": 1.0,

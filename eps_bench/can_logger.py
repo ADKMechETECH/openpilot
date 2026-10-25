@@ -67,7 +67,7 @@ def main() -> None:
             f"speed=0x{SPEED_ID:X} steer_status=0x{STEER_STATUS_ID:X} "
             f"eps_tx={','.join(f'0x{i:X}' for i in EPS_TX_IDS)}\n")
     f.write(f"# delivered-torque candidates: 0x{STEER_STATUS_ID:X} + the EPS-TX set - watch for "
-            f"saturation vs the rising 0x{INJECT_ID:X} (firmware cap +/-0x2b4e = 34%)\n")
+            f"saturation vs the rising 0x{INJECT_ID:X} (cap ~34%: ~1393 in 0x0E4 units / 0x2b4e=11086 internal Q15)\n")
     f.write("# NOTE: all buses are logged in full; the IDs above are the analysis focus only\n")
     f.write("monotonic_ts,bus,addr_hex,len,data_hex\n")
 
