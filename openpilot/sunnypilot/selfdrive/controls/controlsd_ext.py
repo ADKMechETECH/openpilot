@@ -155,8 +155,11 @@ class ControlsExt(ModelStateBase):
     CC_SP.intelligentCruiseButtonManagement.sendButton = icbm_src.sendButton
     CC_SP.intelligentCruiseButtonManagement.vTarget = icbm_src.vTarget
 
-    # fork-only (civic-cruise): non-ACC mode status for the HUD overlay
-    CC_SP.nonAcc.active = bool(self.nonacc.active)
+    # fork-only (civic-cruise): non-ACC mode status for the HUD overlay. Show the ARMED state (mode enabled, live-read,
+    # engaged or not) so a gap-button long-press is always visibly confirmed - not just while op-long is controlling.
+    # mode.active refreshes every control frame via nonacc_lower_limit. .pulsing/.overspeed stay the controller's
+    # engaged-and-braking state, so "NON-ACC" shows whenever armed and "NON-ACC - BRAKING" only when actually braking.
+    CC_SP.nonAcc.active = bool(self.nonacc.mode.active)
     CC_SP.nonAcc.pulsing = bool(self.nonacc.active and self.nonacc.state == PULSING)
     CC_SP.nonAcc.overspeed = float(self.nonacc.overspeed)
     CC_SP.nonAcc.gatePaused = bool(self.clutch_gate.paused)
