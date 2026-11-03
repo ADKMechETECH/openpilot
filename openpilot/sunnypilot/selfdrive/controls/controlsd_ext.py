@@ -22,6 +22,7 @@ from openpilot.common.constants import CV
 from openpilot.common.realtime import DT_CTRL
 from openpilot.sunnypilot.selfdrive.controls.lib.nonacc.controller import NonAccController, PULSING
 from openpilot.sunnypilot.selfdrive.controls.lib.nonacc.clutch_gate import ClutchShiftGate
+from openpilot.sunnypilot.selfdrive.controls.lib.nonacc.handback import LowSpeedHandback
 
 
 class ControlsExt(ModelStateBase):
@@ -46,6 +47,17 @@ class ControlsExt(ModelStateBase):
     self.nonacc = NonAccController(CP, DT_CTRL)
     # fork-only (civic-cruise): clutch/shift gate (manual only) - caps the throttle while the clutch is in
     self.clutch_gate = ClutchShiftGate(CP, DT_CTRL)
+    # fork-only (civic-cruise): manual low-speed handback (hand longitudinal back below ~5 mph, no brake-to-stop/launch)
+    self.handback = LowSpeedHandback(CP, DT_CTRL)
+
+  def handback_limits(self, CS, enabled: bool, force_decel: bool, plan_a_target: float,
+                      lower_limit: float, upper_limit: float) -> tuple[float, float]:
+    """fork-only: ramp the accel range to 0 for the low-speed handback; controlsd drops longActive when ramp_done."""
+    cs_sp = self.sm['carStateSP']
+    gear = cs_sp.gearRaw if (cs_sp.clutchSignalValid and not CS.deprecated.clutchPressed
+                             and 1 <= cs_sp.gearRaw <= 6) else 0
+    self.handback.update(enabled, CS.vEgo, plan_a_target, gear, force_decel)
+    return self.handback.limit_accel(lower_limit, upper_limit)
 
   def clutch_gate_limits(self, CS, lower_limit: float, upper_limit: float) -> tuple[float, float]:
     """fork-only: advance the clutch gate and cap the throttle (upper) while the drivetrain is decoupled. Braking (the
@@ -148,6 +160,12 @@ class ControlsExt(ModelStateBase):
     CC_SP.nonAcc.pulsing = bool(self.nonacc.active and self.nonacc.state == PULSING)
     CC_SP.nonAcc.overspeed = float(self.nonacc.overspeed)
     CC_SP.nonAcc.gatePaused = bool(self.clutch_gate.paused)
+
+    # manual low-speed handback (controlsd owns; selfdrived acts on this)
+    CC_SP.handback.active = bool(self.handback.active)
+    CC_SP.handback.disengage = bool(self.handback.disengage_due)
+    CC_SP.handback.belowEngageSpeed = bool(self.handback.below_engage_speed(sm['carState'].vEgo))
+    CC_SP.handback.speed = float(self.handback.threshold)
 
     return CC_SP
 

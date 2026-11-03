@@ -385,12 +385,21 @@ struct CarControlSP @0xa5cd762cd951a455 {
   intelligentCruiseButtonManagement @4 :IntelligentCruiseButtonManagement;
   # fork-only (civic-cruise): non-ACC mode status for the HUD overlay. Ordinal may collide on a future rebase.
   nonAcc @5 :NonAcc;
+  # fork-only (civic-cruise): manual low-speed handback state (controlsd owns it; selfdrived acts on it).
+  handback @6 :Handback;
 
   struct NonAcc {
     active @0 :Bool;        # non-ACC ("set-speed only") mode engaged
     pulsing @1 :Bool;       # the overspeed sawtooth is braking
     overspeed @2 :Float32;  # m/s over set speed
     gatePaused @3 :Bool;    # clutch/shift gate is capping the throttle (clutch in)
+  }
+
+  struct Handback {
+    active @0 :Bool;        # handing longitudinal back (ramping)
+    disengage @1 :Bool;     # ramp done + margin: selfdrived should disengage (speedTooLow)
+    belowEngageSpeed @2 :Bool;  # below the handback speed: refuse to engage (belowEngageSpeed)
+    speed @3 :Float32;      # the current (gear-aware) handback speed, m/s
   }
 
   struct Param {

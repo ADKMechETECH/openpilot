@@ -326,6 +326,9 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"ClutchShiftGate", {PERSISTENT | BACKUP, BOOL, "0"}},
     {"ClutchShiftGateCoastAccel", {PERSISTENT | BACKUP, FLOAT, "0.0"}},
     {"ClutchShiftGateMaxCoast", {PERSISTENT | BACKUP, FLOAT, "5.0"}},
+    // fork-only (civic-cruise): manual low-speed handback (always on for manuals; only the speed/ramp are tunable)
+    {"ManualLowSpeedHandbackSpeed", {PERSISTENT | BACKUP, FLOAT, "2.24"}},
+    {"ManualLowSpeedHandbackRamp", {PERSISTENT | BACKUP, FLOAT, "0.5"}},
     {"LeadDepartAlert", {PERSISTENT | BACKUP, BOOL, "0"}},
     {"MaxTimeOffroad", {PERSISTENT | BACKUP, INT, "1800"}},
     {"ModelRunnerTypeCache", {CLEAR_ON_ONROAD_TRANSITION, INT}},
