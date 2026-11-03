@@ -389,6 +389,14 @@ struct CarControlSP @0xa5cd762cd951a455 {
   leadOne @2 :LeadData;
   leadTwo @3 :LeadData;
   intelligentCruiseButtonManagement @4 :IntelligentCruiseButtonManagement;
+  # fork-only (civic-cruise): non-ACC mode status for the HUD overlay. Ordinal may collide on a future rebase.
+  nonAcc @5 :NonAcc;
+
+  struct NonAcc {
+    active @0 :Bool;        # non-ACC ("set-speed only") mode engaged
+    pulsing @1 :Bool;       # the overspeed sawtooth is braking
+    overspeed @2 :Float32;  # m/s over set speed
+  }
 
   struct Param {
     key @0 :Text;
