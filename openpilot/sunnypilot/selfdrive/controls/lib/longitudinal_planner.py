@@ -15,6 +15,8 @@ from openpilot.sunnypilot.selfdrive.controls.lib.speed_limit.speed_limit_assist 
 from openpilot.sunnypilot.selfdrive.controls.lib.speed_limit.speed_limit_resolver import SpeedLimitResolver
 from openpilot.sunnypilot.selfdrive.selfdrived.events import EventsSP
 from openpilot.sunnypilot.models.helpers import get_active_bundle
+from openpilot.common.realtime import DT_MDL
+from openpilot.sunnypilot.selfdrive.controls.lib.nonacc.mode import NonAccMode
 
 LongitudinalPlanSource = custom.LongitudinalPlanSP.LongitudinalPlanSource
 
@@ -30,8 +32,18 @@ class LongitudinalPlannerSP:
     self.source = LongitudinalPlanSource.cruise
     self.e2e_alerts_helper = E2EAlertsHelper()
 
+    # fork-only (civic-cruise): non-ACC ("set-speed only") mode. Read live (no latch) - the ACC<->non-ACC flip is
+    # smoothed by the consumers. The planner uses it to drop the lead-following MPC (and e2e) candidates.
+    self.nonacc = NonAccMode(CP, DT_MDL)
+    self.non_adaptive = self.nonacc.active
+
     self.output_v_target = 0.
     self.output_a_target = 0.
+
+  def update_non_adaptive(self) -> None:
+    # fork-only: refresh the non-ACC mode once per planner frame (live flip, no latch).
+    self.non_adaptive = self.nonacc.update()
+
 
   def update_targets(self, sm: messaging.SubMaster, v_ego: float, a_ego: float, v_cruise: float) -> tuple[float, float]:
     CS = sm['carState']

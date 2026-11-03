@@ -324,6 +324,8 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"LaneCenteringPauseOnSignal", {PERSISTENT | BACKUP, BOOL, "1"}},
     {"LaneCenterOffset", {PERSISTENT | BACKUP, FLOAT, "0.0"}},
     {"LastGPSPositionLLK", {PERSISTENT, STRING}},
+    // fork-only (civic-cruise): non-ACC ("set-speed only") mode - ignore leads, prefer engine braking, sawtooth overspeed
+    {"NonAdaptiveLongitudinal", {PERSISTENT | BACKUP, BOOL, "0"}},
     {"LeadDepartAlert", {PERSISTENT | BACKUP, BOOL, "0"}},
     {"MaxTimeOffroad", {PERSISTENT | BACKUP, INT, "1800"}},
     {"ModelRunnerTypeCache", {CLEAR_ON_ONROAD_TRANSITION, INT}},
