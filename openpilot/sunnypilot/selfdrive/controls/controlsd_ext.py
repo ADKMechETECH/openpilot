@@ -21,6 +21,7 @@ from openpilot.sunnypilot.selfdrive.controls.lib.latcontrol_torque_v0 import Lat
 from openpilot.common.constants import CV
 from openpilot.common.realtime import DT_CTRL
 from openpilot.sunnypilot.selfdrive.controls.lib.nonacc.controller import NonAccController, PULSING
+from openpilot.sunnypilot.selfdrive.controls.lib.nonacc.clutch_gate import ClutchShiftGate
 
 
 class ControlsExt(ModelStateBase):
@@ -43,6 +44,16 @@ class ControlsExt(ModelStateBase):
 
     # fork-only (civic-cruise): non-ACC overspeed controller (engine-brake-priority floor + sawtooth)
     self.nonacc = NonAccController(CP, DT_CTRL)
+    # fork-only (civic-cruise): clutch/shift gate (manual only) - caps the throttle while the clutch is in
+    self.clutch_gate = ClutchShiftGate(CP, DT_CTRL)
+
+  def clutch_gate_limits(self, CS, lower_limit: float, upper_limit: float) -> tuple[float, float]:
+    """fork-only: advance the clutch gate and cap the throttle (upper) while the drivetrain is decoupled. Braking (the
+    lower limit) always passes."""
+    cs_sp = self.sm['carStateSP']
+    self.clutch_gate.update(clutch_signal_valid=bool(cs_sp.clutchSignalValid), decoupled=bool(CS.deprecated.clutchPressed),
+                            clutch_pedal=int(cs_sp.clutchPedal), gear_raw=int(cs_sp.gearRaw))
+    return self.clutch_gate.limit_accel(lower_limit, upper_limit)
 
   def nonacc_lower_limit(self, long_active: bool, CS, calibrated_pose, force_decel: bool, lower_limit: float) -> float:
     """fork-only: raise LongControl's lower accel limit for the non-ACC overspeed controller. Returns the (possibly
@@ -136,6 +147,7 @@ class ControlsExt(ModelStateBase):
     CC_SP.nonAcc.active = bool(self.nonacc.active)
     CC_SP.nonAcc.pulsing = bool(self.nonacc.active and self.nonacc.state == PULSING)
     CC_SP.nonAcc.overspeed = float(self.nonacc.overspeed)
+    CC_SP.nonAcc.gatePaused = bool(self.clutch_gate.paused)
 
     return CC_SP
 

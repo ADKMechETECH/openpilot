@@ -27,6 +27,8 @@ def nonacc_hud(sm):
     na = sm['carControlSP'].nonAcc
   except (KeyError, AttributeError):
     return None
+  if na.gatePaused:
+    return "SHIFT: coasting", NONACC_WHITE
   if not na.active:
     return None
   if na.pulsing:

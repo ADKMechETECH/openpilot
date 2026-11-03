@@ -322,6 +322,10 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"NonAccOverspeedThreshold", {PERSISTENT | BACKUP, FLOAT, "3.6"}},
     // fork-only (civic-cruise): learned per-gear engine-brake table (JSON), refined from brake-free coasts, applied live
     {"EngineBrakeLearnedTable", {PERSISTENT, STRING}},
+    // fork-only (civic-cruise): clutch/shift gate (manual only) - cap the throttle while the clutch is in
+    {"ClutchShiftGate", {PERSISTENT | BACKUP, BOOL, "0"}},
+    {"ClutchShiftGateCoastAccel", {PERSISTENT | BACKUP, FLOAT, "0.0"}},
+    {"ClutchShiftGateMaxCoast", {PERSISTENT | BACKUP, FLOAT, "5.0"}},
     {"LeadDepartAlert", {PERSISTENT | BACKUP, BOOL, "0"}},
     {"MaxTimeOffroad", {PERSISTENT | BACKUP, INT, "1800"}},
     {"ModelRunnerTypeCache", {CLEAR_ON_ONROAD_TRANSITION, INT}},
