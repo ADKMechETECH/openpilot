@@ -141,7 +141,9 @@ class Controls(ControlsExt):
     force_decel = bool(self.sm['driverMonitoringState'].noResponseForceDecel or
                        (self.sm['selfdriveState'].state == State.softDisabling))
     nonacc_lower = self.nonacc_lower_limit(CC.longActive, CS, self.calibrated_pose, force_decel, pid_accel_limits[0])
-    pid_accel_limits = (nonacc_lower, pid_accel_limits[1])
+    # fork-only (civic-cruise): clutch gate caps the throttle (upper) while the clutch is in; braking (lower) passes.
+    gate_lower, gate_upper = self.clutch_gate_limits(CS, nonacc_lower, pid_accel_limits[1])
+    pid_accel_limits = (gate_lower, gate_upper)
     actuators.accel = float(self.LoC.update(CC.longActive, CS, long_plan.aTarget, long_plan.shouldStop, pid_accel_limits))
 
     # Steering PID loop and lateral MPC

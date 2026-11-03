@@ -396,6 +396,7 @@ struct CarControlSP @0xa5cd762cd951a455 {
     active @0 :Bool;        # non-ACC ("set-speed only") mode engaged
     pulsing @1 :Bool;       # the overspeed sawtooth is braking
     overspeed @2 :Float32;  # m/s over set speed
+    gatePaused @3 :Bool;    # clutch/shift gate is capping the throttle (clutch in)
   }
 
   struct Param {
