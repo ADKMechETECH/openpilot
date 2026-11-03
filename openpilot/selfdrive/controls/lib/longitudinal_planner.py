@@ -101,9 +101,13 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
 
     steer_angle_without_offset = sm['carState'].steeringAngleDeg - sm['vehicleParameters'].angleOffsetDeg
 
+    # fork-only (civic-cruise, Task 16 port): a manual's gas override is the driver's own acceleration, gone the instant
+    # they lift (closed throttle). Re-seeding the planner from that aEgo re-opened the throttle after the lift (~1.5 s
+    # re-surge to +5.5 mph over set). reset_accel coasts first on a manual gas override; stock otherwise.
+    LongitudinalPlannerSP.update_gas_override(self, sm, reset_state)
     if reset_state:
       self.v_desired_filter.x = v_ego
-      self.output_a_target = np.clip(sm['carState'].aEgo, ACCEL_MIN, ACCEL_MAX)
+      self.output_a_target = np.clip(LongitudinalPlannerSP.reset_accel(self, sm['carState'].aEgo), ACCEL_MIN, ACCEL_MAX)
       self.a_cruise = self.output_a_target
 
     # Prevent divergence, smooth in current v_ego

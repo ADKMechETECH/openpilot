@@ -43,11 +43,27 @@ class LongitudinalPlannerSP:
 
     # fork-only (civic-cruise): engine-brake learner (manual + op long only). Learns from brake-free coasts, persists
     # the applied learned table for the controller (controlsd) to read.
-    manual = CP.transmissionType == structs.CarParams.TransmissionType.manual
-    self.eb_learner = EngineBrakeLearner(manual and bool(CP.openpilotLongitudinalControl), DT_MDL)
+    self.manual = CP.transmissionType == structs.CarParams.TransmissionType.manual
+    self.eb_learner = EngineBrakeLearner(self.manual and bool(CP.openpilotLongitudinalControl), DT_MDL)
+
+    # fork-only (civic-cruise, Task 16 port): gas-override re-surge guard (always on for manuals)
+    self.gas_override_reset = False
 
     self.output_v_target = 0.
     self.output_a_target = 0.
+
+  def update_gas_override(self, sm: messaging.SubMaster, reset_state: bool) -> None:
+    """Remembers that the current planner reset is a driver gas override while engaged; stays set through the lift
+    until the planner stops resetting (longitudinal back), so the first plans after the lift see it too."""
+    if not reset_state:
+      self.gas_override_reset = False
+    elif bool(sm['selfdriveState'].enabled) and sm['carState'].gasPressed:
+      self.gas_override_reset = True
+
+  def reset_accel(self, a_ego: float) -> float:
+    """The accel the planner re-seeds from. Manual + gas override: coast first (never above 0) so openpilot does not
+    re-open the throttle the driver just closed. Automatics and every other reset: stock (aEgo)."""
+    return min(a_ego, 0.) if self.manual and self.gas_override_reset else a_ego
 
   def update_non_adaptive(self) -> None:
     # fork-only: refresh the non-ACC mode once per planner frame (live flip, no latch).
