@@ -29,12 +29,14 @@ class CruiseHelper:
     self.experimental_mode_switched = False   # also the long-press latch (reset on release in selfdrived)
 
   def update(self, CS, events, experimental_mode) -> None:
+    # Gated only on openpilot owning longitudinal, NOT on cruiseState.available (owner, 2026-11-03): the distance-button
+    # hold must flip non-ACC whenever op-long control exists, so the mode can be armed with main cruise still off. The
+    # short-press personality step in selfdrived is already gated the same way.
     if self.CP.openpilotLongitudinalControl:
-      if CS.cruiseState.available:
-        self.update_button_frame_counts(CS)
+      self.update_button_frame_counts(CS)
 
-        # toggle a mode once on a distance-button hold (non-ACC on a manual, else Experimental)
-        self.update_mode_toggle(events, experimental_mode)
+      # toggle a mode once on a distance-button hold (non-ACC on a manual, else Experimental)
+      self.update_mode_toggle(events, experimental_mode)
 
   def update_button_frame_counts(self, CS) -> None:
     for button in self.button_frame_counts:
