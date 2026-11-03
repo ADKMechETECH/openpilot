@@ -136,6 +136,12 @@ class Controls(ControlsExt):
 
     # accel PID loop
     pid_accel_limits = self.CI.get_pid_accel_limits(self.CP, self.CP_SP, CS.vEgo, CS.vCruise * CV.KPH_TO_MS)
+    # fork-only (civic-cruise): non-ACC overspeed controller raises the lower accel limit (engine-brake priority +
+    # sawtooth). Steps aside on forceDecel so emergency braking is never blocked.
+    force_decel = bool(self.sm['driverMonitoringState'].noResponseForceDecel or
+                       (self.sm['selfdriveState'].state == State.softDisabling))
+    nonacc_lower = self.nonacc_lower_limit(CC.longActive, CS, self.calibrated_pose, force_decel, pid_accel_limits[0])
+    pid_accel_limits = (nonacc_lower, pid_accel_limits[1])
     actuators.accel = float(self.LoC.update(CC.longActive, CS, long_plan.aTarget, long_plan.shouldStop, pid_accel_limits))
 
     # Steering PID loop and lateral MPC
@@ -197,7 +203,9 @@ class Controls(ControlsExt):
     hudControl.setSpeed = float(CS.vCruiseCluster * CV.KPH_TO_MS)
     hudControl.speedVisible = CC.enabled
     hudControl.lanesVisible = CC.enabled
-    hudControl.leadVisible = self.sm['longitudinalPlan'].hasLead
+    # fork-only (civic-cruise): hide the cluster's lead-car icon in non-ACC (adaptive following is off) - the
+    # dashboard mode tell. hasLead is otherwise unchanged (FCW/logging still see the lead).
+    hudControl.leadVisible = self.sm['longitudinalPlan'].hasLead and not self.nonacc.mode.active
     hudControl.leadDistanceBars = self.sm['selfdriveState'].personality.raw + 1
     hudControl.visualAlert = self.sm['selfdriveState'].alertHudVisual
 

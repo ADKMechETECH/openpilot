@@ -18,6 +18,9 @@ from openpilot.sunnypilot.livedelay.helpers import get_lat_delay
 from openpilot.sunnypilot.modeld_v2.modeld_base import ModelStateBase
 from openpilot.sunnypilot.selfdrive.controls.lib.blinker_pause_lateral import BlinkerPauseLateral
 from openpilot.sunnypilot.selfdrive.controls.lib.latcontrol_torque_v0 import LatControlTorque as LatControlTorqueV0
+from openpilot.common.constants import CV
+from openpilot.common.realtime import DT_CTRL
+from openpilot.sunnypilot.selfdrive.controls.lib.nonacc.controller import NonAccController
 
 
 class ControlsExt(ModelStateBase):
@@ -35,8 +38,22 @@ class ControlsExt(ModelStateBase):
     self.CP_SP = messaging.log_from_bytes(params.get("CarParamsSP", block=True), custom.CarParamsSP)
     cloudlog.info("controlsd_ext got CarParamsSP")
 
-    self.sm_services_ext = ['radarState', 'selfdriveStateSP']
+    self.sm_services_ext = ['radarState', 'selfdriveStateSP', 'carStateSP']
     self.pm_services_ext = ['carControlSP']
+
+    # fork-only (civic-cruise): non-ACC overspeed controller (engine-brake-priority floor + sawtooth)
+    self.nonacc = NonAccController(CP, DT_CTRL)
+
+  def nonacc_lower_limit(self, long_active: bool, CS, calibrated_pose, force_decel: bool, lower_limit: float) -> float:
+    """fork-only: raise LongControl's lower accel limit for the non-ACC overspeed controller. Returns the (possibly
+    raised) lower limit; a no-op (returns lower_limit) whenever the controller steps aside."""
+    v_set = CS.vCruise * CV.KPH_TO_MS
+    cs_sp = self.sm['carStateSP']
+    # numeric gear 1..6, trusted only while the clutch signal is live and the drivetrain is coupled
+    gear = cs_sp.gearRaw if (cs_sp.clutchSignalValid and not CS.deprecated.clutchPressed
+                             and 1 <= cs_sp.gearRaw <= 6) else None
+    pitch = calibrated_pose.orientation.xyz[1] if calibrated_pose is not None else None
+    return self.nonacc.update(long_active, CS.vEgo, v_set, gear, pitch, force_decel, lower_limit)
 
   def initialize_lateral_control(self, lac, CI, dt):
     enforce_torque_control = self.params.get_bool("EnforceTorqueControl")

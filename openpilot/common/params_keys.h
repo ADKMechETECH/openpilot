@@ -318,6 +318,8 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"LastGPSPositionLLK", {PERSISTENT, STRING}},
     // fork-only (civic-cruise): non-ACC ("set-speed only") mode - ignore leads, prefer engine braking, sawtooth overspeed
     {"NonAdaptiveLongitudinal", {PERSISTENT | BACKUP, BOOL, "0"}},
+    // fork-only (civic-cruise): m/s over set speed before the non-ACC sawtooth starts firm braking (user-settable, ~8 mph)
+    {"NonAccOverspeedThreshold", {PERSISTENT | BACKUP, FLOAT, "3.6"}},
     {"LeadDepartAlert", {PERSISTENT | BACKUP, BOOL, "0"}},
     {"MaxTimeOffroad", {PERSISTENT | BACKUP, INT, "1800"}},
     {"ModelRunnerTypeCache", {CLEAR_ON_ONROAD_TRANSITION, INT}},
