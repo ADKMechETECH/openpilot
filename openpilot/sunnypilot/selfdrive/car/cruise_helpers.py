@@ -24,6 +24,7 @@ class CruiseHelper:
     self.manual = CP.transmissionType == structs.CarParams.TransmissionType.manual
 
     self.button_frame_counts = {ButtonType.gapAdjustCruise: 0}
+    self._gap_prev_count = 0
     self._experimental_mode = False
     self.experimental_mode_switched = False   # also the long-press latch (reset on release in selfdrived)
 
@@ -46,7 +47,17 @@ class CruiseHelper:
         self.button_frame_counts[button] = int(button_event.pressed)
 
   def update_mode_toggle(self, events, experimental_mode) -> None:
-    if self.button_frame_counts[ButtonType.gapAdjustCruise] >= DISTANCE_LONG_PRESS and not self.experimental_mode_switched:
+    # Clear the one-toggle-per-hold latch on a genuine new press (rising edge: previous count 0 -> now held). The latch
+    # is otherwise only cleared on a gap-button RELEASE event; if that release is never processed (observed on-car
+    # 2026-11-03: a toggle immediately followed by an onroad->offroad transition dropped the release), the latch stays
+    # stuck True and eats the next long-press. Resetting at press-start makes every hold self-contained so a lost
+    # release can't eat it. Uses the 0->nonzero edge (not count == 1) so a held button that re-sends a pressed event
+    # every frame - as the unit test models a hold - does not keep re-clearing the latch mid-hold.
+    count = self.button_frame_counts[ButtonType.gapAdjustCruise]
+    if self._gap_prev_count == 0 and count > 0:
+      self.experimental_mode_switched = False
+    self._gap_prev_count = count
+    if count >= DISTANCE_LONG_PRESS and not self.experimental_mode_switched:
       if self.manual:
         # fork-only (civic-cruise): long-press flips non-ACC ("set-speed only") mode, live (the mode is read live, so
         # the flip takes effect engaged or not). The persistent "NON-ACC" HUD overlay confirms it - the old transient
