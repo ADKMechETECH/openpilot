@@ -24,8 +24,17 @@ class CarSpecificEventsSP:
 
     self.low_speed_alert = False
 
-  def update(self, CS: structs.CarState, events: Events):
+  def update(self, CS: structs.CarState, events: Events, handback=None):
     events_sp = EventsSP()
+
+    # fork-only (civic-cruise): manual low-speed handback (controlsd owns the state, published in carControlSP).
+    # disengage -> stock speedTooLow (hand longitudinal back); below the handback speed -> belowEngageSpeed (noEntry,
+    # so openpilot can't be engaged below it and launched).
+    if handback is not None:
+      if handback.disengage:
+        events.add(EventName.speedTooLow)
+      if handback.belowEngageSpeed:
+        events.add(EventName.belowEngageSpeed)
 
     if self.CP.brand == 'chrysler':
       if self.CP.carFingerprint in RAM_DT:

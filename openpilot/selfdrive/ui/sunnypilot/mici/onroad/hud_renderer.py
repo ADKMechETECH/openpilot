@@ -24,9 +24,12 @@ def nonacc_hud(sm):
   try:
     if sm.recv_frame['carControlSP'] < ui_state.started_frame:
       return None
-    na = sm['carControlSP'].nonAcc
+    ccsp = sm['carControlSP']
+    na = ccsp.nonAcc
   except (KeyError, AttributeError):
     return None
+  if ccsp.handback.active:
+    return "LOW SPEED: TAKE OVER", NONACC_ORANGE
   if na.gatePaused:
     return "SHIFT: coasting", NONACC_WHITE
   if not na.active:

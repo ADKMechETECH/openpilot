@@ -107,7 +107,7 @@ class SelfdriveD:
                                    'carOutput', 'driverMonitoringState', 'longitudinalPlan', 'deviceMotion', 'lateralDelay',
                                    'managerState', 'vehicleParameters', 'radarState', 'lateralTorqueParameters',
                                    'controlsState', 'carControl', 'driverAssistance', 'alertDebug', 'userBookmark',
-                                   'lateralManeuverPlan', 'modelDataV2SP', 'longitudinalPlanSP'] + \
+                                   'lateralManeuverPlan', 'modelDataV2SP', 'longitudinalPlanSP', 'carControlSP'] + \
                                    self.camera_packets + self.sensor_packets + self.gps_packets,
                                   ignore_alive=ignore, ignore_avg_freq=ignore,
                                   ignore_valid=ignore, frequency=int(1/DT_CTRL))
@@ -276,7 +276,7 @@ class SelfdriveD:
       car_events = self.car_events.update(CS, self.CS_prev, self.sm['carControl']).to_msg()
       self.events.add_from_msg(car_events)
 
-      car_events_sp = self.car_events_sp.update(CS, self.events).to_msg()
+      car_events_sp = self.car_events_sp.update(CS, self.events, self.sm['carControlSP'].handback).to_msg()
       self.events_sp.add_from_msg(car_events_sp)
 
       if self.CP.notCar:
