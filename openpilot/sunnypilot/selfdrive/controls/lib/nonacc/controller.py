@@ -19,7 +19,8 @@ import numpy as np
 
 from openpilot.common.params import Params
 from openpilot.sunnypilot.selfdrive.controls.lib.nonacc.mode import NonAccMode
-from openpilot.sunnypilot.selfdrive.controls.lib.nonacc.engine_brake import coast_accel
+from openpilot.sunnypilot.selfdrive.controls.lib.nonacc.engine_brake import G
+from openpilot.sunnypilot.selfdrive.controls.lib.nonacc.learner import effective_decel, load_applied
 
 COASTING, PULSING = 0, 1
 
@@ -44,6 +45,7 @@ class NonAccController:
     self.trigger = DEFAULT_TRIGGER
     self.state = COASTING
     self.floor_cmd = 0.0     # the ramped lower-limit the controller is requesting
+    self.learned = load_applied(self._params)   # applied learned engine-brake table (from the learner in plannerd)
     # exposed for the overlay
     self.active = False
     self.overspeed = 0.0
@@ -52,6 +54,7 @@ class NonAccController:
     t = self._params.get("NonAccOverspeedThreshold", return_default=True)
     if t is not None:
       self.trigger = float(np.clip(float(t), TRIGGER_MIN, TRIGGER_MAX))
+    self.learned = load_applied(self._params)
 
   def update(self, long_active: bool, v_ego: float, v_set: float, gear, pitch, force_decel: bool,
              lower_limit: float) -> float:
@@ -91,8 +94,13 @@ class NonAccController:
 
     # COASTING target = the car's closed-throttle accel (engine-brake priority): command it and the car coasts -
     # engine-brakes back to set on the flat, drifts up toward the trigger on a descent, service brakes off. Capped on
-    # the positive side so a bad pitch/table estimate can't demand strong throttle.
-    target = PULSE_DECEL if self.state == PULSING else min(coast_accel(gear, v_ego, pitch), COAST_CAP)
+    # the positive side so a bad pitch/table estimate can't demand strong throttle. The learned table (if trusted)
+    # refines the engine-brake estimate; else the static seed.
+    if self.state == PULSING:
+      target = PULSE_DECEL
+    else:
+      coast = -effective_decel(gear, v_ego, self.learned) - G * math.sin(pitch)
+      target = min(coast, COAST_CAP)
     step = PULSE_JERK * self.dt
     self.floor_cmd = float(np.clip(target, self.floor_cmd - step, self.floor_cmd + step))
     # only ever raise the lower limit
