@@ -453,6 +453,16 @@ struct BackupManagerSP @0xf98d843bfd7004a3 {
 
 struct CarStateSP @0xb86e6369214c01c8 {
   speedLimit @0 :Float32;
+  # fork-only (civic-cruise): the manual gearbox's own gear signal (Honda radarless: GEARBOX_ALT_2.GEAR_MT) and whether
+  # that message is alive. A missing message would read as GEAR_MT 0 (= clutch pressed), so consumers stay inert while
+  # clutchSignalValid is False. Ordinals may collide on a future sunnypilot rebase.
+  gearRaw @1 :Int8;
+  clutchSignalValid @2 :Bool;
+  # fork-only: clutch pedal switches (Honda radarless: GAS_PEDAL_2): 0 unknown (default), 1 up, 2 travel, 3 floor.
+  clutchPedal @3 :Int8;
+  # fork-only: the engine's own axle-torque estimate, N*m (negative = engine braking), NaN when not alive. Engine side
+  # only - never includes the service brakes.
+  engineTorqueAxle @4 :Float32;
 }
 
 struct LiveMapDataSP @0xf416ec09499d9d19 {
