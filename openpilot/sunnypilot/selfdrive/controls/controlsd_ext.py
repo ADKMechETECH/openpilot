@@ -20,7 +20,7 @@ from openpilot.sunnypilot.selfdrive.controls.lib.blinker_pause_lateral import Bl
 from openpilot.sunnypilot.selfdrive.controls.lib.latcontrol_torque_v0 import LatControlTorque as LatControlTorqueV0
 from openpilot.common.constants import CV
 from openpilot.common.realtime import DT_CTRL
-from openpilot.sunnypilot.selfdrive.controls.lib.nonacc.controller import NonAccController
+from openpilot.sunnypilot.selfdrive.controls.lib.nonacc.controller import NonAccController, PULSING
 
 
 class ControlsExt(ModelStateBase):
@@ -131,6 +131,11 @@ class ControlsExt(ModelStateBase):
     CC_SP.intelligentCruiseButtonManagement.state = icbm_src.state
     CC_SP.intelligentCruiseButtonManagement.sendButton = icbm_src.sendButton
     CC_SP.intelligentCruiseButtonManagement.vTarget = icbm_src.vTarget
+
+    # fork-only (civic-cruise): non-ACC mode status for the HUD overlay
+    CC_SP.nonAcc.active = bool(self.nonacc.active)
+    CC_SP.nonAcc.pulsing = bool(self.nonacc.active and self.nonacc.state == PULSING)
+    CC_SP.nonAcc.overspeed = float(self.nonacc.overspeed)
 
     return CC_SP
 
