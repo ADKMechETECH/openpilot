@@ -115,6 +115,9 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
     # Get new v_cruise and a_target from Smart Cruise Control and Speed Limit Assist
     v_cruise, self.output_a_target = LongitudinalPlannerSP.update_targets(self, sm, self.v_desired_filter.x, self.output_a_target, v_cruise)
 
+    # fork-only (civic-cruise): refresh the non-ACC ("set-speed only") mode (live flip, no latch)
+    LongitudinalPlannerSP.update_non_adaptive(self)
+
     self.mpc.set_weights(prev_accel_constraint, personality=sm['selfdriveState'].personality)
     self.mpc.set_cur_state(self.v_desired_filter.x, self.output_a_target)
     self.mpc.update(sm['radarState'], personality=sm['selfdriveState'].personality)
@@ -145,10 +148,15 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
                                      accel_coast, self.allow_throttle)
     cruise_should_stop = should_stop(v_ego, self.a_cruise)
 
-    candidates = [(output_a_target_mpc, self.mpc.source, output_should_stop_mpc),
-                  (self.a_cruise, LongitudinalPlanSource.cruise, cruise_should_stop)]
-    if is_e2e:
-      candidates.append((output_a_target_e2e, LongitudinalPlanSource.e2e, output_should_stop_e2e))
+    if self.non_adaptive:
+      # fork-only (civic-cruise): non-ACC = set-speed only. Drop the lead-following MPC and e2e candidates - the driver
+      # brakes for leads, FCW still warns. The MPC still ran above, so crash_cnt / FCW is unchanged.
+      candidates = [(self.a_cruise, LongitudinalPlanSource.cruise, cruise_should_stop)]
+    else:
+      candidates = [(output_a_target_mpc, self.mpc.source, output_should_stop_mpc),
+                    (self.a_cruise, LongitudinalPlanSource.cruise, cruise_should_stop)]
+      if is_e2e:
+        candidates.append((output_a_target_e2e, LongitudinalPlanSource.e2e, output_should_stop_e2e))
 
     output_a_target, self.mpc.source, _ = min(candidates, key=lambda c: c[0])
     self.output_should_stop = any(should_stop for _, _, should_stop in candidates)
