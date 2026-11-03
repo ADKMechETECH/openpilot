@@ -18,7 +18,7 @@ def _gate(enabled=True):
 
 
 def _step(g, n, **kw):
-  frame = dict(clutch_signal_valid=True, decoupled=True, clutch_pedal=PEDAL_TRAVEL, gear_raw=0)
+  frame = {"clutch_signal_valid": True, "decoupled": True, "clutch_pedal": PEDAL_TRAVEL, "gear_raw": 0}
   frame.update(kw)
   for _ in range(n):
     g.update(**frame)

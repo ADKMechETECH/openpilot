@@ -20,8 +20,8 @@ def _fresh():
 
 
 def _feed(lr, n, **kw):
-  frame = dict(engaged=False, gas=False, brake_switch=False, user_brake=0.0, gear=GEAR,
-               torque_axle=-100.0, v_ego=V, a_ego=-0.6, pitch=0.0)   # brake-free coast, flat, D = 0.6
+  frame = {"engaged": False, "gas": False, "brake_switch": False, "user_brake": 0.0, "gear": GEAR,
+               "torque_axle": -100.0, "v_ego": V, "a_ego": -0.6, "pitch": 0.0}   # brake-free coast, flat, D = 0.6
   frame.update(kw)
   for _ in range(n):
     lr.observe(**frame)
@@ -40,8 +40,8 @@ class TestLearner:
     assert all(row[i] >= STATIC_DECEL[GEAR][i] - 1e-9 for i in range(len(row))), "never below static"
 
   def test_gates_out_non_coast_frames(self):
-    for kw in (dict(engaged=True), dict(gas=True), dict(brake_switch=True), dict(user_brake=0.5),
-               dict(gear=None), dict(torque_axle=50.0), dict(pitch=None)):
+    for kw in ({"engaged": True}, {"gas": True}, {"brake_switch": True}, {"user_brake": 0.5},
+               {"gear": None}, {"torque_axle": 50.0}, {"pitch": None}):
       lr = _fresh()
       _feed(lr, 220, **kw)
       assert lr.learned == {}, f"should not learn from {kw}"
