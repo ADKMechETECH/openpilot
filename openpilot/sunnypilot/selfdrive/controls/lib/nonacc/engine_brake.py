@@ -17,8 +17,13 @@ D is from the Stage 1 + Stage 3 disengaged closed-throttle coasts (~850 s, 276 c
 >= 3 coasts / >= 3 s use the measured median; the rest are capped model values; 0 where the engine is under 900 or over
 6500 rpm. The learner (Phase 3) refines this; here it is a fixed seed.
 
-TODO(on-car): whether a small POSITIVE request below a_ct keeps the throttle closed on a descent (the coast-follow
-premise for drifting up to the sawtooth without braking). Confirm from logs; if not, the coast floor caps at 0.
+Data (Stage 2, on-car): the VSA TRACKS the request - a command below the car's own coast accel is met by service
+braking (achieved approx requested, flat and downhill alike), and a command of ~0 on the flat holds a whisper of
+throttle (rolls on road load, no brake). So capping the coast-follow command at COAST_CAP means: on a gentle descent
+(coast <= cap) the command ~= the coast accel and the car drifts ~brake-free; on a steep descent (coast > cap) the car
+drifts at the cap with mild braking (the VSA brakes off the extra gravity). Both are bounded and both reach the
+sawtooth trigger. Commanding the FULL coast accel to be brake-free on any grade risks a whisper of throttle if the
+estimate is high - deferred until logs confirm it; the cap bounds any such over-command to a gentle accel.
 """
 import math
 
