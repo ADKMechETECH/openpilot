@@ -18,6 +18,7 @@ from openpilot.sunnypilot.selfdrive.selfdrived.events import EventsSP
 from openpilot.sunnypilot.models.helpers import get_active_bundle
 from openpilot.common.realtime import DT_MDL
 from openpilot.sunnypilot.selfdrive.controls.lib.nonacc.mode import NonAccMode
+from openpilot.sunnypilot.selfdrive.controls.lib.nonacc.learner import EngineBrakeLearner
 
 DecState = custom.LongitudinalPlanSP.DynamicExperimentalControl.DynamicExperimentalControlState
 LongitudinalPlanSource = custom.LongitudinalPlanSP.LongitudinalPlanSource
@@ -39,6 +40,11 @@ class LongitudinalPlannerSP:
     # smoothed by the consumers. The planner uses it to drop the lead-following MPC (and e2e) candidates.
     self.nonacc = NonAccMode(CP, DT_MDL)
     self.non_adaptive = self.nonacc.active
+
+    # fork-only (civic-cruise): engine-brake learner (manual + op long only). Learns from brake-free coasts, persists
+    # the applied learned table for the controller (controlsd) to read.
+    manual = CP.transmissionType == structs.CarParams.TransmissionType.manual
+    self.eb_learner = EngineBrakeLearner(manual and bool(CP.openpilotLongitudinalControl), DT_MDL)
 
     self.output_v_target = 0.
     self.output_a_target = 0.
@@ -92,6 +98,21 @@ class LongitudinalPlannerSP:
     self.events_sp.clear()
     self.dec.update(sm)
     self.e2e_alerts_helper.update(sm, self.events_sp)
+    self.update_eb_learner(sm)
+
+  def update_eb_learner(self, sm: messaging.SubMaster) -> None:
+    # fork-only (civic-cruise): feed the engine-brake learner. Learns only from brake-free coasts (disengaged, no gas /
+    # brake, trusted gear, closed throttle); the gate lives in the learner.
+    CS = sm['carState']
+    cs_sp = sm['carStateSP']
+    gear = cs_sp.gearRaw if (cs_sp.clutchSignalValid and not CS.deprecated.clutchPressed
+                             and 1 <= cs_sp.gearRaw <= 6) else None
+    orientation = sm['carControl'].orientationNED
+    pitch = orientation[1] if len(orientation) == 3 else None
+    self.eb_learner.observe(engaged=bool(sm['selfdriveState'].enabled), gas=bool(CS.gasPressed),
+                            brake_switch=bool(CS.brakePressed), user_brake=float(CS.deprecated.brake), gear=gear,
+                            torque_axle=float(cs_sp.engineTorqueAxle), v_ego=float(CS.vEgo), a_ego=float(CS.aEgo),
+                            pitch=pitch)
 
   def publish_longitudinal_plan_sp(self, sm: messaging.SubMaster, pm: messaging.PubMaster) -> None:
     plan_sp_send = messaging.new_message('longitudinalPlanSP')
