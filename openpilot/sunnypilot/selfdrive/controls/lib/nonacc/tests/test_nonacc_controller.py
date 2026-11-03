@@ -90,7 +90,8 @@ def _sim(pitch, v0, gear, secs):
     a_target = float(np.clip(SET - v, -1.2, 1.5))   # the set-speed (cruise) candidate
     a_cmd = float(np.clip(a_target, floor, 1.5))     # clipped to the controller's raised lower limit
     v = max(0.0, v + a_cmd * DT)
-    cmds.append(a_cmd); speeds.append(v)
+    cmds.append(a_cmd)
+    speeds.append(v)
   return np.array(cmds), np.array(speeds)
 
 

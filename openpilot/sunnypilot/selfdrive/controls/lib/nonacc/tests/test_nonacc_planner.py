@@ -5,7 +5,6 @@ Uses the stock longitudinal-maneuver Plant. A lead decelerates from set speed to
 - NonAdaptiveLongitudinal OFF (stock): the ego brakes to follow the lead.
 - NonAdaptiveLongitudinal ON (non-ACC): the ego holds its set speed and never brakes for the lead (the driver would).
 """
-import numpy as np
 
 from openpilot.common.params import Params
 from openpilot.selfdrive.test.longitudinal_maneuvers.maneuver import Maneuver

@@ -17,18 +17,22 @@ def _sm(enabled, gas):
 
 
 def test_manual_override_coasts_never_positive():
-  s = _Stub(); s.gas_override_reset = True
+  s = _Stub()
+  s.gas_override_reset = True
   assert SP.reset_accel(s, 1.8) == 0.0      # never re-opens throttle after a lift
   assert SP.reset_accel(s, -0.4) == -0.4    # keeps engine braking / braking
 
 
 def test_automatic_is_stock():
-  s = _Stub(); s.manual = False; s.gas_override_reset = True
+  s = _Stub()
+  s.manual = False
+  s.gas_override_reset = True
   assert SP.reset_accel(s, 1.8) == 1.8
 
 
 def test_no_override_is_stock():
-  s = _Stub(); s.gas_override_reset = False
+  s = _Stub()
+  s.gas_override_reset = False
   assert SP.reset_accel(s, 1.8) == 1.8
 
 
