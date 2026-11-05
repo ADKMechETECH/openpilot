@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+import datetime
+import faulthandler
 import fcntl
 import os
 import queue
@@ -193,6 +195,42 @@ def hw_state_thread(end_event, hw_queue):
     time.sleep(DT_HW)
 
 
+# fork-only diagnostic (civic-cruise, session 12, 2026-11-05): hardwared's main loop went silent for 8.0 s once per
+# drive (deviceState not alive -> "Communication Issue"), cause unknown. If the loop fails to come round within
+# STALL_TRACE_S, faulthandler's watchdog (a C thread, works even with the GIL held) appends every thread's Python stack
+# to STALL_LOG, and the loop logs how long it was gone. Never raises; a no-op off-device. Remove once root-caused.
+STALL_LOG = "/data/hardwared_stall.log"
+STALL_TRACE_S = 2.0
+
+
+class StallTrace:
+  def __init__(self, path: str = STALL_LOG, limit: float = STALL_TRACE_S, enabled: bool = COMMA_HARDWARE):
+    self.limit = limit
+    self.file = None
+    self.last = time.monotonic()
+    if enabled:
+      try:
+        self.file = open(path, "a")  # kept open for faulthandler
+      except OSError:
+        self.file = None
+
+  def beat(self) -> None:
+    """Call once per loop iteration: reports the previous iteration if it overran, then re-arms the watchdog."""
+    if self.file is None:
+      return
+    try:
+      now = time.monotonic()
+      gone = now - self.last
+      self.last = now
+      if gone > self.limit:
+        self.file.write(f"{datetime.datetime.now().isoformat()} hardwared loop took {gone:.2f}s (stack(s) above)\n")
+        self.file.flush()
+        cloudlog.error(f"hardwared loop took {gone:.2f}s, stack in {STALL_LOG}")
+      faulthandler.dump_traceback_later(self.limit, repeat=False, file=self.file)   # replaces the previous timer
+    except Exception:
+      self.file = None
+
+
 def hardware_thread(end_event, hw_queue) -> None:
   system_stats = LinuxSystemStats()
   pm = messaging.PubMaster(['deviceState'])
@@ -247,7 +285,10 @@ def hardware_thread(end_event, hw_queue) -> None:
   chestnut_status = ChestnutStatus()
   branch = get_short_branch()
 
+  stall_trace = StallTrace()
+
   while not end_event.is_set():
+    stall_trace.beat()
     sm.update(PANDA_STATES_TIMEOUT)
 
     pandaStates = sm['pandaStates']
