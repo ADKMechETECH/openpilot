@@ -30,6 +30,7 @@ DEFAULT_RAMP_TIME = 0.5         # s: the accel command ramps to 0 over this befo
 MAX_RAMP_TIME = 2.0             # s
 DISENGAGE_MARGIN = 0.1          # s: selfdrived disengages this long after the ramp ends
 ENGAGE_HYSTERESIS = 0.5         # m/s above the threshold still refuses to engage
+PARAM_READ_HZ = 1.0             # the speed/ramp params are re-read at this rate while not latched
 
 
 def handback_available(CP: structs.CarParams) -> bool:
@@ -49,6 +50,8 @@ class LowSpeedHandback:
     self.timer = 0.
     self.accel_start = 0.
     self.gear = 0
+    self._frame = 0
+    self._read_period = max(1, int(round(1.0 / (PARAM_READ_HZ * dt))))
 
   def read_params(self) -> None:
     def _f(key, default, lo, hi):
@@ -67,7 +70,12 @@ class LowSpeedHandback:
 
   def update(self, enabled: bool, v_ego: float, last_accel: float, gear: int, force_decel: bool) -> None:
     if not self.active:
-      self.read_params()        # params and gear only change the threshold before the latch
+      # params and gear only change the threshold before the latch. The two params are re-read at PARAM_READ_HZ, not
+      # every control frame: 200 Params reads/s in controlsd was measurable load on the saturated control core
+      # (session 12, 2026-11-05). A menu change tolerates <= 1 s latency.
+      if self._frame % self._read_period == 0:
+        self.read_params()
+      self._frame += 1
       self.gear = gear
     if not self.available or not enabled or force_decel:
       if self.active and force_decel:

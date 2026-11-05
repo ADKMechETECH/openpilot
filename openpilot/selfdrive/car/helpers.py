@@ -48,24 +48,41 @@ def convert_to_capnp(struct: structs.CarParamsSP | structs.CarStateSP) -> capnp.
   return struct_capnp
 
 
+_PLAN_CACHE: dict[tuple, tuple] = {}
+_CAPNP_LISTS = (capnp.lib.capnp._DynamicListReader, capnp.lib.capnp._DynamicListBuilder)
+
+
+def _convert_plan(cls, schema) -> tuple:
+  """(field name, nested dataclass type or None) for every dataclass field that the capnp struct also has.
+  Cached per (dataclass, capnp schema): built once, then conversion is plain attribute reads."""
+  key = (cls, schema.node.id)
+  plan = _PLAN_CACHE.get(key)
+  if plan is None:
+    default = cls()
+    plan = _PLAN_CACHE[key] = tuple(
+      (name, type(getattr(default, name)) if is_dataclass(getattr(default, name)) else None)
+      for name in getattr(cls, _FIELDS) if name in schema.fields and not name.endswith('DEPRECATED'))
+  return plan
+
+
+def _capnp_to_dataclass(struct, cls):
+  kwargs = {}
+  for name, nested in _convert_plan(cls, struct.schema):
+    v = getattr(struct, name)
+    if nested is not None:
+      v = _capnp_to_dataclass(v, nested)
+    elif isinstance(v, capnp.lib.capnp._DynamicEnum):
+      v = str(v)
+    elif isinstance(v, _CAPNP_LISTS):
+      v = [x.to_dict() if hasattr(x, 'to_dict') else x for x in v]
+    kwargs[name] = v
+  return cls(**kwargs)
+
+
 def convert_carControlSP(struct: capnp.lib.capnp._DynamicStructReader) -> structs.CarControlSP:
-  # TODO: recursively handle any car struct as needed
-  def remove_deprecated(s: dict) -> dict:
-    return {k: v for k, v in s.items() if not k.endswith('DEPRECATED')}
-
-  struct_dict = struct.to_dict()
-  # only what the car interface knows: openpilot-internal carControlSP fields (e.g. the fork's manualLongitudinal /
-  # nonAcc state for selfdrived/UI) never reach opendbc, and passing an unknown kwarg crashes card on the car
-  known = set(getattr(structs.CarControlSP, _FIELDS))
-  struct_dataclass = structs.CarControlSP(**remove_deprecated({k: v for k, v in struct_dict.items()
-                                                               if not isinstance(k, dict) and k in known}))
-
-  struct_dataclass.mads = structs.ModularAssistiveDrivingSystem(**remove_deprecated(struct_dict.get('mads', {})))
-  # struct_dataclass.params = [structs.CarControlSP.Param(**remove_deprecated(p)) for p in struct_dict.get('params', [])]
-  struct_dataclass.leadOne = structs.LeadData(**remove_deprecated(struct_dict.get('leadOne', {})))
-  struct_dataclass.leadTwo = structs.LeadData(**remove_deprecated(struct_dict.get('leadTwo', {})))
-  struct_dataclass.intelligentCruiseButtonManagement = structs.IntelligentCruiseButtonManagement(
-    **remove_deprecated(struct_dict.get('intelligentCruiseButtonManagement', {}))
-  )
-
-  return struct_dataclass
+  # Only what the car interface knows: openpilot-internal carControlSP fields (e.g. the fork's nonAcc / handback state
+  # for selfdrived/UI) never reach opendbc, and passing an unknown kwarg crashes card on the car. The conversion is
+  # driven by the dataclass's own fields, so an unknown capnp field can never be passed.
+  # It reads those fields straight off the capnp message instead of struct.to_dict() + rebuild: card runs this every
+  # control frame on the saturated control core (session 12, 2026-11-05).
+  return _capnp_to_dataclass(struct, structs.CarControlSP)

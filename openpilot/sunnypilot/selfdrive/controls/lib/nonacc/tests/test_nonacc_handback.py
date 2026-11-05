@@ -67,3 +67,25 @@ class TestHandback:
     hb.update(True, 5.0, 0.5, 0, False)    # well above threshold
     assert not hb.active
     assert hb.limit_accel(-3.5, 1.0) == (-3.5, 1.0)
+
+  def test_params_read_at_1hz_not_every_frame(self):
+    # session 12 (2026-11-05): the two params were re-read every 100 Hz control frame (200 Params reads/s in
+    # controlsd, on the saturated control core). They must be read on the first frame, then once per second.
+    class CountingParams:
+      def __init__(self):
+        self.gets = 0
+      def get(self, key, return_default=False):
+        self.gets += 1
+        return None
+    CP = CarInterface.get_non_essential_params(CAR.HONDA_CIVIC)
+    p = CountingParams()
+    hb = H.LowSpeedHandback(CP, DT, params=p)
+    hb.update(False, 20.0, 0.0, 4, False)
+    assert p.gets == 2                      # first frame reads both
+    for _ in range(int(1.0 / DT) - 1):
+      hb.update(False, 20.0, 0.0, 4, False)
+    assert p.gets == 2                      # nothing more inside the first second
+    hb.update(False, 20.0, 0.0, 4, False)
+    assert p.gets == 4                      # re-read at 1 Hz
+    hb.update(False, 20.0, 0.0, 2, False)
+    assert abs(hb.threshold - H.GEAR_HANDBACK_SPEED[2]) < 1e-6   # the gear still tracks every frame
