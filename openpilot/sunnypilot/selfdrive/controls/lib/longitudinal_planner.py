@@ -36,8 +36,9 @@ class LongitudinalPlannerSP:
     self.source = LongitudinalPlanSource.cruise
     self.e2e_alerts_helper = E2EAlertsHelper()
 
-    # fork-only (civic-cruise): non-ACC ("set-speed only") mode. Read live (no latch) - the ACC<->non-ACC flip is
-    # smoothed by the consumers. The planner uses it to drop the lead-following MPC (and e2e) candidates.
+    # fork-only (civic-cruise): non-ACC ("set-speed only") mode = the car's own conventional-cruise mode
+    # (carState.cruiseState.nonAdaptive). Followed live (no latch) - the ACC<->non-ACC flip is smoothed by the
+    # consumers. The planner uses it to drop the lead-following MPC (and e2e) candidates.
     self.nonacc = NonAccMode(CP, DT_MDL)
     self.non_adaptive = self.nonacc.active
 
@@ -65,9 +66,9 @@ class LongitudinalPlannerSP:
     re-open the throttle the driver just closed. Automatics and every other reset: stock (aEgo)."""
     return min(a_ego, 0.) if self.manual and self.gas_override_reset else a_ego
 
-  def update_non_adaptive(self) -> None:
+  def update_non_adaptive(self, sm: messaging.SubMaster) -> None:
     # fork-only: refresh the non-ACC mode once per planner frame (live flip, no latch).
-    self.non_adaptive = self.nonacc.update()
+    self.non_adaptive = self.nonacc.update(bool(sm['carState'].cruiseState.nonAdaptive))
 
   def is_e2e(self, sm: messaging.SubMaster) -> bool:
     # non-ACC never uses the e2e/experimental candidate (it brakes to stops and launches; a manual can't use that, and

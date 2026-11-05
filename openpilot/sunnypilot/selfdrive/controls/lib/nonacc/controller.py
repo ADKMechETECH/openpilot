@@ -57,12 +57,12 @@ class NonAccController:
     self.learned = load_applied(self._params)
 
   def update(self, long_active: bool, v_ego: float, v_set: float, gear, pitch, force_decel: bool,
-             lower_limit: float) -> float:
+             lower_limit: float, car_non_adaptive: bool) -> float:
     if self._frame % self._read_period == 0:
       self._read_params()
     self._frame += 1
 
-    mode_active = self.mode.update()
+    mode_active = self.mode.update(car_non_adaptive)   # the car's own ACC <-> Cruise mode is the switch
     self.overspeed = v_ego - v_set
 
     # step aside -> stock/plan braking: mode or long off, bad/low speed, forceDecel, or no pitch. NOT gated on overspeed:

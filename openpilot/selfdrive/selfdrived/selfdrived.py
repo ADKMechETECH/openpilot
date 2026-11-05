@@ -685,7 +685,11 @@ class SelfdriveD(CruiseHelper):
 
 
 def main():
-  config_realtime_process(4, Priority.CTRL_HIGH)
+  # fork-only (civic-cruise, session 12, 2026-11-05): core 7, not the stock core 4. On this build card + controlsd +
+  # selfdrived filled core 4 to 99.9 % with steering active (card 45 %, controlsd 30 %, selfdrived 25 %), the 100 Hz
+  # loops fell behind and selfdrived raised selfdrivedLagging. Core 7 holds modeld (FIFO 54, ~18 %) and
+  # dmonitoringmodeld (FIFO 5); core 6 is isolated for camerad and must stay empty.
+  config_realtime_process(7, Priority.CTRL_HIGH)
   s = SelfdriveD()
   s.run()
 

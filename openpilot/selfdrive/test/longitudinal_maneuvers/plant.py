@@ -12,6 +12,7 @@ from openpilot.selfdrive.controls.radard import _LEAD_ACCEL_TAU
 
 
 class Plant:
+  car_non_adaptive = False   # fork-only (civic-cruise): tests set this to put the car in its conventional-cruise mode
   messaging_initialized = False
 
   def __init__(self, lead_relevancy=False, speed=0.0, distance_lead=2.0,
@@ -127,6 +128,7 @@ class Plant:
     ss.selfdriveState.personality = self.personality
     control.controlsState.forceDecel = self.force_decel
     car_state.carState.vEgo = float(self.speed)
+    car_state.carState.cruiseState.nonAdaptive = bool(Plant.car_non_adaptive)   # fork-only: the car's Cruise mode
     car_state.carState.standstill = bool(self.speed < 0.01)
     car_state.carState.vCruise = float(v_cruise * 3.6)
     car_control.carControl.orientationNED = [0., float(pitch), 0.]

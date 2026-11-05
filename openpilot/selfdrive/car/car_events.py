@@ -6,6 +6,7 @@ from opendbc.car.interfaces import MAX_CTRL_SPEED
 from opendbc.car.toyota.values import ToyotaFlags
 
 from openpilot.selfdrive.selfdrived.events import Events
+from openpilot.sunnypilot.selfdrive.controls.lib.nonacc.mode import nonacc_available
 
 ButtonType = structs.CarState.ButtonEvent.Type
 GearShifter = structs.CarState.GearShifter
@@ -16,6 +17,7 @@ NetworkLocation = structs.CarParams.NetworkLocation
 class CarEvents:
   def __init__(self, CP: structs.CarParams):
     self.CP = CP
+    self.nonacc_available = nonacc_available(CP)
 
     self.steering_unpressed = 0
     self.low_speed_alert = False
@@ -128,7 +130,10 @@ class CarEvents:
       events.add(EventName.stockLkas)
     if CS.vEgo > MAX_CTRL_SPEED:
       events.add(EventName.speedTooHigh)
-    if CS.cruiseState.nonAdaptive:
+    # fork-only (civic-cruise): on a manual with openpilot longitudinal the car's conventional-cruise mode IS the fork's
+    # non-ACC mode (nonacc/mode.py), not a wrong mode. The stock camera that keeps that mode is blocked from the car, so
+    # the car only ever follows openpilot's commands. Every other car keeps the stock refusal.
+    if CS.cruiseState.nonAdaptive and not self.nonacc_available:
       events.add(EventName.wrongCruiseMode)
     if CS.brakeHoldActive and self.CP.openpilotLongitudinalControl:
       events.add(EventName.brakeHold)

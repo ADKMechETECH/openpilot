@@ -20,7 +20,8 @@ class CruiseHelper:
   def __init__(self, CP: structs.CarParams):
     self.CP = CP
     self.params = Params()
-    # fork-only (civic-cruise): on a manual the distance-button hold toggles non-ACC mode, not Experimental
+    # fork-only (civic-cruise): on a manual the distance-button hold is left to the car (its ACC <-> Cruise switch =
+    # the fork's non-ACC mode); it does not toggle Experimental
     self.manual = CP.transmissionType == structs.CarParams.TransmissionType.manual
 
     self.button_frame_counts = {ButtonType.gapAdjustCruise: 0}
@@ -35,7 +36,7 @@ class CruiseHelper:
     if self.CP.openpilotLongitudinalControl:
       self.update_button_frame_counts(CS)
 
-      # toggle a mode once on a distance-button hold (non-ACC on a manual, else Experimental)
+      # toggle Experimental once on a distance-button hold (nothing on a manual: the car switches its own mode)
       self.update_mode_toggle(events, experimental_mode)
 
   def update_button_frame_counts(self, CS) -> None:
@@ -61,11 +62,12 @@ class CruiseHelper:
     self._gap_prev_count = count
     if count >= DISTANCE_LONG_PRESS and not self.experimental_mode_switched:
       if self.manual:
-        # fork-only (civic-cruise): long-press flips non-ACC ("set-speed only") mode, live (the mode is read live, so
-        # the flip takes effect engaged or not). The persistent "NON-ACC" HUD overlay confirms it - the old transient
-        # ET.WARNING alert never showed. Experimental is NOT toggled on a manual (its e2e brakes to stops / launches,
-        # unusable on a manual, and was the earlier "~20 mph" surprise).
-        self.params.put_bool("NonAdaptiveLongitudinal", not self.params.get_bool("NonAdaptiveLongitudinal"), block=True)
+        # fork-only (civic-cruise): on a manual openpilot does NOTHING on the hold. The same hold (~1.2 s) is the
+        # car's own ACC <-> Cruise switch, and that mode now IS the fork's non-ACC mode (nonacc/mode.py, owner decision
+        # 2026-11-05): the car keeps the state, the cluster and the "NON-ACC" overlay show it. The fork's own param
+        # flip here fired on the same hold and left the two out of step (session 12). Experimental is NOT toggled on
+        # a manual (its e2e brakes to stops / launches, unusable on a manual).
+        pass
       else:
         self._experimental_mode = not experimental_mode
         self.params.put_bool("ExperimentalMode", self._experimental_mode)

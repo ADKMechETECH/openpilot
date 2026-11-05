@@ -120,7 +120,7 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
     v_cruise, self.output_a_target = LongitudinalPlannerSP.update_targets(self, sm, self.v_desired_filter.x, self.output_a_target, v_cruise)
 
     # fork-only (civic-cruise): refresh the non-ACC ("set-speed only") mode (live flip, no latch)
-    LongitudinalPlannerSP.update_non_adaptive(self)
+    LongitudinalPlannerSP.update_non_adaptive(self, sm)
 
     self.mpc.set_weights(prev_accel_constraint, personality=sm['selfdriveState'].personality)
     self.mpc.set_cur_state(self.v_desired_filter.x, self.output_a_target)

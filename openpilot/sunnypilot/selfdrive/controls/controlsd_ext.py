@@ -76,7 +76,8 @@ class ControlsExt(ModelStateBase):
     gear = cs_sp.gearRaw if (cs_sp.clutchSignalValid and not CS.deprecated.clutchPressed
                              and 1 <= cs_sp.gearRaw <= 6) else None
     pitch = calibrated_pose.orientation.xyz[1] if calibrated_pose is not None else None
-    return self.nonacc.update(long_active, CS.vEgo, v_set, gear, pitch, force_decel, lower_limit)
+    return self.nonacc.update(long_active, CS.vEgo, v_set, gear, pitch, force_decel, lower_limit,
+                              bool(CS.cruiseState.nonAdaptive))
 
   def initialize_lateral_control(self, lac, CI, dt):
     enforce_torque_control = self.params.get_bool("EnforceTorqueControl")

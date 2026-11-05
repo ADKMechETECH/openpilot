@@ -8,7 +8,6 @@ slows at the stronger of the request and its own engine braking; grade adds g*si
 """
 import numpy as np
 
-from openpilot.common.params import Params
 from opendbc.car.honda.values import CAR
 from opendbc.car.honda.interface import CarInterface
 from openpilot.sunnypilot.selfdrive.controls.lib.nonacc import controller as C
@@ -20,13 +19,11 @@ LOWER = -3.5   # a wide incoming pid lower limit
 
 
 def _ctrl():
-  Params().put_bool("NonAdaptiveLongitudinal", True)
+  # manual + openpilot longitudinal: the only configuration the mode exists in. The last update() argument is the
+  # car's own conventional-cruise mode (carState.cruiseState.nonAdaptive) - True in these tests unless stated.
   CP = CarInterface.get_non_essential_params(CAR.HONDA_CIVIC)
+  CP.openpilotLongitudinalControl = True
   return C.NonAccController(CP, DT)
-
-
-def teardown_function(_):
-  Params().put_bool("NonAdaptiveLongitudinal", False)
 
 
 class TestStepAside:
@@ -34,35 +31,54 @@ class TestStepAside:
     # the controller engages below set too (so it can drift up to the sawtooth on a descent), but on the flat its
     # floor is <= 0 - it only caps braking, never forces throttle, so it can't interfere with accelerating to set.
     c = _ctrl()
-    floor = c.update(True, SET - 2.0, SET, 4, 0.0, False, LOWER)
+    floor = c.update(True, SET - 2.0, SET, 4, 0.0, False, LOWER, True)
     assert LOWER < floor <= 0.0
 
   def test_force_decel_steps_aside(self):
     c = _ctrl()
-    assert c.update(True, SET + 5.0, SET, 4, 0.0, True, LOWER) == LOWER
+    assert c.update(True, SET + 5.0, SET, 4, 0.0, True, LOWER, True) == LOWER
 
   def test_no_pitch_steps_aside(self):
     c = _ctrl()
-    assert c.update(True, SET + 5.0, SET, 4, None, False, LOWER) == LOWER
+    assert c.update(True, SET + 5.0, SET, 4, None, False, LOWER, True) == LOWER
 
   def test_untrusted_gear_coasting_steps_aside(self):
     c = _ctrl()
-    assert c.update(True, SET + 1.0, SET, None, 0.0, False, LOWER) == LOWER
+    assert c.update(True, SET + 1.0, SET, None, 0.0, False, LOWER, True) == LOWER
+
+  def test_car_in_acc_mode_is_noop(self):
+    # the car's own ACC <-> Cruise mode is the switch: in ACC mode the controller never touches the limit
+    c = _ctrl()
+    assert c.update(True, SET + 5.0, SET, 4, 0.0, False, LOWER, False) == LOWER
+    assert not c.mode.active
+    assert c.update(True, SET + 1.0, SET, 4, 0.0, False, LOWER, True) > LOWER    # flips live, no latch
+    assert c.mode.active
+    assert c.update(True, SET + 5.0, SET, 4, 0.0, False, LOWER, False) == LOWER
+    assert not c.mode.active
+
+  def test_never_active_without_manual_and_op_long(self):
+    for manual, op_long in ((True, False), (False, True)):
+      CP = CarInterface.get_non_essential_params(CAR.HONDA_CIVIC)
+      CP.transmissionType = "manual" if manual else "automatic"
+      CP.openpilotLongitudinalControl = op_long
+      c = C.NonAccController(CP, DT)
+      assert c.update(True, SET + 5.0, SET, 4, 0.0, False, LOWER, True) == LOWER
+      assert not c.mode.active
 
   def test_long_inactive_is_noop(self):
     c = _ctrl()
-    assert c.update(False, SET + 5.0, SET, 4, 0.0, False, LOWER) == LOWER
+    assert c.update(False, SET + 5.0, SET, 4, 0.0, False, LOWER, True) == LOWER
 
   def test_hard_ceiling_hands_back_full_braking(self):
     c = _ctrl()
-    assert c.update(True, SET + C.HARD_CEILING + 1.0, SET, 4, 0.0, False, LOWER) == LOWER
+    assert c.update(True, SET + C.HARD_CEILING + 1.0, SET, 4, 0.0, False, LOWER, True) == LOWER
 
 
 class TestFloorAndSawtooth:
   def test_flat_coast_floor_is_engine_brake(self):
     # just over set on the flat: raise the lower limit to the brake-free floor (negative, engine braking)
     c = _ctrl()
-    floor = c.update(True, SET + 1.0, SET, 4, 0.0, False, LOWER)
+    floor = c.update(True, SET + 1.0, SET, 4, 0.0, False, LOWER, True)
     assert LOWER < floor < 0.0
     assert c.state == C.COASTING
 
@@ -70,12 +86,12 @@ class TestFloorAndSawtooth:
     c = _ctrl()
     # drive overspeed above the trigger -> PULSING, floor ramps toward the firm decel
     for _ in range(400):
-      floor = c.update(True, SET + C.DEFAULT_TRIGGER + 1.0, SET, 4, -0.05, False, LOWER)
+      floor = c.update(True, SET + C.DEFAULT_TRIGGER + 1.0, SET, 4, -0.05, False, LOWER, True)
     assert c.state == C.PULSING
     assert floor < -0.5   # ramped toward PULSE_DECEL
     # drop overspeed below the release -> back to COASTING
     for _ in range(400):
-      c.update(True, SET + C.RELEASE - 0.5, SET, 4, -0.05, False, LOWER)
+      c.update(True, SET + C.RELEASE - 0.5, SET, 4, -0.05, False, LOWER, True)
     assert c.state == C.COASTING
 
 
@@ -86,7 +102,7 @@ def _sim(pitch, v0, gear, secs):
   v = v0
   cmds, speeds = [], []
   for _ in range(int(secs / DT)):
-    floor = c.update(True, v, SET, gear, pitch, False, LOWER)
+    floor = c.update(True, v, SET, gear, pitch, False, LOWER, True)
     a_target = float(np.clip(SET - v, -1.2, 1.5))   # the set-speed (cruise) candidate
     a_cmd = float(np.clip(a_target, floor, 1.5))     # clipped to the controller's raised lower limit
     v = max(0.0, v + a_cmd * DT)

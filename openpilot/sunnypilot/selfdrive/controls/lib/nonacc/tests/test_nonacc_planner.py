@@ -2,18 +2,19 @@
 fork-only (civic-cruise) Phase 2: closed-loop proof that non-ACC mode ignores leads.
 
 Uses the stock longitudinal-maneuver Plant. A lead decelerates from set speed to a stop ahead of the ego:
-- NonAdaptiveLongitudinal OFF (stock): the ego brakes to follow the lead.
-- NonAdaptiveLongitudinal ON (non-ACC): the ego holds its set speed and never brakes for the lead (the driver would).
+- car in ACC mode (stock): the ego brakes to follow the lead.
+- car in its conventional-cruise mode (carState.cruiseState.nonAdaptive = non-ACC): the ego holds its set speed and
+  never brakes for the lead (the driver would).
 """
 
-from openpilot.common.params import Params
 from openpilot.selfdrive.test.longitudinal_maneuvers.maneuver import Maneuver
+from openpilot.selfdrive.test.longitudinal_maneuvers.plant import Plant
 
 CRUISE = 20.0  # m/s set speed
 
 
 def _run(non_adaptive: bool):
-  Params().put_bool("NonAdaptiveLongitudinal", non_adaptive)
+  Plant.car_non_adaptive = non_adaptive
   try:
     man = Maneuver(
       "lead decelerates to a stop ahead",
@@ -27,7 +28,7 @@ def _run(non_adaptive: bool):
     )
     _, logs = man.evaluate()
   finally:
-    Params().put_bool("NonAdaptiveLongitudinal", False)
+    Plant.car_non_adaptive = False
   return logs[:, 3], logs[:, 5]  # ego speed, ego acceleration
 
 
