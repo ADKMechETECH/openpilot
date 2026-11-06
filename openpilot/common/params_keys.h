@@ -328,6 +328,10 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     // band instead of hunting. Band width in mph; bias = share of the band above the set speed (0.5 centred, 1 all above).
     {"NonAccHoldBand", {PERSISTENT | BACKUP, FLOAT, "4.0"}},
     {"NonAccHoldBias", {PERSISTENT | BACKUP, FLOAT, "0.5"}},
+    // fork-only (civic-cruise): NNLC low-speed hunt self-tuner (nnlc/low_speed_tuner.py): backs NNLC's low-speed curvature
+    // term off while the wheel hunts at ~2 Hz under 25 mph (default OFF); the learned scale, written only when parked
+    {"NnlcLowSpeedTuner", {PERSISTENT | BACKUP, BOOL, "0"}},
+    {"NnlcLowSpeedScale", {PERSISTENT | BACKUP, FLOAT, "1.0"}},
     // fork-only (civic-cruise): learned per-gear engine-brake table (JSON), refined from brake-free coasts, applied live
     {"EngineBrakeLearnedTable", {PERSISTENT, STRING}},
     // fork-only (civic-cruise): clutch/shift gate (manual only) - cap the throttle while the clutch is in

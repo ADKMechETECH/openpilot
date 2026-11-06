@@ -17,6 +17,7 @@ from openpilot.selfdrive.modeld.constants import ModelConstants
 from openpilot.sunnypilot.selfdrive.controls.lib.latcontrol_torque_ext_base import sign
 from openpilot.sunnypilot.selfdrive.controls.lib.latcontrol_torque_jerk_aware import LatControlTorqueJerkAware
 from openpilot.sunnypilot.selfdrive.controls.lib.nnlc.helpers import MOCK_MODEL_PATH
+from openpilot.sunnypilot.selfdrive.controls.lib.nnlc.low_speed_tuner import LowSpeedHuntTuner
 from openpilot.sunnypilot.selfdrive.controls.lib.nnlc.model import NNTorqueModel
 
 LOW_SPEED_X = [0, 10, 20, 30]
@@ -60,6 +61,9 @@ class NeuralNetworkLateralControl(LatControlTorqueJerkAware):
     self.roll_deque = deque(maxlen=history_check_frames[0])
     self.error_deque = deque(maxlen=history_check_frames[0])
     self.past_future_len = len(self.past_times) + len(self.nn_future_times)
+    # fork-only (civic-cruise): self-tuner for the low-speed curvature term below (default OFF -> scale 1.0)
+    self.low_speed_tuner = LowSpeedHuntTuner(0.01)
+    self._last_output_torque = 0.0
 
   @property
   def _nnlc_enabled(self):
@@ -93,7 +97,9 @@ class NeuralNetworkLateralControl(LatControlTorqueJerkAware):
 
     self.update_feedforward_torque_space(CS)
 
-    low_speed_factor = float(np.interp(CS.vEgo, LOW_SPEED_X, LOW_SPEED_Y)) ** 2
+    # fork-only (civic-cruise): the self-tuner scales this term while the wheel hunts at low speed (session 15)
+    self.low_speed_tuner.update(CS.vEgo, not CS.steeringPressed, self._desired_curvature, CS.steeringAngleDeg, self._last_output_torque)
+    low_speed_factor = float(np.interp(CS.vEgo, LOW_SPEED_X, LOW_SPEED_Y)) ** 2 * self.low_speed_tuner.factor_scale
     self._setpoint = self._desired_lateral_accel + low_speed_factor * self._desired_curvature
     self._measurement = self._actual_lateral_accel + low_speed_factor * self._actual_curvature
 
@@ -158,3 +164,4 @@ class NeuralNetworkLateralControl(LatControlTorqueJerkAware):
       self._pid_log.error += get_friction(friction_input, self._lateral_accel_deadzone, FRICTION_THRESHOLD, self.torque_params)
 
     self.update_output_torque(CS)
+    self._last_output_torque = float(self._output_torque)      # fork-only: for the low-speed hunt tuner

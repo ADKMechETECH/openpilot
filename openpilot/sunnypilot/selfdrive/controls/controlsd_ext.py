@@ -186,6 +186,10 @@ class ControlsExt(ModelStateBase):
     CC_SP.nonAcc.overspeed = float(self.nonacc.overspeed)
     CC_SP.nonAcc.gatePaused = bool(self.clutch_gate.paused)
     CC_SP.nonAcc.holdState = int(self.nonacc.hold)
+    tuner = getattr(getattr(self.LaC, "extension", None), "low_speed_tuner", None)   # fork-only: NNLC low-speed hunt tuner
+    if tuner is not None:
+      CC_SP.nnlcLowSpeedScale = float(tuner.factor_scale)
+      CC_SP.nnlcHunting = bool(tuner.hunting)
 
     # manual low-speed handback (controlsd owns; selfdrived acts on this)
     CC_SP.handback.active = bool(self.handback.active)

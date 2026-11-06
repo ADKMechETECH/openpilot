@@ -392,6 +392,10 @@ struct CarControlSP @0xa5cd762cd951a455 {
   intelligentCruiseButtonManagement @4 :IntelligentCruiseButtonManagement;
   # fork-only (civic-cruise): non-ACC mode status for the HUD overlay. Ordinal may collide on a future rebase.
   nonAcc @5 :NonAcc;
+  # fork-only (civic-cruise): NNLC low-speed hunt self-tuner - the scale on NNLC's low-speed curvature term now in
+  # force (1.0 = stock / tuner off), and whether it sees the wheel hunting this frame
+  nnlcLowSpeedScale @7 :Float32;
+  nnlcHunting @8 :Bool;
   # fork-only (civic-cruise): manual low-speed handback state (controlsd owns it; selfdrived acts on it).
   handback @6 :Handback;
 

@@ -70,6 +70,10 @@ class LatControlTorque(LatControl):
     if not active:
       output_torque = 0.0
       pid_log.active = False
+      tuner = getattr(self.extension, "low_speed_tuner", None)      # fork-only (civic-cruise): NNLC low-speed hunt tuner
+      if tuner is not None:
+        tuner.inactive()
+        tuner.persist(bool(CS.standstill), False)
     else:
       measured_curvature = -VM.calc_curvature(math.radians(CS.steeringAngleDeg - params.angleOffsetDeg), CS.vEgo, params.roll)
       roll_compensation = params.roll * ACCELERATION_DUE_TO_GRAVITY
