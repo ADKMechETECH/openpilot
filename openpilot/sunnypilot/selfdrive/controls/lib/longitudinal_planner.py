@@ -19,6 +19,7 @@ from openpilot.sunnypilot.models.helpers import get_active_bundle
 from openpilot.common.params import Params
 from openpilot.common.realtime import DT_MDL
 from openpilot.sunnypilot.selfdrive.controls.lib.nonacc.mode import NonAccMode
+from openpilot.sunnypilot.selfdrive.controls.lib.nonacc.acc_coast import LeadBrakeGate
 from openpilot.sunnypilot.selfdrive.controls.lib.nonacc.approach import ApproachWarning
 from openpilot.sunnypilot.selfdrive.controls.lib.nonacc.learner import EngineBrakeLearner
 
@@ -52,9 +53,10 @@ class LongitudinalPlannerSP:
     # fork-only (civic-cruise, Task 16 port): gas-override re-surge guard (always on for manuals)
     self.gas_override_reset = False
 
-    # fork-only (civic-cruise): the plan's accel with the set speed left out (see update_accel_no_set_speed). The
-    # default is the minimum accel = "no floor": nothing is assumed until the planner has run.
-    self.accel_no_set_speed = -10.
+    # fork-only (civic-cruise): ACC-mode engine-brake priority (see update_coast_floor_bound). The default bound is
+    # the minimum accel = "no floor": nothing is assumed until the planner has run.
+    self.lead_brake_gate = LeadBrakeGate(DT_MDL)
+    self.coast_floor_bound = -10.
 
     # fork-only (civic-cruise): non-ACC approach warning (chime + text only; owner 2026-11-06, default ON)
     self.approach = ApproachWarning(DT_MDL)
@@ -130,15 +132,26 @@ class LongitudinalPlannerSP:
     self.update_eb_learner(sm)
     self.update_approach_warning(sm)
 
-  def update_accel_no_set_speed(self, accels: list[float], should_stop: bool, accel_min: float, accel_max: float) -> None:
-    """fork-only (civic-cruise): what the plan asks for apart from the driver's set speed - the lead MPC and, in e2e,
-    the model. controlsd's ACC-mode coast floor is never raised above this, so braking for a lead passes in full.
-    The minimum accel (= no floor) whenever a stop is wanted or sunnypilot's own speed targets (curves, speed limit)
-    are what limits the speed, and in non-ACC, where the list is empty and the bound is not used."""
-    if not accels or should_stop or self.source != LongitudinalPlanSource.cruise:
-      self.accel_no_set_speed = float(accel_min)
+  def update_coast_floor_bound(self, sm: messaging.SubMaster, lead_accel: float | None, should_stop: bool, is_e2e: bool,
+                               accel_min: float, accel_max: float) -> None:
+    """fork-only (civic-cruise): the lowest accel controlsd's coast floor must let through in the car's ACC mode.
+    lead_accel: what the lead MPC asks for now (None in non-ACC, where the bound is not used).
+      - a stop is wanted, an e2e plan is driving, or one of sunnypilot's own speed targets (curves, speed limit) is
+        what limits the speed: the minimum accel = no floor at all (stock braking);
+      - the lead gate allows braking (inside the approach margin, a stopped car, or the plan needs hard braking):
+        the lead plan's own accel - its braking passes in full;
+      - otherwise: the maximum accel = engine braking only (owner 2026-11-06)."""
+    if lead_accel is None or should_stop or is_e2e or self.source != LongitudinalPlanSource.cruise:
+      self.lead_brake_gate.reset()
+      self.coast_floor_bound = float(accel_min)
+      return
+    rs = sm['radarState']
+    leads = [(bool(ld.present), float(ld.modelProb), float(ld.dRel), float(ld.vLead)) for ld in (rs.leadOne, rs.leadTwo)]
+    need = float(min(max(lead_accel, accel_min), accel_max))
+    if self.lead_brake_gate.update(float(sm['carState'].vEgo), leads, need):
+      self.coast_floor_bound = need
     else:
-      self.accel_no_set_speed = float(min(max(min(accels), accel_min), accel_max))
+      self.coast_floor_bound = float(accel_max)
 
   def update_approach_warning(self, sm: messaging.SubMaster) -> None:
     # fork-only (civic-cruise): warn (never act) when non-ACC cruise is closing inside half of ACC's closest gap.
@@ -176,7 +189,7 @@ class LongitudinalPlannerSP:
     longitudinalPlanSP.longitudinalPlanSource = self.source
     longitudinalPlanSP.vTarget = float(self.output_v_target)
     longitudinalPlanSP.aTarget = float(self.output_a_target)
-    longitudinalPlanSP.accelNoSetSpeed = float(self.accel_no_set_speed)
+    longitudinalPlanSP.coastFloorBound = float(self.coast_floor_bound)
     longitudinalPlanSP.events = self.events_sp.to_msg()
 
     # Dynamic Experimental Control

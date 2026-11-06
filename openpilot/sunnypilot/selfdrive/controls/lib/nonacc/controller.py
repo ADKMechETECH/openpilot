@@ -42,8 +42,12 @@ Only ever RAISES LongControl's lower accel limit (never lowers it), and only abo
       * is trimmed up while the car reports COMPUTER_BRAKING outside a pulse (bounded, slow decay): the car's own flag
         is the final word on whether it is braking.
   - ACC mode (owner 2026-11-06: "adaptive cruise should have the same coast to set speed and brake only if necessary",
-    always active): the same floor applies in the car's ACC mode, but never above what the lead / e2e plan asks for
-    (lead_accel_limit): braking for a lead always passes in full, the same frame.
+    always active; "prioritize engine braking only unless we enter the [approach-warning] threshold"; "stopped car
+    should always cause brakes"): the same floor applies in the car's ACC mode, never above lead_accel_limit. plannerd
+    sets that bound (acc_coast.py): the maximum accel while the lead is to be handled on engine braking, the lead
+    plan's own accel once braking is allowed (inside the approach margin, a stopped car, or the plan needs
+    HARD_BRAKE), the minimum accel for a stop. Braking that is allowed comes in at ACC_RELEASE_JERK, and at once when
+    the plan needs HARD_BRAKE or more.
   - A SET press arrives one frame before the new set speed (session 15, twice): the old set speed could be >= 8 mph
     under the car, which started a pulse for that one frame and seeded the floor at -1.0 for 0.8 s. The pulse now needs
     the overspeed for PULSE_CONFIRM.
@@ -86,6 +90,8 @@ TRIM_DECAY = 0.03        # m/s^3: how fast that trim fades once the flag is off 
 TRIM_MAX = 0.25          # m/s^2
 TRIM_HOLDOFF = 1.5       # s after a pulse ends before the flag may trim (the car is still releasing real braking)
 PULSE_CONFIRM = 0.1      # s the overspeed must exceed the trigger before a pulse starts (one stale frame at SET)
+ACC_RELEASE_JERK = 2.5   # m/s^3: ACC mode, how fast the floor gives way to lead braking that has just been allowed
+ACC_HARD_BRAKE = -2.0    # m/s^2: ... unless the plan needs this much or more - then at once (acc_coast.HARD_BRAKE)
 MIN_SPEED = 2.0          # m/s: below this the coast estimate is unreliable, step aside
 DEFAULT_TRIGGER = 3.6    # m/s over set (~8 mph): start the firm brake pulse (user-settable)
 TRIGGER_MIN = RELEASE + 0.5
@@ -143,8 +149,8 @@ class NonAccController:
     """decoupled: the drivetrain is decoupled AND the clutch signal is live (a real clutch-in / neutral, not a dead
     signal). last_accel: the accel LongControl commanded last frame (0 while longitudinal was inactive); None = unknown,
     then a resume ramps from the raw lower limit as it always did.
-    lead_accel_limit: ACC mode only - the accel the lead / e2e plan asks for right now (the plan with the set speed left
-    out). The floor is never raised above it; None = not known, then ACC mode gets no floor at all (stock braking).
+    lead_accel_limit: ACC mode only - the lowest accel the floor must let through (plannerd: longitudinalPlanSP.
+    coastFloorBound). The floor is never raised above it; None = not known, then ACC mode gets no floor at all.
     computer_braking: the car's own VSA_STATUS.COMPUTER_BRAKING flag."""
     if self._frame % self._read_period == 0:
       self._read_params()
@@ -223,8 +229,12 @@ class NonAccController:
     if self.state == COASTING and last_accel is not None:
       # ease the throttle shut: below 0 the request falls no faster than COAST_FALL_RATE (from 0 if it was above 0)
       floor = max(floor, min(float(last_accel), 0.) - COAST_FALL_RATE * self.dt)
-    if acc_coast:
-      # ACC mode: never above what the lead / e2e plan asks for - braking for a lead passes in full, the same frame
-      floor = min(floor, float(lead_accel_limit))
+    if acc_coast and float(lead_accel_limit) < floor:
+      # ACC mode: braking for the lead has been allowed. It comes in on a ramp from what is being commanded now -
+      # or at once when the plan needs hard braking (or the last command is unknown).
+      bound = float(lead_accel_limit)
+      if bound > ACC_HARD_BRAKE and last_accel is not None:
+        bound = max(bound, min(float(last_accel), floor) - ACC_RELEASE_JERK * self.dt)
+      floor = bound
     # only ever raise the lower limit
     return max(lower_limit, floor)

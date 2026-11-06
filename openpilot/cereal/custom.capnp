@@ -204,10 +204,11 @@ struct LongitudinalPlanSP @0xf35cc4560bbf6ec2 {
   aTarget @5 :Float32;
   events @6 :List(OnroadEventSP.Event);
   e2eAlerts @7 :E2eAlerts;
-  # fork-only (civic-cruise): the accel the plan asks for with the set speed left out (lead MPC, e2e; the minimum
-  # accel while sunnypilot's own speed targets or a stop are in play). controlsd's coast floor in the car's ACC mode
-  # is never raised above it. Ordinal may collide on a future sunnypilot rebase.
-  accelNoSetSpeed @8 :Float32;
+  # fork-only (civic-cruise): the lowest accel controlsd's coast floor must let through in the car's ACC mode. The
+  # maximum accel (= engine braking only) while the lead plan's braking is held back by the engine-brake priority
+  # (nonacc/acc_coast.py); the lead / e2e plan's own accel once braking for the lead is allowed; the minimum accel
+  # (= no floor) for a stop or sunnypilot's own speed targets. Ordinal may collide on a future sunnypilot rebase.
+  coastFloorBound @8 :Float32;
 
   struct DynamicExperimentalControl {
     state @0 :DynamicExperimentalControlState;

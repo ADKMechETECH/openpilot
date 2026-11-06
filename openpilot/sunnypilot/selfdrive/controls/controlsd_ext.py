@@ -82,11 +82,12 @@ class ControlsExt(ModelStateBase):
     # clutch comes up one can say "coupled" while the other still says "no gear" (session 14 replay: that one frame
     # of step-aside let the planner's request through and cost 0.6 s of ramp). Reverse (14) still steps aside.
     decoupled = bool(cs_sp.clutchSignalValid and not in_gear and gear_raw != 14)
-    # the car's ACC mode (owner 2026-11-06): the same coast floor, but never above what the plan asks for apart from
-    # the set speed (lead MPC / e2e, published by plannerd). No live, valid plan -> None -> no floor in ACC mode.
+    # the car's ACC mode (owner 2026-11-06): the same coast floor, engine braking first also behind a lead. plannerd
+    # publishes the lowest accel the floor must let through (nonacc/acc_coast.py: the lead plan's braking once inside
+    # the approach margin, for a stopped car or hard braking). No live, valid plan, or FCW -> None -> no floor at all.
     lead_accel_limit = None
     if self.sm.alive['longitudinalPlanSP'] and self.sm.valid['longitudinalPlanSP'] and not self.sm['longitudinalPlan'].fcw:
-      lead_accel_limit = float(self.sm['longitudinalPlanSP'].accelNoSetSpeed)
+      lead_accel_limit = float(self.sm['longitudinalPlanSP'].coastFloorBound)
     return self.nonacc.update(long_active, CS.vEgo, v_set, gear, pitch, force_decel, lower_limit,
                               bool(CS.cruiseState.nonAdaptive), decoupled=decoupled,
                               last_accel=float(self.LoC.last_output_accel), lead_accel_limit=lead_accel_limit,

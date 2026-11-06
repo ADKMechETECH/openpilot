@@ -162,11 +162,11 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
       if is_e2e:
         candidates.append((output_a_target_e2e, LongitudinalPlanSource.e2e, output_should_stop_e2e))
 
-    # fork-only (civic-cruise): the plan with the set speed left out, for controlsd's coast floor in the car's ACC mode
-    # (owner 2026-11-06: coast to a lowered set speed, brake only if necessary). Braking for a lead, an e2e stop or one
-    # of sunnypilot's own speed targets is never floored: there the bound is the minimum accel.
-    no_set = [c for c in candidates if c[1] != LongitudinalPlanSource.cruise]
-    LongitudinalPlannerSP.update_accel_no_set_speed(self, [c[0] for c in no_set], any(c[2] for c in no_set), ACCEL_MIN, ACCEL_MAX)
+    # fork-only (civic-cruise): the bound for controlsd's coast floor in the car's ACC mode (owner 2026-11-06: engine
+    # braking first, also behind a lead; brakes once inside the approach margin, for a stopped car, or when the plan
+    # needs hard braking). The plan itself is untouched - it still aims at the normal follow distance.
+    LongitudinalPlannerSP.update_coast_floor_bound(self, sm, None if self.non_adaptive else output_a_target_mpc,
+                                                   output_should_stop_mpc, is_e2e, ACCEL_MIN, ACCEL_MAX)
 
     output_a_target, self.mpc.source, _ = min(candidates, key=lambda c: c[0])
     self.output_should_stop = any(should_stop for _, _, should_stop in candidates)
