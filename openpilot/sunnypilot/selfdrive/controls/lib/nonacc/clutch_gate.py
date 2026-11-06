@@ -4,6 +4,9 @@ fork-only (civic-cruise) clutch/shift gate (manual only) - MINIMAL scope.
 While the drivetrain is decoupled (clutch in, or neutral) the gate caps the THROTTLE (the upper accel limit) so a large
 pending throttle request can't flare the engine during a shift. Braking always passes (the lower limit is untouched),
 so the non-ACC engine-brake floor and emergency braking are never blocked. longActive is never dropped.
+The one request above the cap that passes is the non-ACC floor itself on a descent (the declutched car's own accel,
+positive there): it asks for no throttle and no brake. Watch on the road: a rev rise with the clutch in on a descent
+would mean that estimate reads high (pitch / road load) and the PCM is adding throttle.
 
 This is insurance only: on this car the PCM already drops throttle on clutch-in for small requests (Stage 1/3), and the
 confirmed shift-time surge (the driver's rev-match blip) is handled by the always-on gas-override guard in the planner.
@@ -120,9 +123,11 @@ class ClutchShiftGate:
     return self.state in PAUSED
 
   def limit_accel(self, lower: float, upper: float) -> tuple[float, float]:
-    """Cap the throttle while decoupled; braking (the lower limit) always passes. A lower limit ABOVE the cap (the
-    non-ACC floor on a descent, where the declutched car would speed up) gives way to the cap - never throttle with the
-    clutch in - so the range stays ordered."""
+    """Cap the throttle while decoupled; braking (the lower limit) always passes. A lower limit ABOVE the cap is the
+    non-ACC floor on a descent: the declutched car's own accel, i.e. the request that needs neither throttle nor
+    brake. It passes as it is (the range collapses onto it) - capping it at 0 made the VSA brake the rolling car
+    (owner 2026-11-06). Everything above that floor is still cut, so a pending throttle request cannot flare the
+    engine. In ACC mode and whenever non-ACC steps aside the lower limit is the raw one, far below the cap."""
     if self.paused:
-      return min(lower, self.coast_accel), min(upper, self.coast_accel)
+      return lower, max(min(upper, self.coast_accel), lower)
     return lower, upper

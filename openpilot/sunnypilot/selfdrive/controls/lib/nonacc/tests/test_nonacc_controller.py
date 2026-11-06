@@ -152,7 +152,8 @@ class TestFloorContinuity:
               for _ in range(200)]
     assert min(floors) > -0.3, "the floor dropped on clutch-in"
     assert abs(floors[0] - before) <= C.PULSE_JERK * DT + 1e-9, "the floor stepped on clutch-in"
-    assert abs(floors[-1] - min(E.declutched_coast_accel(SET + 1.5, -0.04), 0.0)) < 1e-6   # a descent: request 0
+    assert abs(floors[-1] - E.declutched_coast_accel(SET + 1.5, -0.04)) < 1e-6   # the rolling car's own accel (> 0 here)
+    assert floors[-1] > 0.0
     # and back in gear: still no step, still no drop
     back = [c.update(True, SET + 1.5, SET, 4, -0.04, False, LOWER, True, decoupled=False, last_accel=floors[-1])
             for _ in range(200)]
@@ -226,8 +227,8 @@ class TestFloorContinuity:
     seq = [(6, False)] * 300 + [(None, True)] * 200 + [(4, False)] * 300
     for gear, dec in seq:
       floor = c.update(True, SET + 1.5, SET, gear, -0.04, False, LOWER, True, decoupled=dec, last_accel=cmd)
-      upper = 0.0 if dec else 1.5
-      cmd = float(np.clip(-1.2, min(floor, upper), upper))
+      upper = max(0.0, floor) if dec else 1.5       # the gate: throttle cap 0, the floor passes if above it
+      cmd = float(np.clip(-1.2, floor, upper))
       cmds.append(cmd)
       own.append(E.declutched_coast_accel(SET + 1.5, -0.04) if dec else coast_accel(gear, SET + 1.5, -0.04))
     cmds, own = np.array(cmds), np.array(own)
@@ -280,3 +281,16 @@ class TestSteepDescent:
     coasting = settled & ~ramp
     assert coasting.sum() > 500
     assert (cmds[coasting] >= own[coasting] - 0.02).all(), "request below the car's own coast between pulses = brakes"
+
+  def test_clutch_in_on_a_steep_descent_rolls_free(self):
+    # 2nd on a 15 % descent, clutch in: the request is the rolling car's own accel (about +1.0), not 0 - a request of 0
+    # there had the VSA holding the car back at ~1 m/s^2. Bounded by COAST_CAP.
+    c = _ctrl()
+    pitch = -0.149
+    for _ in range(300):
+      c.update(True, 9.0, 6.7, 2, pitch, False, LOWER, True, decoupled=False, last_accel=0.0)
+    for _ in range(300):
+      floor = c.update(True, 9.0, 6.7, None, pitch, False, LOWER, True, decoupled=True, last_accel=0.0)
+    own = E.declutched_coast_accel(9.0, pitch)
+    assert own > 1.0
+    assert floor == min(own, C.COAST_CAP)

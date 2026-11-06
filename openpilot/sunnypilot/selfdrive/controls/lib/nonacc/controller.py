@@ -15,6 +15,8 @@ Only ever RAISES LongControl's lower accel limit (never lowers it), and only abo
   - Clutch in / neutral with the clutch signal live (session 14, owner: "the clutch-in behaviour is not good"): the
     floor STAYS, at the declutched car's own accel (road load + grade, no gear needed). Before, the controller stepped
     aside there and the planner's request went from +0.05 to -1.20 m/s^2 in one frame on a downshift above set.
+    On a descent that accel is positive and is requested as such (bounded by COAST_CAP), so the VSA does not hold
+    the declutched car back either.
   - Coming back from a step-aside (gas override released, mode switched, hard ceiling left) the floor restarts from
     the last commanded accel, not from the raw lower limit: no ~2 s window in which the planner brakes unfloored
     (session 14: -1.19 m/s^2 on releasing the gas 6.8 mph over set), and a release of real braking (ACC -> non-ACC
@@ -122,10 +124,12 @@ class NonAccController:
     if self.state == PULSING:
       target = PULSE_DECEL
     elif gear is None:
-      # clutch in / neutral: no engine braking, the car rolls on road load + grade. Keep the floor there so a shift
-      # above set does not hand the brakes to the planner. Never above 0: there is no throttle to give a declutched
-      # car (the clutch gate caps that side anyway), so on a descent the floor is a request of 0.
-      target = min(declutched_coast_accel(v_ego, pitch), 0.0)
+      # clutch in / neutral: no engine braking, the car rolls on road load + grade. The request is that accel itself,
+      # clutch in or out (owner 2026-11-06: "what is required for no throttle and no brake, regardless of clutch"):
+      # positive on a descent. Capping it at 0 there (the first version of this fix) made the VSA hold the car back
+      # with the clutch in - about 1 m/s^2 on a 12-17 % hill. The clutch gate lets a floor above its throttle cap
+      # through (clutch_gate.limit_accel), so the command is exactly this.
+      target = min(declutched_coast_accel(v_ego, pitch), COAST_CAP)
     else:
       coast = -effective_decel(gear, v_ego, self.learned) - G * math.sin(pitch)
       target = min(coast, COAST_CAP)
