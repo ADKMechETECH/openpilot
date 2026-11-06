@@ -35,6 +35,11 @@ class CarSpecificEventsSP:
         events.add(EventName.speedTooLow)
       if handback.belowEngageSpeed:
         events.add(EventName.belowEngageSpeed)
+      if handback.active:
+        # the notification the first build had (owner 2026-11-06: "non-intrusive and worked well"): shown from the
+        # start of the ramp. Needed because sunnypilot's MADS strips the stock speedTooLow alert, which left the
+        # handback with no chime and no text (session 15: the owner did not notice it happen).
+        events_sp.add(EventNameSP.manualLowSpeedHandback)
 
     if self.CP.brand == 'chrysler':
       if self.CP.carFingerprint in RAM_DT:

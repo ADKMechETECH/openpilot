@@ -262,6 +262,16 @@ EVENTS_SP: dict[int, dict[str, Alert | AlertCallbackType]] = {
       Priority.MID, VisualAlert.none, AudibleAlert.prompt, .1),
   },
 
+  # fork-only (civic-cruise): the manual low-speed handback (nonacc/handback.py) is ramping longitudinal back to the
+  # driver. Shown from the start of the ramp, below FCW (HIGHEST), which it must never replace or mask.
+  EventNameSP.manualLowSpeedHandback: {
+    ET.WARNING: Alert(
+      "Low Speed: Take Over",
+      "openpilot is handing longitudinal back to you",
+      AlertStatus.userPrompt, AlertSize.mid,
+      Priority.HIGH, VisualAlert.none, AudibleAlert.prompt, 3.),
+  },
+
   EventNameSP.bigModelReady: {
     ET.PERMANENT: Alert(
       "Big Model Ready",

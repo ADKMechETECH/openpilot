@@ -19,19 +19,28 @@ its CLOSEST setting, and the gap is closing.
 The (v_ego^2 - v_lead^2) term makes it earlier the faster the car is closing. Replayed on the session 14 routes
 (analysis/session14/approach_replay.py) it fires 4-5 s before each of the owner's cancels behind a lead.
 
+Session 15 (route 0000005a, the first drive with it: 7 warnings at a 0.9-1.1 s gap). Owner 2026-11-06: "keep as-is but
+increase it by 10 %, it's a little too tight. Suppress it if the gap is holding or increasing."
+  - FRACTION 0.5 -> 0.55: the warning distance is 10 % longer.
+  - The closing speed is now a 1 s low-pass of the lead's relative speed. The vision lead's vRel jumps by several m/s
+    from frame to frame, so the raw value kept re-triggering while the owner held a steady 0.5-0.9 s gap in traffic
+    (the text stayed up 14 s and 7 s), and delayed real warnings by 3-5 s when it happened to read "opening".
+  - The warning ends as soon as that filtered gap is no longer closing (after MIN_SHOW), instead of a second after.
+
 It never touches the plan, the accel limits or longActive: this module only says "warn now". Stock FCW is unchanged.
 """
 
 T_FOLLOW_MIN = 1.25      # s: ACC's closest follow time (long_mpc.get_T_FOLLOW, aggressive personality)
 COMFORT_BRAKE = 2.5      # m/s^2 (long_mpc.COMFORT_BRAKE)
 STOP_DISTANCE = 6.0      # m     (long_mpc.STOP_DISTANCE)
-FRACTION = 0.5           # warn inside this fraction of ACC's closest desired gap (owner: "about half")
-CLOSING_MIN = 0.5        # m/s (~1 mph): the gap must be shrinking at least this fast
+FRACTION = 0.55          # warn inside this fraction of ACC's closest desired gap (owner: "about half", then +10 %)
+CLOSING_MIN = 0.5        # m/s (~1 mph): the gap must be shrinking at least this fast (filtered) to start a warning
+CLOSING_TAU = 1.0        # s: low-pass on the lead's relative speed (the vision vRel is noisy frame to frame)
 LEAD_PROB_MIN = 0.5      # the vision lead's probability (radard's own "present" threshold)
 MIN_SPEED = 4.5          # m/s (~10 mph): no warning in crawling traffic
 ON_TIME = 0.3            # s the condition must hold before the warning starts
 MIN_SHOW = 2.0           # s the warning stays up once started
-OFF_TIME = 1.0           # s the condition must be gone before the warning ends
+OFF_TIME = 1.0           # s the condition must be gone before the warning ends (lead lost / outside the distance)
 REARM_TIME = 1.0         # s after a warning ends before the next may start (with OFF_TIME: no new chime inside 2 s)
 
 
@@ -40,8 +49,13 @@ def acc_closest_gap(v_ego: float, v_lead: float) -> float:
   return (v_ego * v_ego - v_lead * v_lead) / (2. * COMFORT_BRAKE) + T_FOLLOW_MIN * v_ego + STOP_DISTANCE
 
 
+def inside(v_ego: float, d_rel: float, v_lead: float) -> bool:
+  return d_rel < FRACTION * acc_closest_gap(v_ego, v_lead)
+
+
 def too_close(v_ego: float, d_rel: float, v_lead: float, v_rel: float) -> bool:
-  return v_rel < -CLOSING_MIN and d_rel < FRACTION * acc_closest_gap(v_ego, v_lead)
+  """The trigger for one sample: inside the distance and closing (v_rel = the closing estimate, negative = closing)."""
+  return v_rel < -CLOSING_MIN and inside(v_ego, d_rel, v_lead)
 
 
 class ApproachWarning:
@@ -52,11 +66,13 @@ class ApproachWarning:
     self._off_t = 0.
     self._shown_t = 0.
     self._since_end = REARM_TIME
+    self.v_rel_f = None      # low-passed relative speed of the lead (m/s, negative = closing); None = no lead yet
 
   def reset(self) -> None:
     self.warning = False
     self._on_t = self._off_t = self._shown_t = 0.
     self._since_end = REARM_TIME
+    self.v_rel_f = None
 
   def update(self, active: bool, v_ego: float, lead_present: bool, d_rel: float, v_lead: float, v_rel: float,
              lead_prob: float) -> bool:
@@ -66,7 +82,16 @@ class ApproachWarning:
       self.reset()
       return False
 
-    cond = bool(lead_present and lead_prob >= LEAD_PROB_MIN and v_ego >= MIN_SPEED and too_close(v_ego, d_rel, v_lead, v_rel))
+    lead = bool(lead_present and lead_prob >= LEAD_PROB_MIN)
+    if not lead:
+      self.v_rel_f = None                 # a new lead starts its own estimate
+    elif self.v_rel_f is None:
+      self.v_rel_f = float(v_rel)
+    else:
+      self.v_rel_f += (float(v_rel) - self.v_rel_f) * self.dt / (CLOSING_TAU + self.dt)
+    cond = bool(lead and v_ego >= MIN_SPEED and too_close(v_ego, d_rel, v_lead, self.v_rel_f))
+    # owner: "suppress it if the gap is holding or increasing"
+    opening = bool(lead and self.v_rel_f >= 0.)
 
     if not self.warning:
       self._since_end += self.dt
@@ -77,7 +102,7 @@ class ApproachWarning:
     else:
       self._shown_t += self.dt
       self._off_t = 0. if cond else self._off_t + self.dt
-      if self._shown_t >= MIN_SHOW and self._off_t >= OFF_TIME:
+      if self._shown_t >= MIN_SHOW and (self._off_t >= OFF_TIME or opening):
         self.warning = False
         self._on_t = 0.
         self._since_end = 0.

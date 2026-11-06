@@ -40,7 +40,7 @@ class ControlsExt(ModelStateBase):
     self.CP_SP = messaging.log_from_bytes(params.get("CarParamsSP", block=True), custom.CarParamsSP)
     cloudlog.info("controlsd_ext got CarParamsSP")
 
-    self.sm_services_ext = ['radarState', 'selfdriveStateSP', 'carStateSP']
+    self.sm_services_ext = ['radarState', 'selfdriveStateSP', 'carStateSP', 'longitudinalPlanSP']
     self.pm_services_ext = ['carControlSP']
 
     # fork-only (civic-cruise): non-ACC overspeed controller (engine-brake-priority floor + sawtooth)
@@ -82,9 +82,15 @@ class ControlsExt(ModelStateBase):
     # clutch comes up one can say "coupled" while the other still says "no gear" (session 14 replay: that one frame
     # of step-aside let the planner's request through and cost 0.6 s of ramp). Reverse (14) still steps aside.
     decoupled = bool(cs_sp.clutchSignalValid and not in_gear and gear_raw != 14)
+    # the car's ACC mode (owner 2026-11-06): the same coast floor, but never above what the plan asks for apart from
+    # the set speed (lead MPC / e2e, published by plannerd). No live, valid plan -> None -> no floor in ACC mode.
+    lead_accel_limit = None
+    if self.sm.alive['longitudinalPlanSP'] and self.sm.valid['longitudinalPlanSP'] and not self.sm['longitudinalPlan'].fcw:
+      lead_accel_limit = float(self.sm['longitudinalPlanSP'].accelNoSetSpeed)
     return self.nonacc.update(long_active, CS.vEgo, v_set, gear, pitch, force_decel, lower_limit,
                               bool(CS.cruiseState.nonAdaptive), decoupled=decoupled,
-                              last_accel=float(self.LoC.last_output_accel))
+                              last_accel=float(self.LoC.last_output_accel), lead_accel_limit=lead_accel_limit,
+                              computer_braking=bool(cs_sp.computerBraking))
 
   def initialize_lateral_control(self, lac, CI, dt):
     enforce_torque_control = self.params.get_bool("EnforceTorqueControl")

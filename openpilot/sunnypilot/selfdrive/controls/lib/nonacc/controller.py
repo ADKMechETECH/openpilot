@@ -22,7 +22,34 @@ Only ever RAISES LongControl's lower accel limit (never lowers it), and only abo
     (session 14: -1.19 m/s^2 on releasing the gas 6.8 mph over set), and a release of real braking (ACC -> non-ACC
     while ACC brakes for a lead) is still ramped at PULSE_JERK.
 
-No lead-based backstops: non-ACC ignores leads by design (the driver brakes; FCW still warns).
+  - Session 15 (owner 2026-11-06: "the car braked for small decel with non-ACC set improperly", seen as the brake
+    lights on the cluster): the car's own flag VSA_STATUS.COMPUTER_BRAKING (0x1A4 bit 23) was on at 23 set-speed taps
+    on route 0000005a, 18 s in all, and 26 s + 8 s on the two session 14 drives - with almost no brake force (the
+    accelerometer shows <= 0.15 m/s^2), which is why the earlier checks called those taps brake-free. Measured over the
+    three drives (analysis/session15/flag_margin.py): the car arms its brakes when the request is closer than about
+    0.25 m/s^2 to its own closed-throttle accel (flag on for 35-80 % of the time below +0.10, 6 % at +0.20...0.25,
+    0.4 % above +0.30, never above +0.40), and far more readily when the request falls fast (-0.6...-0.9 m/s^3 after a
+    tap: 50-90 % inside +0.2; slower than -0.4 m/s^3: 0 of 6 at or above the coast). The throttle is already closed in
+    much of that band. The margin the car needs grows with how hard it coasts (flag on, by coast accel and margin:
+    descent > +0.05: 9 % at 0, 3 % at +0.1; -0.25...-0.10: 21 % at +0.1, 3 % at +0.2; flat -0.45...-0.25: 67 % at
+    +0.1, 14 % at +0.2, 1 % at +0.3; -0.70...-0.45: 35 % at +0.2, 10 % at +0.3, 0 above +0.35; climbs: 38 % at +0.3,
+    0 above +0.35). So the coasting floor now
+      * sits coast_margin(coast) above the estimated coast accel: 0.10 - 0.40 * coast, between 0.05 and 0.45 - e.g.
+        6th at 68 mph on the flat (coast -0.56) asks for -0.24 - and never asks for more than DESCENT_MARGIN above
+        max(coast, 0): above set speed the car is not powered beyond a whisper,
+      * lets the request fall below 0 no faster than COAST_FALL_RATE while coasting (a tap eases the throttle shut
+        instead of dropping the request), and
+      * is trimmed up while the car reports COMPUTER_BRAKING outside a pulse (bounded, slow decay): the car's own flag
+        is the final word on whether it is braking.
+  - ACC mode (owner 2026-11-06: "adaptive cruise should have the same coast to set speed and brake only if necessary",
+    always active): the same floor applies in the car's ACC mode, but never above what the lead / e2e plan asks for
+    (lead_accel_limit): braking for a lead always passes in full, the same frame.
+  - A SET press arrives one frame before the new set speed (session 15, twice): the old set speed could be >= 8 mph
+    under the car, which started a pulse for that one frame and seeded the floor at -1.0 for 0.8 s. The pulse now needs
+    the overspeed for PULSE_CONFIRM.
+
+Leads: non-ACC ignores them by design (the driver brakes; FCW and the approach warning warn). In ACC mode the lead plan
+is the hard upper bound on this controller's floor.
 """
 import math
 
@@ -46,10 +73,36 @@ PULSE_JERK = 1.5         # m/s^3: smooth pulse on/off
 # one firm pulse, coast again. 1.0 covers ~17 % in 2nd and ~15 % in the upper gears and still bounds a bad pitch /
 # table estimate (a request above the true coast is a whisper of throttle, bounded by the sawtooth trigger).
 COAST_CAP = 1.0
+# The coasting floor sits coast_margin() above the estimated coast accel (session 15, see above): m/s^2
+MARGIN_BASE = 0.10       # at a coast accel of 0
+MARGIN_SLOPE = 0.40      # more margin the harder the car coasts (per m/s^2 of coast decel)
+MARGIN_MIN = 0.05
+MARGIN_MAX = 0.45
+DESCENT_MARGIN = 0.05    # the floor never exceeds max(coast, 0) by more than this (+ a share of the flag trim)
+TRIM_DESCENT_SHARE = 0.4
+COAST_FALL_RATE = 0.4    # m/s^3: while coasting the request may fall below 0 no faster than this
+TRIM_RISE = 1.0          # m/s^3: how fast the floor is raised while the car reports COMPUTER_BRAKING outside a pulse
+TRIM_DECAY = 0.03        # m/s^3: how fast that trim fades once the flag is off (0.25 in ~8 s)
+TRIM_MAX = 0.25          # m/s^2
+TRIM_HOLDOFF = 1.5       # s after a pulse ends before the flag may trim (the car is still releasing real braking)
+PULSE_CONFIRM = 0.1      # s the overspeed must exceed the trigger before a pulse starts (one stale frame at SET)
 MIN_SPEED = 2.0          # m/s: below this the coast estimate is unreliable, step aside
 DEFAULT_TRIGGER = 3.6    # m/s over set (~8 mph): start the firm brake pulse (user-settable)
 TRIGGER_MIN = RELEASE + 0.5
 TRIGGER_MAX = HARD_CEILING - 0.45   # keep RELEASE < trigger < HARD_CEILING
+
+
+def coast_margin(coast: float) -> float:
+  """How far above the car's own closed-throttle accel the request must stay for the car not to arm its brakes."""
+  return float(np.clip(MARGIN_BASE - MARGIN_SLOPE * coast, MARGIN_MIN, MARGIN_MAX))
+
+
+def coast_floor(coast: float, trim: float = 0., declutched: bool = False) -> float:
+  """The coasting request for an estimated coast accel: the margin above it, bounded so the car is never powered
+  above set speed by more than a whisper (DESCENT_MARGIN over max(coast, 0)), plus the COMPUTER_BRAKING trim.
+  With the clutch in there is no whisper at all: a request above the rolling car's own accel would rev the engine."""
+  over = 0. if declutched else DESCENT_MARGIN + TRIM_DESCENT_SHARE * trim
+  return min(coast + coast_margin(coast) + trim, max(coast, 0.) + over, COAST_CAP)
 
 
 class NonAccController:
@@ -63,6 +116,9 @@ class NonAccController:
     self.state = COASTING
     self.floor_cmd = 0.0     # the ramped lower-limit the controller is requesting
     self._aside = False      # stepped aside last frame: the next active frame re-seeds floor_cmd
+    self.trim = 0.0          # raised while the car reports COMPUTER_BRAKING outside a pulse
+    self._over_t = 0.0       # s the overspeed has been above the trigger
+    self._since_pulse = TRIM_HOLDOFF
     self.learned = load_applied(self._params)   # applied learned engine-brake table (from the learner in plannerd)
     # exposed for the overlay
     self.active = False
@@ -77,19 +133,27 @@ class NonAccController:
   def _step_aside(self, lower_limit: float) -> float:
     self.floor_cmd = lower_limit
     self._aside = True
+    self._over_t = 0.
     return lower_limit
 
   def update(self, long_active: bool, v_ego: float, v_set: float, gear, pitch, force_decel: bool,
              lower_limit: float, car_non_adaptive: bool, decoupled: bool = False,
-             last_accel: float | None = None) -> float:
+             last_accel: float | None = None, lead_accel_limit: float | None = None,
+             computer_braking: bool = False) -> float:
     """decoupled: the drivetrain is decoupled AND the clutch signal is live (a real clutch-in / neutral, not a dead
     signal). last_accel: the accel LongControl commanded last frame (0 while longitudinal was inactive); None = unknown,
-    then a resume ramps from the raw lower limit as it always did."""
+    then a resume ramps from the raw lower limit as it always did.
+    lead_accel_limit: ACC mode only - the accel the lead / e2e plan asks for right now (the plan with the set speed left
+    out). The floor is never raised above it; None = not known, then ACC mode gets no floor at all (stock braking).
+    computer_braking: the car's own VSA_STATUS.COMPUTER_BRAKING flag."""
     if self._frame % self._read_period == 0:
       self._read_params()
     self._frame += 1
 
-    mode_active = self.mode.update(car_non_adaptive)   # the car's own ACC <-> Cruise mode is the switch
+    non_acc = self.mode.update(car_non_adaptive)       # the car's own ACC <-> Cruise mode is the switch
+    # ACC mode (owner 2026-11-06, always on): the same floor, bounded by the lead plan. Without that bound: no floor.
+    acc_coast = bool(self.mode.available and not non_acc and lead_accel_limit is not None and math.isfinite(lead_accel_limit))
+    mode_active = non_acc or acc_coast
     self.overspeed = v_ego - v_set
 
     # step aside -> stock/plan braking: mode or long off, bad/low speed, forceDecel, or no pitch. NOT gated on overspeed:
@@ -102,11 +166,17 @@ class NonAccController:
 
     self.active = True
 
-    # sawtooth hysteresis
-    if self.state == COASTING and self.overspeed > self.trigger:
+    # sawtooth hysteresis. The trigger must hold for PULSE_CONFIRM: on a SET press the first active frame still has
+    # the previous set speed, and one frame of "8 mph over" seeded the floor at -1.0 for 0.8 s (session 15).
+    self._over_t = self._over_t + self.dt if self.overspeed > self.trigger else 0.
+    if self.state == COASTING and self._over_t >= PULSE_CONFIRM:
       self.state = PULSING
+      if last_accel is not None:
+        # the pulse ramps in from what is being commanded now (the request may sit above the floor), not as a step
+        self.floor_cmd = max(self.floor_cmd, float(last_accel))
     elif self.state == PULSING and self.overspeed < RELEASE:
       self.state = COASTING
+    self._since_pulse = 0. if self.state == PULSING else self._since_pulse + self.dt
 
     # too far over set: hand back to full plan braking (+ the overlay flags it)
     if self.overspeed > HARD_CEILING:
@@ -123,16 +193,24 @@ class NonAccController:
     # refines the engine-brake estimate; else the static seed.
     if self.state == PULSING:
       target = PULSE_DECEL
+      coast = None
     elif gear is None:
       # clutch in / neutral: no engine braking, the car rolls on road load + grade. The request is that accel itself,
       # clutch in or out (owner 2026-11-06: "what is required for no throttle and no brake, regardless of clutch"):
       # positive on a descent. Capping it at 0 there (the first version of this fix) made the VSA hold the car back
       # with the clutch in - about 1 m/s^2 on a 12-17 % hill. The clutch gate lets a floor above its throttle cap
       # through (clutch_gate.limit_accel), so the command is exactly this.
-      target = min(declutched_coast_accel(v_ego, pitch), COAST_CAP)
+      coast = declutched_coast_accel(v_ego, pitch)
     else:
       coast = -effective_decel(gear, v_ego, self.learned) - G * math.sin(pitch)
-      target = min(coast, COAST_CAP)
+    if coast is not None:
+      # the car's own flag is the final word: while it reports braking outside a pulse, raise the floor; fade slowly
+      if computer_braking and self._since_pulse >= TRIM_HOLDOFF and self._over_t == 0.:
+        self.trim = min(self.trim + TRIM_RISE * self.dt, TRIM_MAX)
+      else:
+        self.trim = max(self.trim - TRIM_DECAY * self.dt, 0.)
+      # the margin above the coast keeps the car's brakes un-armed; COAST_CAP bounds everything
+      target = coast_floor(coast, self.trim, declutched=gear is None)
     if self._aside:
       # back from a step-aside: restart from what was last commanded (never above the target), so the floor is there
       # at once after a gas override (last command 0) and real braking (ACC -> non-ACC) is still released on the ramp
@@ -141,5 +219,12 @@ class NonAccController:
       self._aside = False
     step = PULSE_JERK * self.dt
     self.floor_cmd = float(np.clip(target, self.floor_cmd - step, self.floor_cmd + step))
+    floor = self.floor_cmd
+    if self.state == COASTING and last_accel is not None:
+      # ease the throttle shut: below 0 the request falls no faster than COAST_FALL_RATE (from 0 if it was above 0)
+      floor = max(floor, min(float(last_accel), 0.) - COAST_FALL_RATE * self.dt)
+    if acc_coast:
+      # ACC mode: never above what the lead / e2e plan asks for - braking for a lead passes in full, the same frame
+      floor = min(floor, float(lead_accel_limit))
     # only ever raise the lower limit
-    return max(lower_limit, self.floor_cmd)
+    return max(lower_limit, floor)

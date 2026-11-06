@@ -13,10 +13,17 @@ confirmed shift-time surge (the driver's rev-match blip) is handled by the alway
 The gate covers the untested large-request case and bounds a rolling neutral coast.
 
 Deliberately minimal (owner: "do minimal, with the option for the full gate if needed"). NOT included - add here if logs
-show a need: an RPM-flare backstop (detect a decoupled engine from an rpm rise when the clutch signal misses it), a
-ratio-lock smart re-engagement, and a seeded takeover ramp to smooth the resume. Hook points are marked below.
+show a need: an RPM-flare backstop (detect a decoupled engine from an rpm rise when the clutch signal misses it) and a
+ratio-lock smart re-engagement. Hook points are marked below.
 
-States: idle -> shifting (decoupled) -> reengaging (coupled for REENGAGE_DELAY, gear steady) -> idle.
+Throttle return (owner 2026-11-06, session 15: "re-engage of throttle is a little too late ... the re-engage ramp rate
+is also a little harsh, cut that by 25%"): the wait after the gear is back is REENGAGE_DELAY 0.05 s (was 0.15), and the
+throttle limit then RISES from the cap at RELEASE_JERK instead of stepping to the plan's request. Before, the request
+went 0 -> +0.5...+1.2 m/s^2 in one frame and the car's own torque rise set the feel (median jerk 2.2 m/s^3 over the
+8 shifts of route 0000005a); 1.65 m/s^3 is 75 % of that. A +0.6 request is reached in 0.36 s, +1.2 in 0.73 s.
+Braking is untouched by the ramp, as by the gate.
+
+States: idle -> shifting (decoupled) -> reengaging (coupled for REENGAGE_DELAY, gear steady) -> ramping -> idle.
 coastTimeout = decoupled past MaxCoast, or confirmed neutral (clutch pedal fully up for NEUTRAL_CONFIRM): same throttle
 cap, bounded. Toggle ClutchShiftGate (default OFF); needs the clutch signal live, else the gate stays off.
 """
@@ -31,7 +38,8 @@ DEFAULT_COAST_ACCEL = 0.0        # m/s^2: the throttle cap during a shift
 COAST_ACCEL_RANGE = (-0.5, 0.0)
 DEFAULT_MAX_COAST = 5.0          # s: decoupled longer than this (rolling neutral) -> coastTimeout
 MAX_COAST_RANGE = (2.0, 20.0)
-REENGAGE_DELAY = 0.15            # s coupled (gear steady) before resuming (Stage 1: GEAR_MT reports at full engagement)
+REENGAGE_DELAY = 0.05            # s coupled (gear steady) before resuming (GEAR_MT reports at full engagement; owner 2026-11-06)
+RELEASE_JERK = 1.65              # m/s^3: how fast the throttle limit rises after the gate releases (owner: 25 % gentler)
 NEUTRAL_CONFIRM = 0.5            # s decoupled with the clutch pedal fully up = neutral -> coastTimeout at once
 
 CLUTCH_PEDAL_UP = 1              # CarStateSP.clutchPedal fully-up value
@@ -42,6 +50,7 @@ class GateState(IntEnum):
   shifting = 2        # clutch in / decoupled
   reengaging = 3      # clutch back in gear, waiting REENGAGE_DELAY
   coastTimeout = 4    # decoupled past MaxCoast, or confirmed neutral
+  ramping = 5         # gate released: the throttle limit rises at RELEASE_JERK (not "paused": the car is driving again)
 
 
 PAUSED = (GateState.shifting, GateState.reengaging, GateState.coastTimeout)
@@ -63,6 +72,7 @@ class ClutchShiftGate:
     self.decoupled_t = 0.
     self.coupled_t = 0.
     self.lock_gear = None
+    self.ramp_upper = 0.     # the rising throttle limit while ramping
 
   def _read_params(self) -> None:
     self.enabled = self.available and bool(self._params.get_bool("ClutchShiftGate"))
@@ -108,7 +118,15 @@ class ClutchShiftGate:
           self.coupled_t = 0.
         self.coupled_t += self.dt
         if self.coupled_t >= REENGAGE_DELAY:
-          self.state = GateState.idle           # (full-gate hook) start a seeded takeover ramp here
+          self.ramp_upper = self.coast_accel    # the throttle comes back from the cap, not as a step
+          self.state = GateState.ramping
+
+    elif self.state == GateState.ramping:
+      if decoupled:
+        self.decoupled_t = 0.
+        self.state = GateState.shifting
+      else:
+        self.ramp_upper += RELEASE_JERK * self.dt   # limit_accel ends the ramp once it is above the incoming limit
 
     elif self.state == GateState.coastTimeout:
       if not decoupled:
@@ -130,4 +148,9 @@ class ClutchShiftGate:
     engine. In ACC mode and whenever non-ACC steps aside the lower limit is the raw one, far below the cap."""
     if self.paused:
       return lower, max(min(upper, self.coast_accel), lower)
+    if self.state == GateState.ramping:
+      if self.ramp_upper >= upper:
+        self.state = GateState.idle             # the ramp has caught up with the stock limit: nothing left to hold
+        return lower, upper
+      return lower, max(self.ramp_upper, lower)
     return lower, upper

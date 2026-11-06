@@ -5,7 +5,7 @@ decoupled; braking always passes; neutral / long coasts go to coastTimeout. Togg
 from openpilot.common.params import Params
 from opendbc.car.honda.values import CAR
 from opendbc.car.honda.interface import CarInterface
-from openpilot.sunnypilot.selfdrive.controls.lib.nonacc.clutch_gate import ClutchShiftGate, GateState
+from openpilot.sunnypilot.selfdrive.controls.lib.nonacc.clutch_gate import ClutchShiftGate, GateState, RELEASE_JERK
 
 DT = 0.01
 PEDAL_UP, PEDAL_TRAVEL = 1, 2
@@ -39,12 +39,49 @@ class TestClutchGate:
     assert lower == -3.5          # braking always passes
     assert upper == 0.0           # throttle capped at coast_accel
 
-  def test_reengage_releases_after_delay(self):
+  def test_reengage_starts_the_ramp_after_the_delay(self):
+    # owner 2026-11-06 (session 15): the throttle may come back 0.05 s after the gear is back (was 0.15 s)
     g = _gate()
     _step(g, 1, decoupled=True)                                  # shifting
-    _step(g, 25, decoupled=False, clutch_pedal=PEDAL_UP, gear_raw=3)   # coupled in 3rd past REENGAGE_DELAY
-    assert g.state == GateState.idle
-    assert g.limit_accel(-3.5, 2.0) == (-3.5, 2.0)              # cap released
+    _step(g, 4, decoupled=False, clutch_pedal=PEDAL_UP, gear_raw=3)    # coupled in 3rd for 0.04 s: still waiting
+    assert g.state == GateState.reengaging and g.paused
+    assert g.limit_accel(-3.5, 2.0) == (-3.5, 0.0)
+    _step(g, 2, decoupled=False, clutch_pedal=PEDAL_UP, gear_raw=3)    # past REENGAGE_DELAY
+    assert g.state == GateState.ramping and not g.paused
+
+  def test_throttle_returns_on_a_ramp_not_a_step(self):
+    # owner 2026-11-06: "the re-engage ramp rate is a little harsh" - the limit rises at RELEASE_JERK from the cap
+    g = _gate()
+    _step(g, 1, decoupled=True)
+    uppers = []
+    for _ in range(200):
+      _step(g, 1, decoupled=False, clutch_pedal=PEDAL_UP, gear_raw=3)
+      lower, upper = g.limit_accel(-3.5, 2.0)
+      assert lower == -3.5                                       # braking always passes
+      uppers.append(upper)
+    rise = [b - a for a, b in zip(uppers[:-1], uppers[1:], strict=True)]
+    assert max(rise) <= RELEASE_JERK * DT + 1e-9                 # never a step
+    i06 = next(i for i, u in enumerate(uppers) if u >= 0.6)
+    assert 0.36 <= (i06 + 1) * DT <= 0.46                        # +0.6 m/s^2 about 0.4 s after the gear is back
+    assert uppers[-1] == 2.0 and g.state == GateState.idle       # and the gate is fully out of the way afterwards
+    assert g.limit_accel(-3.5, 2.0) == (-3.5, 2.0)
+
+  def test_clutch_in_during_the_ramp_caps_again(self):
+    g = _gate()
+    _step(g, 1, decoupled=True)
+    _step(g, 20, decoupled=False, clutch_pedal=PEDAL_UP, gear_raw=3)
+    assert g.state == GateState.ramping
+    _step(g, 1, decoupled=True, clutch_pedal=PEDAL_TRAVEL, gear_raw=0)
+    assert g.state == GateState.shifting
+    assert g.limit_accel(-3.5, 2.0) == (-3.5, 0.0)
+
+  def test_ramp_never_cuts_a_floor_above_it(self):
+    # the non-ACC floor on a descent (positive) must still pass whole while the ramp is below it
+    g = _gate()
+    _step(g, 1, decoupled=True)
+    _step(g, 7, decoupled=False, clutch_pedal=PEDAL_UP, gear_raw=3)
+    assert g.state == GateState.ramping
+    assert g.limit_accel(0.5, 2.0) == (0.5, 0.5)
 
   def test_neutral_goes_to_coast_timeout(self):
     g = _gate()

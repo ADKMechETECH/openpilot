@@ -164,7 +164,9 @@ class TestFloorContinuity:
     c = _ctrl()
     for _ in range(300):
       floor = c.update(True, SET + 1.0, SET, None, 0.0, False, LOWER, True, decoupled=True, last_accel=0.0)
-    assert -0.35 < floor < -0.15            # road load at 21 m/s, no engine braking
+    # road load at 21 m/s is -0.26: with COAST_MARGIN the request sits at 0 (never above), i.e. exactly what every
+    # shift below set speed already sends with the clutch in
+    assert -0.01 < floor <= 0.0
     assert floor > coast_accel(4, SET + 1.0, 0.0)
 
   def test_dead_clutch_signal_still_steps_aside(self):
@@ -198,8 +200,13 @@ class TestFloorContinuity:
     c = _ctrl()
     for _ in range(50):
       c.update(False, SET + C.DEFAULT_TRIGGER + 1.0, SET, 5, 0.0, False, LOWER, True, decoupled=False, last_accel=0.0)
-    floor = c.update(True, SET + C.DEFAULT_TRIGGER + 1.0, SET, 5, 0.0, False, LOWER, True, decoupled=False, last_accel=0.0)
-    assert c.state == C.PULSING and floor <= C.PULSE_DECEL + 1e-6
+    floors, last = [], 0.0
+    for _ in range(120):
+      last = c.update(True, SET + C.DEFAULT_TRIGGER + 1.0, SET, 5, 0.0, False, LOWER, True, decoupled=False, last_accel=last)
+      floors.append(last)
+    assert c.state == C.PULSING and floors[-1] <= C.PULSE_DECEL + 1e-6
+    assert floors[int(C.PULSE_CONFIRM / DT) - 2] > -0.05, "the pulse must wait PULSE_CONFIRM"
+    assert min(b - a for a, b in zip(floors, floors[1:], strict=False)) >= -C.PULSE_JERK * DT - 1e-9   # and comes on as a ramp
 
   def test_acc_to_nonacc_while_braking_is_released_on_the_ramp(self):
     # the car's mode flips live while ACC brakes at -2.0 for a lead: the brake must come off at PULSE_JERK, not at once
@@ -248,7 +255,7 @@ class TestSteepDescent:
       floor = c.update(True, 9.0, 6.7, 2, pitch, False, LOWER, True, decoupled=False, last_accel=0.0)   # 20 mph, set 15
     own = coast_accel(2, 9.0, pitch)
     assert own > 0.6
-    assert abs(floor - own) < 1e-6, "the request must equal the car's own coast accel (no brake drag, no throttle)"
+    assert abs(floor - (own + C.DESCENT_MARGIN)) < 1e-6, "the request must be the car's own coast accel plus a whisper (no brake drag)"
 
   def test_cap_still_bounds_a_bad_estimate(self):
     c = _ctrl()
@@ -294,3 +301,145 @@ class TestSteepDescent:
     own = E.declutched_coast_accel(9.0, pitch)
     assert own > 1.0
     assert floor == min(own, C.COAST_CAP)
+
+
+class TestNoBrakeLightsOnTaps:
+  """Session 15 (route 0000005a + the two session 14 drives): the car's own COMPUTER_BRAKING flag (and the cluster's
+  brake lights, owner) came on at set-speed taps in non-ACC although the request was at the estimated coast. Measured:
+  the car arms its brakes inside ~0.25 m/s^2 of its own coast, and far more readily when the request falls fast."""
+
+  def _settle(self, c, v, gear, pitch, frames=400, **kw):
+    last = getattr(c, "_test_last", 0.0)                 # the request carries over between calls, as on the car
+    for _ in range(frames):
+      last = c.update(True, v, SET, gear, pitch, False, LOWER, True, decoupled=False, last_accel=last, **kw)
+    c._test_last = last
+    return last
+
+  def test_floor_sits_a_margin_above_the_coast(self):
+    c = _ctrl()
+    floor = self._settle(c, SET + 1.0, 4, 0.0)
+    ca = coast_accel(4, SET + 1.0, 0.0)
+    assert abs(floor - C.coast_floor(ca)) < 1e-6
+    assert 0.2 < floor - ca < 0.35                       # the measured band on the flat in the upper gears
+    assert floor < -0.1                                  # still a decel request
+
+  def test_margin_shape(self):
+    # more margin the harder the car coasts; a whisper at most above max(coast, 0)
+    assert abs(C.coast_margin(-0.35) - 0.24) < 1e-9 and abs(C.coast_margin(-0.55) - 0.32) < 1e-9
+    assert C.coast_margin(-2.0) == C.MARGIN_MAX and C.coast_margin(1.0) == C.MARGIN_MIN
+    xs = np.linspace(-1.5, 1.0, 251)
+    fl = np.array([C.coast_floor(float(x)) for x in xs])
+    assert (np.diff(fl) >= -1e-12).all()                              # monotonic, no jump anywhere
+    assert (fl >= xs + C.MARGIN_MIN - 1e-9)[xs < C.COAST_CAP - 0.1].all()   # always above the coast
+    assert (fl <= np.maximum(xs, 0.) + C.DESCENT_MARGIN + 1e-9).all()  # never powered beyond a whisper
+
+  def test_margin_never_asks_for_power_above_set(self):
+    # a gentle descent: the coast is -0.1; the floor stops at +DESCENT_MARGIN
+    c = _ctrl()
+    pitch = float(np.arcsin((coast_accel(4, SET + 1.0, 0.0) + 0.1) / E.G))
+    assert abs(coast_accel(4, SET + 1.0, pitch) + 0.1) < 1e-6
+    assert abs(self._settle(c, SET + 1.0, 4, pitch) - min(-0.1 + C.coast_margin(-0.1), C.DESCENT_MARGIN)) < 1e-6
+
+  def test_steep_descent_floor_is_the_coast_plus_a_whisper(self):
+    c = _ctrl()
+    ca = coast_accel(2, 9.0, -0.14)
+    assert ca > 0.3
+    assert abs(self._settle(c, 9.0, 2, -0.14) - (ca + C.DESCENT_MARGIN)) < 1e-6
+
+  def test_same_rule_on_a_climb(self):
+    # owner: "it should behave the same way as flat ground or on a decline" - no special case uphill
+    c = _ctrl()
+    floor = self._settle(c, SET + 1.0, 5, 0.08)
+    assert abs(floor - C.coast_floor(coast_accel(5, SET + 1.0, 0.08))) < 1e-6
+
+  def test_request_eases_below_zero(self):
+    # a tap: the plan wants -1.2 at once. From a +0.5 request the throttle may come off in one frame, but below 0 the
+    # request falls no faster than COAST_FALL_RATE
+    c = _ctrl()
+    out, last = [], 0.5
+    for _ in range(300):
+      floor = c.update(True, SET + 1.0, SET, 4, 0.0, False, LOWER, True, decoupled=False, last_accel=last)
+      last = max(-1.2, floor)                            # LongControl: the plan's request, clipped at the lower limit
+      out.append(last)
+    assert -C.COAST_FALL_RATE * DT - 1e-9 <= out[0] <= 0.0
+    assert min(b - a for a, b in zip(out, out[1:], strict=False)) >= -C.COAST_FALL_RATE * DT - 1e-9
+    assert abs(out[-1] - C.coast_floor(coast_accel(4, SET + 1.0, 0.0))) < 1e-6
+
+  def test_computer_braking_flag_raises_the_floor(self):
+    c = _ctrl()
+    base = self._settle(c, SET + 1.0, 4, 0.0)
+    up = self._settle(c, SET + 1.0, 4, 0.0, frames=10, computer_braking=True)
+    assert abs((up - base) - C.TRIM_RISE * 10 * DT) < 1e-6          # rises at TRIM_RISE while the car says it brakes
+    top = self._settle(c, SET + 1.0, 4, 0.0, frames=200, computer_braking=True)
+    assert abs(top - (base + C.TRIM_MAX)) < 1e-6 and c.trim == C.TRIM_MAX   # bounded
+    after = self._settle(c, SET + 1.0, 4, 0.0, frames=100)
+    assert abs(c.trim - (C.TRIM_MAX - C.TRIM_DECAY * 1.0)) < 1e-6   # and fades slowly once the flag is off
+    assert after <= top + 1e-9
+
+  def test_flag_during_and_just_after_a_pulse_does_not_trim(self):
+    c = _ctrl()
+    self._settle(c, SET + C.DEFAULT_TRIGGER + 0.5, 4, -0.08, frames=100, computer_braking=True)
+    assert c.state == C.PULSING and c.trim == 0.0
+    self._settle(c, SET + 1.0, 4, -0.08, frames=int(C.TRIM_HOLDOFF / DT) - 5, computer_braking=True)
+    assert c.state == C.COASTING and c.trim == 0.0                  # the car is still releasing real braking
+    self._settle(c, SET + 1.0, 4, -0.08, frames=20, computer_braking=True)
+    assert c.trim > 0.0
+
+  def test_one_stale_frame_at_set_does_not_pulse(self):
+    # 648.6 s on route 0000005a: SET pressed at 52 mph with the previous set speed (42) still in the first frame
+    c = _ctrl()
+    c.update(False, SET, SET - 4.7, 5, -0.064, False, LOWER, True, decoupled=False, last_accel=0.0)
+    first = c.update(True, SET, SET - 4.7, 5, -0.064, False, LOWER, True, decoupled=False, last_accel=0.0)
+    assert c.state == C.COASTING and first > -0.05
+    floors = [c.update(True, SET, SET, 5, -0.064, False, LOWER, True, decoupled=False, last_accel=0.0) for _ in range(20)]
+    assert c.state == C.COASTING and min(floors) > -0.05, "the floor was seeded from a one-frame pulse"
+
+
+class TestAccModeCoast:
+  """Owner 2026-11-06: "adaptive cruise should have the same coast to set speed and brake only if necessary", always
+  active. In the car's ACC mode the floor applies only up to what the lead / e2e plan asks for."""
+
+  def test_no_lead_plan_known_means_no_floor(self):
+    c = _ctrl()
+    assert c.update(True, SET + 2.0, SET, 4, 0.0, False, LOWER, False, last_accel=0.0) == LOWER
+    assert c.update(True, SET + 2.0, SET, 4, 0.0, False, LOWER, False, last_accel=0.0, lead_accel_limit=float("nan")) == LOWER
+
+  def test_free_road_coasts_like_non_acc(self):
+    acc, na = _ctrl(), _ctrl()
+    a = n = 0.0
+    for _ in range(400):
+      a = acc.update(True, SET + 2.0, SET, 4, 0.0, False, LOWER, False, last_accel=a, lead_accel_limit=1.5)
+      n = na.update(True, SET + 2.0, SET, 4, 0.0, False, LOWER, True, last_accel=n)
+    assert abs(a - n) < 1e-9 and abs(a - C.coast_floor(coast_accel(4, SET + 2.0, 0.0))) < 1e-6
+    assert not acc.mode.active                            # the HUD's NON-ACC label stays the car's own mode
+
+  def test_lead_braking_passes_in_full_the_same_frame(self):
+    c = _ctrl()
+    last = 0.0
+    for _ in range(300):
+      last = c.update(True, SET + 2.0, SET, 4, 0.0, False, LOWER, False, last_accel=last, lead_accel_limit=1.5)
+    assert last > -0.3
+    assert c.update(True, SET + 2.0, SET, 4, 0.0, False, LOWER, False, last_accel=last, lead_accel_limit=-2.0) == -2.0
+    assert c.update(True, SET + 2.0, SET, 4, 0.0, False, LOWER, False, last_accel=-2.0, lead_accel_limit=-3.6) == LOWER
+
+  def test_mild_lead_decel_is_the_ceiling_of_the_floor(self):
+    # the lead plan wants -0.3, the set speed wants -1.2: the request may not be gentler than -0.3
+    c = _ctrl()
+    last = 0.0
+    for _ in range(300):
+      last = max(-1.2, c.update(True, SET + 2.0, SET, 4, 0.0, False, LOWER, False, last_accel=last, lead_accel_limit=-0.3))
+    assert abs(last + 0.3) < 1e-6
+
+  def test_sawtooth_and_force_decel_as_in_non_acc(self):
+    c = _ctrl()
+    last = 0.0
+    for _ in range(200):
+      last = c.update(True, SET + C.DEFAULT_TRIGGER + 0.5, SET, 4, -0.08, False, LOWER, False, last_accel=last, lead_accel_limit=1.5)
+    assert c.state == C.PULSING and last <= C.PULSE_DECEL + 1e-6
+    assert c.update(True, SET + 2.0, SET, 4, 0.0, True, LOWER, False, last_accel=last, lead_accel_limit=1.5) == LOWER
+
+  def test_automatic_or_stock_long_never_gets_it(self):
+    CP = CarInterface.get_non_essential_params(CAR.HONDA_CIVIC)
+    CP.openpilotLongitudinalControl = False
+    c = C.NonAccController(CP, DT)
+    assert c.update(True, SET + 2.0, SET, 4, 0.0, False, LOWER, False, last_accel=0.0, lead_accel_limit=1.5) == LOWER

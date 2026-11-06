@@ -103,3 +103,54 @@ class TestWiring:
   def test_toggle_defaults_on(self):
     from openpilot.common.params import Params
     assert Params().get("NonAccApproachWarning", return_default=True) is True
+
+
+class TestSession15:
+  """Owner 2026-11-06 after the first drive with it: "increase it by 10 %, it's a little too tight. Suppress it if the
+  gap is holding or increasing." """
+
+  def test_distance_is_ten_percent_longer(self):
+    assert A.FRACTION == pytest.approx(0.55)
+    v, vl = 61 * MPH, 58 * MPH
+    edge = 0.5 * A.acc_closest_gap(v, vl)
+    assert A.too_close(v, edge * 1.09, vl, vl - v) and not A.too_close(v, edge * 1.11, vl, vl - v)
+
+  def test_holding_a_close_gap_with_a_noisy_lead_speed_stays_quiet(self):
+    # 1513-1536 s on route 0000005a: a steady 0.6 s gap at 66 mph; the vision vRel jumped +-3 m/s frame to frame and
+    # the raw value kept the text up for 14 s. The gap is not closing: no warning.
+    w = A.ApproachWarning(DT)
+    v = 66 * MPH
+    out = [w.update(True, v, True, 18.0, v, (-3.0 if k % 2 else 3.0), 0.99) for k in range(int(20.0 / DT))]
+    assert not any(out)
+
+  def test_warning_ends_as_soon_as_the_gap_opens(self):
+    w = A.ApproachWarning(DT)
+    _run(w, 1.5)                                   # closing 2 m/s inside the distance
+    assert w.warning
+    out = [w.update(True, 24.0, True, 20.0, 25.5, 1.5, 0.99) for _ in range(int(6.0 / DT))]   # still close, now opening
+    shown = sum(out) * DT
+    assert not out[-1] and shown < A.MIN_SHOW + A.CLOSING_TAU + 1.0   # gone well before a lead that stays close would clear it
+
+  def test_real_closing_through_noise_still_warns(self):
+    w = A.ApproachWarning(DT)
+    out = [w.update(True, 24.0, True, 20.0, 22.0, -2.0 + (2.5 if k % 2 else -2.5), 0.99) for k in range(int(3.0 / DT))]
+    assert out[-1]
+
+  def test_a_new_lead_starts_its_own_estimate(self):
+    w = A.ApproachWarning(DT)
+    for _ in range(40):
+      w.update(True, 24.0, True, 20.0, 27.0, 3.0, 0.99)          # a lead pulling away
+    w.update(True, 24.0, False, 0.0, 0.0, 0.0, 0.0)              # lost
+    out = _run(w, 0.6)                                           # a new lead, closing: not held back by the old estimate
+    assert out[-1]
+
+  def test_handback_notification_is_wired(self):
+    # owner 2026-11-06: the handback gave no chime and no text (sunnypilot's MADS strips speedTooLow); the earlier
+    # build's notification is back
+    from openpilot.sunnypilot.selfdrive.selfdrived.events import EVENTS_SP, EventNameSP
+    from openpilot.selfdrive.selfdrived.events import ET, AudibleAlert, Priority
+    alerts = EVENTS_SP[EventNameSP.manualLowSpeedHandback]
+    assert list(alerts) == [ET.WARNING]
+    a = alerts[ET.WARNING]
+    assert a.alert_text_1 == "Low Speed: Take Over" and a.audible_alert == AudibleAlert.prompt
+    assert a.priority < Priority.HIGHEST           # never replaces or masks FCW

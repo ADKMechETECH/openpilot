@@ -204,6 +204,10 @@ struct LongitudinalPlanSP @0xf35cc4560bbf6ec2 {
   aTarget @5 :Float32;
   events @6 :List(OnroadEventSP.Event);
   e2eAlerts @7 :E2eAlerts;
+  # fork-only (civic-cruise): the accel the plan asks for with the set speed left out (lead MPC, e2e; the minimum
+  # accel while sunnypilot's own speed targets or a stop are in play). controlsd's coast floor in the car's ACC mode
+  # is never raised above it. Ordinal may collide on a future sunnypilot rebase.
+  accelNoSetSpeed @8 :Float32;
 
   struct DynamicExperimentalControl {
     state @0 :DynamicExperimentalControlState;
@@ -355,6 +359,7 @@ struct OnroadEventSP @0xda96579883444c35 {
     laneChangeRoadEdge @24;
     bigModelReady @25;
     nonAccApproach @26;   # fork-only (civic-cruise): closing on a lead in non-ACC (warning only)
+    manualLowSpeedHandback @27;   # fork-only (civic-cruise): the manual low-speed handback is handing the pedals back
   }
 }
 
@@ -476,6 +481,10 @@ struct CarStateSP @0xb86e6369214c01c8 {
   # fork-only: the engine's own axle-torque estimate, N*m (negative = engine braking), NaN when not alive. Engine side
   # only - never includes the service brakes.
   engineTorqueAxle @4 :Float32;
+  # fork-only: the car's own "brakes applied for the computer" flag (Honda VSA_STATUS.COMPUTER_BRAKING, 0x1A4 bit 23).
+  # On whenever the VSA arms / applies the service brakes for an ACC request (the cluster shows the brake lights);
+  # never on under the driver's own pedal. Session 15, 2026-11-06.
+  computerBraking @5 :Bool;
 }
 
 struct LiveMapDataSP @0xf416ec09499d9d19 {

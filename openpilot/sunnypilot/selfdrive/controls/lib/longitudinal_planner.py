@@ -52,6 +52,10 @@ class LongitudinalPlannerSP:
     # fork-only (civic-cruise, Task 16 port): gas-override re-surge guard (always on for manuals)
     self.gas_override_reset = False
 
+    # fork-only (civic-cruise): the plan's accel with the set speed left out (see update_accel_no_set_speed). The
+    # default is the minimum accel = "no floor": nothing is assumed until the planner has run.
+    self.accel_no_set_speed = -10.
+
     # fork-only (civic-cruise): non-ACC approach warning (chime + text only; owner 2026-11-06, default ON)
     self.approach = ApproachWarning(DT_MDL)
     self._approach_params = Params()
@@ -126,6 +130,16 @@ class LongitudinalPlannerSP:
     self.update_eb_learner(sm)
     self.update_approach_warning(sm)
 
+  def update_accel_no_set_speed(self, accels: list[float], should_stop: bool, accel_min: float, accel_max: float) -> None:
+    """fork-only (civic-cruise): what the plan asks for apart from the driver's set speed - the lead MPC and, in e2e,
+    the model. controlsd's ACC-mode coast floor is never raised above this, so braking for a lead passes in full.
+    The minimum accel (= no floor) whenever a stop is wanted or sunnypilot's own speed targets (curves, speed limit)
+    are what limits the speed, and in non-ACC, where the list is empty and the bound is not used."""
+    if not accels or should_stop or self.source != LongitudinalPlanSource.cruise:
+      self.accel_no_set_speed = float(accel_min)
+    else:
+      self.accel_no_set_speed = float(min(max(min(accels), accel_min), accel_max))
+
   def update_approach_warning(self, sm: messaging.SubMaster) -> None:
     # fork-only (civic-cruise): warn (never act) when non-ACC cruise is closing inside half of ACC's closest gap.
     if self._approach_frame % int(1. / DT_MDL) == 0:
@@ -162,6 +176,7 @@ class LongitudinalPlannerSP:
     longitudinalPlanSP.longitudinalPlanSource = self.source
     longitudinalPlanSP.vTarget = float(self.output_v_target)
     longitudinalPlanSP.aTarget = float(self.output_a_target)
+    longitudinalPlanSP.accelNoSetSpeed = float(self.accel_no_set_speed)
     longitudinalPlanSP.events = self.events_sp.to_msg()
 
     # Dynamic Experimental Control
