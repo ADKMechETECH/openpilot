@@ -146,6 +146,7 @@ class NonAccController:
     self.hold_band = 1.8     # m/s
     self.hold_bias = 0.5
     self.upper_cap = None    # an upper accel limit the hold asks controlsd to apply (None = none)
+    self._vset_prev = 0.0
     self._over_t = 0.0       # s the overspeed has been above the trigger
     self._since_pulse = TRIM_HOLDOFF
     self.learned = load_applied(self._params)   # applied learned engine-brake table (from the learner in plannerd)
@@ -260,7 +261,9 @@ class NonAccController:
         lo = v_set - (1. - self.hold_bias) * self.hold_band
         if self.hold == HOLD_OFF:
           self.hold = HOLD_DRIVING if v_ego < 0.5 * (lo + hi) else HOLD_COASTING
-        elif self.hold == HOLD_DRIVING and v_ego >= hi:
+        elif self.hold == HOLD_DRIVING and (v_ego >= hi or v_set < self._vset_prev - 0.05):
+          # the top of the band, or the driver tapped the set speed down (owner 2026-11-06: "a tap down on speed should
+          # cancel that accel command immediately"): coast now
           self.hold = HOLD_COASTING
         elif self.hold == HOLD_COASTING and v_ego <= lo:
           self.hold = HOLD_DRIVING
@@ -279,6 +282,7 @@ class NonAccController:
       seed = lower_limit if last_accel is None else max(lower_limit, float(last_accel))
       self.floor_cmd = min(target, seed)
       self._aside = False
+    self._vset_prev = v_set
     step = (HOLD_JERK if self.hold != HOLD_OFF else PULSE_JERK) * self.dt
     self.floor_cmd = float(np.clip(target, self.floor_cmd - step, self.floor_cmd + step))
     if self.upper_cap is not None:

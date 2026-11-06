@@ -539,3 +539,21 @@ class TestLowSpeedHold:
     assert abs(c.hold_band - C.HOLD_BAND_RANGE[1]) < 1e-9 and c.hold_bias == 1.0
     Params().put("NonAccHoldBand", 4.0, block=True)
     Params().put("NonAccHoldBias", 0.5, block=True)
+
+  def test_a_tap_down_ends_the_driving_phase_at_once(self):
+    # owner 2026-11-06: "a tap down on speed should cancel that accel command immediately"
+    from openpilot.common.params import Params
+    c = _ctrl()
+    Params().put("NonAccHoldBias", 1.0, block=True)
+    c._read_params()
+    pitch = float(np.arcsin((coast_accel(4, SET, 0.0) + 0.25) / E.G))      # a slight descent: inside the hole
+    last = 0.0
+    for _ in range(300):
+      last = c.update(True, SET + 0.3, SET, 4, pitch, False, LOWER, True, decoupled=False, last_accel=last)
+    assert c.hold == C.HOLD_DRIVING and last > 0.2                        # driving the speed up through the band
+    floor = c.update(True, SET + 0.3, SET - 0.45, 4, pitch, False, LOWER, True, decoupled=False, last_accel=last)   # one click down
+    assert c.hold == C.HOLD_COASTING and c.upper_cap is not None
+    for _ in range(200):
+      floor = c.update(True, SET + 0.3, SET - 0.45, 4, pitch, False, LOWER, True, decoupled=False, last_accel=floor)
+    assert floor < 0.1 and c.hold == C.HOLD_COASTING                      # pinned on the coasting side
+    Params().put("NonAccHoldBias", 0.5, block=True)
