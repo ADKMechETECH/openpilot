@@ -5,7 +5,8 @@ Only ever RAISES LongControl's lower accel limit (never lowers it), and only abo
 1b/1c/1d of the non-ACC mode:
   - COASTING (set < v < set + trigger): raise the lower limit to the brake-free floor so the car prefers engine braking
     and the service brakes stay off. On the flat this engine-brakes back to set; on a descent steeper than engine
-    braking it drifts up toward the trigger (the brakes never join).
+    braking it drifts up toward the trigger (the brakes never join: the request is the car's own coast accel, positive
+    on such a descent, up to COAST_CAP).
   - PULSING (v >= set + trigger): a firm but bounded brake (PULSE_DECEL, ramped at PULSE_JERK) down to within RELEASE
     (3 mph) of set, then release -> back to COASTING. Repeats = sawtooth.
   - Steps aside (returns the incoming limit unchanged -> stock/plan braking) on: forceDecel, above the hard ceiling,
@@ -36,7 +37,13 @@ RELEASE = 1.34            # m/s over set (~3 mph): release the pulse (goal 1d "w
 HARD_CEILING = 6.7       # m/s over set (~15 mph): stop clamping, full plan braking + alert
 PULSE_DECEL = -1.0       # m/s^2: firm but not aggressive
 PULSE_JERK = 1.5         # m/s^3: smooth pulse on/off
-COAST_CAP = 0.3          # m/s^2: cap the (downhill) coast-follow request so a bad estimate can't demand real throttle
+# m/s^2: upper bound on the (downhill) coast-follow request. Was 0.3 until session 14: on the 12-17 % descent in 2nd the
+# car's own closed-throttle accel was above that, so the VSA braked all the way down to hold the request at +0.3 and the
+# sawtooth pulses came on top (grade-corrected decel 0.9-1.4 m/s^2 against 0.73 from brake-free coasts). Owner
+# 2026-11-06: send the car's real coast accel - brakes fully off between pulses, the car reaches the trigger sooner,
+# one firm pulse, coast again. 1.0 covers ~17 % in 2nd and ~15 % in the upper gears and still bounds a bad pitch /
+# table estimate (a request above the true coast is a whisper of throttle, bounded by the sawtooth trigger).
+COAST_CAP = 1.0
 MIN_SPEED = 2.0          # m/s: below this the coast estimate is unreliable, step aside
 DEFAULT_TRIGGER = 3.6    # m/s over set (~8 mph): start the firm brake pulse (user-settable)
 TRIGGER_MIN = RELEASE + 0.5

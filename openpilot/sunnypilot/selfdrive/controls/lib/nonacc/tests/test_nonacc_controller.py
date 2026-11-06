@@ -234,3 +234,49 @@ class TestFloorContinuity:
     assert np.abs(np.diff(cmds)).max() <= 0.05, "the command stepped at the clutch"
     assert (cmds[100:] >= np.minimum(own[100:], 0.0) - 0.02).all(), "a request below the car's own accel = brakes"
     assert cmds.min() > -0.2, f"brake request during the shift: {cmds.min():+.2f}"
+
+
+class TestSteepDescent:
+  """Session 14: with the coast request capped at +0.3 the VSA braked between the sawtooth pulses on a 12-17 % descent
+  in 2nd. Owner 2026-11-06: send the car's real coast accel."""
+
+  def test_floor_is_the_real_coast_accel_on_a_steep_descent(self):
+    c = _ctrl()
+    pitch = -0.149            # ~15 %
+    for _ in range(300):
+      floor = c.update(True, 9.0, 6.7, 2, pitch, False, LOWER, True, decoupled=False, last_accel=0.0)   # 20 mph, set 15
+    own = coast_accel(2, 9.0, pitch)
+    assert own > 0.6
+    assert abs(floor - own) < 1e-6, "the request must equal the car's own coast accel (no brake drag, no throttle)"
+
+  def test_cap_still_bounds_a_bad_estimate(self):
+    c = _ctrl()
+    for _ in range(300):
+      floor = c.update(True, 20.0, 19.0, 4, -0.5, False, LOWER, True, decoupled=False, last_accel=0.0)   # a wild pitch
+    assert floor == C.COAST_CAP
+    assert 0.9 <= C.COAST_CAP <= 1.2
+
+  def test_steep_descent_sawtooths_without_riding_the_brakes(self):
+    # closed loop on a 15 % descent in 2nd: between pulses the request is the coast accel itself
+    c = _ctrl()
+    v, v_set, pitch = 6.7, 6.7, -0.149
+    cmds, own, pulsing = [], [], []
+    cmd = 0.0
+    for _ in range(int(60 / DT)):
+      floor = c.update(True, v, v_set, 2, pitch, False, LOWER, True, decoupled=False, last_accel=cmd)
+      cmd = float(np.clip(np.clip(v_set - v, -1.2, 1.5), floor, 1.5))
+      o = coast_accel(2, v, pitch)
+      v = max(0.0, v + min(cmd, o) * DT)            # the car cannot out-accelerate its own coast without throttle
+      cmds.append(cmd)
+      own.append(o)
+      pulsing.append(c.state == C.PULSING)
+    cmds, own, pulsing = np.array(cmds), np.array(own), np.array(pulsing)
+    assert pulsing.any() and (~pulsing).any()
+    settled = ~pulsing & (np.arange(len(cmds)) > 300)
+    ramp = np.zeros(len(cmds), bool)                 # the release ramp after each pulse is not coasting yet
+    ends = np.flatnonzero(pulsing[:-1] & ~pulsing[1:])
+    for e in ends:
+      ramp[e:e + int(2.0 / DT)] = True
+    coasting = settled & ~ramp
+    assert coasting.sum() > 500
+    assert (cmds[coasting] >= own[coasting] - 0.02).all(), "request below the car's own coast between pulses = brakes"
