@@ -24,6 +24,9 @@ def _ctrl():
   # car's own conventional-cruise mode (carState.cruiseState.nonAdaptive) - True in these tests unless stated.
   CP = CarInterface.get_non_essential_params(CAR.HONDA_CIVIC)
   CP.openpilotLongitudinalControl = True
+  from openpilot.common.params import Params
+  Params().put("NonAccHoldBand", 4.0, block=True)      # the defaults, whatever an earlier test left behind
+  Params().put("NonAccHoldBias", 0.5, block=True)
   return C.NonAccController(CP, DT)
 
 
@@ -33,7 +36,9 @@ class TestStepAside:
     # floor is <= 0 - it only caps braking, never forces throttle, so it can't interfere with accelerating to set.
     c = _ctrl()
     floor = c.update(True, SET - 2.0, SET, 4, 0.0, False, LOWER, True)
-    assert LOWER < floor <= 0.0
+    assert c.hold == C.HOLD_OFF and LOWER < floor <= 0.0
+    # (inside the PCM's fuel-cut hole - a slight descent - the low-speed hold's DRIVING side is a light throttle
+    # floor by design; see TestLowSpeedHold)
 
   def test_force_decel_steps_aside(self):
     c = _ctrl()
@@ -79,7 +84,7 @@ class TestFloorAndSawtooth:
   def test_flat_coast_floor_is_engine_brake(self):
     # just over set on the flat: raise the lower limit to the brake-free floor (negative, engine braking)
     c = _ctrl()
-    floor = c.update(True, SET + 1.0, SET, 4, 0.0, False, LOWER, True)
+    floor = c.update(True, SET + 1.0, SET, 3, 0.0, False, LOWER, True)   # 3rd: outside the fuel-cut hole
     assert LOWER < floor < 0.0
     assert c.state == C.COASTING
 
@@ -317,9 +322,9 @@ class TestNoBrakeLightsOnTaps:
 
   def test_floor_sits_a_margin_above_the_coast(self):
     c = _ctrl()
-    floor = self._settle(c, SET + 1.0, 4, 0.0)
-    ca = coast_accel(4, SET + 1.0, 0.0)
-    assert abs(floor - C.coast_floor(ca)) < 1e-6
+    floor = self._settle(c, SET + 1.0, 3, 0.0)           # 3rd: outside the fuel-cut hole, the plain floor applies
+    ca = coast_accel(3, SET + 1.0, 0.0)
+    assert c.hold == C.HOLD_OFF and abs(floor - C.coast_floor(ca)) < 1e-6
     assert 0.2 < floor - ca < 0.35                       # the measured band on the flat in the upper gears
     assert floor < -0.1                                  # still a decel request
 
@@ -334,11 +339,13 @@ class TestNoBrakeLightsOnTaps:
     assert (fl <= np.maximum(xs, 0.) + C.DESCENT_MARGIN + 1e-9).all()  # never powered beyond a whisper
 
   def test_margin_never_asks_for_power_above_set(self):
-    # a gentle descent: the coast is -0.1; the floor stops at +DESCENT_MARGIN
+    # a gentle descent: the coast is -0.1 - that is inside the fuel-cut hole, so the low-speed hold runs; 1 m/s over
+    # set is above its band: COASTING, the request pinned at coast + HOLD_COAST (the plain floor would be +0.04)
     c = _ctrl()
     pitch = float(np.arcsin((coast_accel(4, SET + 1.0, 0.0) + 0.1) / E.G))
     assert abs(coast_accel(4, SET + 1.0, pitch) + 0.1) < 1e-6
-    assert abs(self._settle(c, SET + 1.0, 4, pitch) - min(-0.1 + C.coast_margin(-0.1), C.DESCENT_MARGIN)) < 1e-6
+    assert abs(self._settle(c, SET + 1.0, 4, pitch) - (-0.1 + C.HOLD_COAST)) < 1e-6 and c.hold == C.HOLD_COASTING
+    assert c.upper_cap is not None and abs(c.upper_cap - (-0.1 + C.HOLD_COAST)) < 1e-6
 
   def test_steep_descent_floor_is_the_coast_plus_a_whisper(self):
     c = _ctrl()
@@ -358,21 +365,21 @@ class TestNoBrakeLightsOnTaps:
     c = _ctrl()
     out, last = [], 0.5
     for _ in range(300):
-      floor = c.update(True, SET + 1.0, SET, 4, 0.0, False, LOWER, True, decoupled=False, last_accel=last)
+      floor = c.update(True, SET + 1.0, SET, 3, 0.0, False, LOWER, True, decoupled=False, last_accel=last)
       last = max(-1.2, floor)                            # LongControl: the plan's request, clipped at the lower limit
       out.append(last)
     assert -C.COAST_FALL_RATE * DT - 1e-9 <= out[0] <= 0.0
     assert min(b - a for a, b in zip(out, out[1:], strict=False)) >= -C.COAST_FALL_RATE * DT - 1e-9
-    assert abs(out[-1] - C.coast_floor(coast_accel(4, SET + 1.0, 0.0))) < 1e-6
+    assert abs(out[-1] - C.coast_floor(coast_accel(3, SET + 1.0, 0.0))) < 1e-6
 
   def test_computer_braking_flag_raises_the_floor(self):
     c = _ctrl()
-    base = self._settle(c, SET + 1.0, 4, 0.0)
-    up = self._settle(c, SET + 1.0, 4, 0.0, frames=10, computer_braking=True)
+    base = self._settle(c, SET + 1.0, 3, 0.0)
+    up = self._settle(c, SET + 1.0, 3, 0.0, frames=10, computer_braking=True)
     assert abs((up - base) - C.TRIM_RISE * 10 * DT) < 1e-6          # rises at TRIM_RISE while the car says it brakes
-    top = self._settle(c, SET + 1.0, 4, 0.0, frames=200, computer_braking=True)
+    top = self._settle(c, SET + 1.0, 3, 0.0, frames=200, computer_braking=True)
     assert abs(top - (base + C.TRIM_MAX)) < 1e-6 and c.trim == C.TRIM_MAX   # bounded
-    after = self._settle(c, SET + 1.0, 4, 0.0, frames=100)
+    after = self._settle(c, SET + 1.0, 3, 0.0, frames=100)
     assert abs(c.trim - (C.TRIM_MAX - C.TRIM_DECAY * 1.0)) < 1e-6   # and fades slowly once the flag is off
     assert after <= top + 1e-9
 
@@ -408,9 +415,9 @@ class TestAccModeCoast:
     acc, na = _ctrl(), _ctrl()
     a = n = 0.0
     for _ in range(400):
-      a = acc.update(True, SET + 2.0, SET, 4, 0.0, False, LOWER, False, last_accel=a, lead_accel_limit=1.5)
-      n = na.update(True, SET + 2.0, SET, 4, 0.0, False, LOWER, True, last_accel=n)
-    assert abs(a - n) < 1e-9 and abs(a - C.coast_floor(coast_accel(4, SET + 2.0, 0.0))) < 1e-6
+      a = acc.update(True, SET + 2.0, SET, 3, 0.0, False, LOWER, False, last_accel=a, lead_accel_limit=1.5)
+      n = na.update(True, SET + 2.0, SET, 3, 0.0, False, LOWER, True, last_accel=n)
+    assert abs(a - n) < 1e-9 and abs(a - C.coast_floor(coast_accel(3, SET + 2.0, 0.0))) < 1e-6
     assert not acc.mode.active                            # the HUD's NON-ACC label stays the car's own mode
 
   def test_lead_braking_passes_in_full_the_same_frame(self):
@@ -443,3 +450,92 @@ class TestAccModeCoast:
     CP.openpilotLongitudinalControl = False
     c = C.NonAccController(CP, DT)
     assert c.update(True, SET + 2.0, SET, 4, 0.0, False, LOWER, False, last_accel=0.0, lead_accel_limit=1.5) == LOWER
+
+
+class TestLowSpeedHold:
+  """Session 15 (owner: "low speed non-ACC is twitchy on and off the throttle at lower speeds"): the PCM cuts fuel below
+  about coast + 0.35 and re-fuels only above coast + 0.5, so where holding speed needs something in between the speed
+  loop hunted across the edge every 2-3 s. The hold keeps the speed in a band instead. A/B on the road:
+  NonAccHoldBand (mph) and NonAccHoldBias (0.5 centred / 1.0 all above set)."""
+
+  def _sim(self, hold_margin, secs=90.0, band=4.0, bias=0.5, hole=True, v0=None, plan_is_cruise=True):
+    """A car with the fuel-cut hole. hold_margin = what the engine must add over a closed throttle to hold speed."""
+    from openpilot.common.params import Params
+    c = _ctrl()
+    P = Params()
+    P.put("NonAccHoldBand", float(band), block=True)
+    P.put("NonAccHoldBias", float(bias), block=True)
+    c._read_params()
+    if not hole:
+      c.hold_band = 0.0
+    gear, pitch = 4, 0.0
+    ca_flat = coast_accel(gear, SET, 0.0)
+    pitch = float(np.arcsin((ca_flat + hold_margin) / E.G))      # sets the coast to -hold_margin
+    v = SET if v0 is None else v0
+    cmd, fuelled = 0.0, True
+    vs, cmds, fuel = [], [], []
+    for _ in range(int(secs / DT)):
+      ca = coast_accel(gear, v, pitch)
+      a_plan = float(np.clip(1.0 * (SET - v), -1.2, 1.2))
+      lower = c.update(True, v, SET, gear, pitch, False, LOWER, True, decoupled=False, last_accel=cmd, plan_is_cruise=plan_is_cruise)
+      if not hole:
+        c.hold, c.upper_cap = C.HOLD_OFF, None
+      upper = 2.0 if c.upper_cap is None else min(2.0, c.upper_cap)
+      cmd = float(np.clip(a_plan, lower, max(upper, lower)))
+      if fuelled and cmd < ca + 0.35:
+        fuelled = False
+      elif not fuelled and cmd >= ca + 0.50:
+        fuelled = True
+      a = cmd if fuelled else ca
+      v += a * DT
+      vs.append(v)
+      cmds.append(cmd)
+      fuel.append(fuelled)
+    vs, fuel = np.array(vs), np.array(fuel)
+    cuts = int(((~fuel[1:]) & fuel[:-1]).sum())
+    return vs, np.array(cmds), cuts, c
+
+  def test_without_the_hold_the_speed_loop_hunts(self):
+    vs, cmds, cuts, _ = self._sim(0.25, hole=False)
+    assert cuts >= 10, f"the model car should hunt at the fuel-cut edge: {cuts} cuts in 90 s"
+
+  def test_hold_turns_the_hunt_into_a_slow_band(self):
+    vs0, _, cuts0, _ = self._sim(0.25, hole=False)
+    vs, cmds, cuts, c = self._sim(0.25)
+    assert cuts <= cuts0 / 3, f"{cuts} cuts vs {cuts0} without the hold"
+    assert cuts >= 2                                                  # it does alternate: no steady state exists here
+    assert vs[1000:].min() > SET - 2.6 * 0.44704 and vs[1000:].max() < SET + 2.6 * 0.44704   # within the 4 mph band (+ ramp lag)
+    assert c.hold in (C.HOLD_DRIVING, C.HOLD_COASTING)
+
+  def test_bias_puts_the_band_above_set(self):
+    vs, _, cuts, _ = self._sim(0.25, bias=1.0)
+    assert vs[1000:].min() > SET - 0.6 * 0.44704 and vs[1000:].max() < SET + 4.6 * 0.44704
+    assert cuts >= 1
+
+  def test_coasting_side_is_pinned_at_coast_plus_hold_coast(self):
+    vs, cmds, _, c = self._sim(0.25, secs=30.0, v0=SET + 1.0)
+    pitch = float(np.arcsin((coast_accel(4, SET, 0.0) + 0.25) / E.G))
+    ca = coast_accel(4, SET, pitch)
+    coasting = cmds < ca + 0.45                      # below the car's re-fuel point: the coasting side
+    assert coasting.any()
+    assert abs(np.median(cmds[coasting]) - (ca + C.HOLD_COAST)) < 0.05
+
+  def test_outside_the_hole_the_hold_is_off(self):
+    _, _, _, c = self._sim(0.70, secs=10.0)       # a climb: the engine has plenty to do
+    assert c.hold == C.HOLD_OFF
+    _, _, _, c = self._sim(-0.20, secs=10.0)      # a descent the car speeds up on: the sawtooth's business
+    assert c.hold == C.HOLD_OFF
+
+  def test_lead_limited_plan_gets_no_drive_floor(self):
+    _, cmds, _, c = self._sim(0.25, secs=10.0, plan_is_cruise=False)
+    assert c.hold == C.HOLD_OFF and c.upper_cap is None
+
+  def test_band_params_are_clamped_and_live(self):
+    from openpilot.common.params import Params
+    c = _ctrl()
+    Params().put("NonAccHoldBand", 20.0, block=True)
+    Params().put("NonAccHoldBias", 3.0, block=True)
+    c._read_params()                                   # the controller re-reads at 1 Hz on the car
+    assert abs(c.hold_band - C.HOLD_BAND_RANGE[1]) < 1e-9 and c.hold_bias == 1.0
+    Params().put("NonAccHoldBand", 4.0, block=True)
+    Params().put("NonAccHoldBias", 0.5, block=True)

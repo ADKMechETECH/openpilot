@@ -324,6 +324,10 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"NonAccApproachWarning", {PERSISTENT | BACKUP, BOOL, "1"}},
     // fork-only (civic-cruise): m/s over set speed before the non-ACC sawtooth starts firm braking (user-settable, ~8 mph)
     {"NonAccOverspeedThreshold", {PERSISTENT | BACKUP, FLOAT, "3.6"}},
+    // fork-only (civic-cruise): low-speed hold (nonacc/controller.py): inside the PCM's fuel-cut hole, hold the speed in a
+    // band instead of hunting. Band width in mph; bias = share of the band above the set speed (0.5 centred, 1 all above).
+    {"NonAccHoldBand", {PERSISTENT | BACKUP, FLOAT, "4.0"}},
+    {"NonAccHoldBias", {PERSISTENT | BACKUP, FLOAT, "0.5"}},
     // fork-only (civic-cruise): learned per-gear engine-brake table (JSON), refined from brake-free coasts, applied live
     {"EngineBrakeLearnedTable", {PERSISTENT, STRING}},
     // fork-only (civic-cruise): clutch/shift gate (manual only) - cap the throttle while the clutch is in

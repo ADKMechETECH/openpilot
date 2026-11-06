@@ -92,9 +92,10 @@ class TestControllerRelease:
     return C.NonAccController(CP, 0.01)
 
   def test_engine_braking_only_while_the_bound_is_high(self):
+    # a lead limits the plan (plan_is_cruise False): the low-speed hold may not drive the speed up
     c, last = self._ctrl(), 0.0
     for _ in range(400):
-      last = max(-1.5, c.update(True, 25.0, 25.0, 5, 0.0, False, -3.5, False, last_accel=last, lead_accel_limit=2.0))
+      last = max(-1.5, c.update(True, 25.0, 25.0, 5, 0.0, False, -3.5, False, last_accel=last, lead_accel_limit=2.0, plan_is_cruise=False))
     assert -0.35 < last < -0.05                       # the plan wants -1.5 for the lead: held at the coast floor
 
   def test_allowed_braking_ramps_in(self):

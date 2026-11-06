@@ -52,6 +52,17 @@ Only ever RAISES LongControl's lower accel limit (never lowers it), and only abo
     under the car, which started a pulse for that one frame and seeded the floor at -1.0 for 0.8 s. The pulse now needs
     the overspeed for PULSE_CONFIRM.
 
+  - Low-speed hold (owner 2026-11-06, "low speed non-ACC is twitchy on and off the throttle"; A/B on the road):
+    the PCM cuts fuel whenever the request is within ~0.35 m/s^2 of the car's closed-throttle coast and re-fuels only
+    ~0.5 above it (analysis/session15/lowspeed_twitch.py), so what the car can deliver has a hole: full engine braking,
+    or >= ~0.5 above it. Where holding speed needs something inside the hole (a slight descent, a tall gear at low
+    speed) no steady state exists and the speed loop hunted across the edge every 2-3 s (6-19 throttle shut-offs a
+    minute at 35-55 mph, 0.2 above 60 mph). Inside the hole the controller now holds the speed in a band instead:
+    DRIVING (request pinned >= coast + HOLD_DRIVE, the engine stays fuelled, the speed rises) to the top of the band,
+    then COASTING (request pinned at coast + HOLD_COAST: fuel cut and stays cut, brakes not armed) to the bottom, and
+    so on - one clean transition per band crossing. NonAccHoldBand = the band in mph (default 4), NonAccHoldBias =
+    the share of it above the set speed (0.5 centred = "A", 1.0 all above set = "B"), both live.
+
 Leads: non-ACC ignores them by design (the driver brakes; FCW and the approach warning warn). In ACC mode the lead plan
 is the hard upper bound on this controller's floor.
 """
@@ -90,6 +101,14 @@ TRIM_DECAY = 0.03        # m/s^3: how fast that trim fades once the flag is off 
 TRIM_MAX = 0.25          # m/s^2
 TRIM_HOLDOFF = 1.5       # s after a pulse ends before the flag may trim (the car is still releasing real braking)
 PULSE_CONFIRM = 0.1      # s the overspeed must exceed the trigger before a pulse starts (one stale frame at SET)
+# low-speed hold (see above): m/s^2 above the estimated coast accel
+HOLE_ENTER = 0.35        # hold margin (engine braking + road load + grade) below which the car hunted (10 shut-offs/min under 0.30,
+HOLE_LEAVE = 0.45        # 2.6 at 0.30-0.45, none above); leave above this (hysteresis on the estimate)
+HOLD_COAST = 0.30        # coasting side: the PCM cuts fuel below ~0.35 and the brakes arm below ~0.25
+HOLD_DRIVE = 0.60        # driving side: the PCM re-fuels at ~0.5; the estimate is good to about +-0.08
+HOLD_JERK = 0.5          # m/s^3: the floor moves between the two sides at this rate
+HOLD_BAND_RANGE = (0.9, 2.7)   # m/s (2-6 mph)
+HOLD_OFF, HOLD_DRIVING, HOLD_COASTING = 0, 1, 2
 ACC_RELEASE_JERK = 2.5   # m/s^3: ACC mode, how fast the floor gives way to lead braking that has just been allowed
 ACC_HARD_BRAKE = -2.0    # m/s^2: ... unless the plan needs this much or more - then at once (acc_coast.HARD_BRAKE)
 MIN_SPEED = 2.0          # m/s: below this the coast estimate is unreliable, step aside
@@ -123,6 +142,10 @@ class NonAccController:
     self.floor_cmd = 0.0     # the ramped lower-limit the controller is requesting
     self._aside = False      # stepped aside last frame: the next active frame re-seeds floor_cmd
     self.trim = 0.0          # raised while the car reports COMPUTER_BRAKING outside a pulse
+    self.hold = HOLD_OFF     # low-speed hold state (published as nonAcc.holdState)
+    self.hold_band = 1.8     # m/s
+    self.hold_bias = 0.5
+    self.upper_cap = None    # an upper accel limit the hold asks controlsd to apply (None = none)
     self._over_t = 0.0       # s the overspeed has been above the trigger
     self._since_pulse = TRIM_HOLDOFF
     self.learned = load_applied(self._params)   # applied learned engine-brake table (from the learner in plannerd)
@@ -135,23 +158,32 @@ class NonAccController:
     if t is not None:
       self.trigger = float(np.clip(float(t), TRIGGER_MIN, TRIGGER_MAX))
     self.learned = load_applied(self._params)
+    b = self._params.get("NonAccHoldBand", return_default=True)
+    if b is not None:
+      self.hold_band = float(np.clip(float(b) * 0.44704, *HOLD_BAND_RANGE))
+    b = self._params.get("NonAccHoldBias", return_default=True)
+    if b is not None:
+      self.hold_bias = float(np.clip(float(b), 0., 1.))
 
   def _step_aside(self, lower_limit: float) -> float:
     self.floor_cmd = lower_limit
     self._aside = True
     self._over_t = 0.
+    self.hold = HOLD_OFF
+    self.upper_cap = None
     return lower_limit
 
   def update(self, long_active: bool, v_ego: float, v_set: float, gear, pitch, force_decel: bool,
              lower_limit: float, car_non_adaptive: bool, decoupled: bool = False,
              last_accel: float | None = None, lead_accel_limit: float | None = None,
-             computer_braking: bool = False) -> float:
+             computer_braking: bool = False, plan_is_cruise: bool = True) -> float:
     """decoupled: the drivetrain is decoupled AND the clutch signal is live (a real clutch-in / neutral, not a dead
     signal). last_accel: the accel LongControl commanded last frame (0 while longitudinal was inactive); None = unknown,
     then a resume ramps from the raw lower limit as it always did.
     lead_accel_limit: ACC mode only - the lowest accel the floor must let through (plannerd: longitudinalPlanSP.
     coastFloorBound). The floor is never raised above it; None = not known, then ACC mode gets no floor at all.
-    computer_braking: the car's own VSA_STATUS.COMPUTER_BRAKING flag."""
+    computer_braking: the car's own VSA_STATUS.COMPUTER_BRAKING flag.
+    plan_is_cruise: the plan is limited by the set speed (not a lead): the low-speed hold may drive the speed up."""
     if self._frame % self._read_period == 0:
       self._read_params()
     self._frame += 1
@@ -200,6 +232,8 @@ class NonAccController:
     if self.state == PULSING:
       target = PULSE_DECEL
       coast = None
+      self.hold = HOLD_OFF
+      self.upper_cap = None
     elif gear is None:
       # clutch in / neutral: no engine braking, the car rolls on road load + grade. The request is that accel itself,
       # clutch in or out (owner 2026-11-06: "what is required for no throttle and no brake, regardless of clutch"):
@@ -217,14 +251,38 @@ class NonAccController:
         self.trim = max(self.trim - TRIM_DECAY * self.dt, 0.)
       # the margin above the coast keeps the car's brakes un-armed; COAST_CAP bounds everything
       target = coast_floor(coast, self.trim, declutched=gear is None)
+      # low-speed hold: inside the PCM's fuel-cut hole hold the speed in a band instead of hunting at its edge
+      # the hole: the engine must add something, but less than it can deliver steadily. A coast that is itself >= 0
+      # (a descent the car speeds up on) is the sawtooth's business, not the hold's.
+      hole = 0. < -coast < (HOLE_LEAVE if self.hold != HOLD_OFF else HOLE_ENTER)
+      if hole and gear is not None and plan_is_cruise:
+        hi = min(v_set + self.hold_bias * self.hold_band, v_set + self.trigger - 0.5)
+        lo = v_set - (1. - self.hold_bias) * self.hold_band
+        if self.hold == HOLD_OFF:
+          self.hold = HOLD_DRIVING if v_ego < 0.5 * (lo + hi) else HOLD_COASTING
+        elif self.hold == HOLD_DRIVING and v_ego >= hi:
+          self.hold = HOLD_COASTING
+        elif self.hold == HOLD_COASTING and v_ego <= lo:
+          self.hold = HOLD_DRIVING
+        if self.hold == HOLD_DRIVING:
+          target = min(coast + HOLD_DRIVE + self.trim, COAST_CAP)
+          self.upper_cap = None
+        else:
+          target = min(coast + HOLD_COAST + self.trim, COAST_CAP)
+          self.upper_cap = target             # pinned: a plan request inside the hole would make the engine flutter
+      else:
+        self.hold = HOLD_OFF
+        self.upper_cap = None
     if self._aside:
       # back from a step-aside: restart from what was last commanded (never above the target), so the floor is there
       # at once after a gas override (last command 0) and real braking (ACC -> non-ACC) is still released on the ramp
       seed = lower_limit if last_accel is None else max(lower_limit, float(last_accel))
       self.floor_cmd = min(target, seed)
       self._aside = False
-    step = PULSE_JERK * self.dt
+    step = (HOLD_JERK if self.hold != HOLD_OFF else PULSE_JERK) * self.dt
     self.floor_cmd = float(np.clip(target, self.floor_cmd - step, self.floor_cmd + step))
+    if self.upper_cap is not None:
+      self.upper_cap = max(self.floor_cmd, self.upper_cap)   # the cap follows the ramp down, never below the floor
     floor = self.floor_cmd
     if self.state == COASTING and last_accel is not None:
       # ease the throttle shut: below 0 the request falls no faster than COAST_FALL_RATE (from 0 if it was above 0)

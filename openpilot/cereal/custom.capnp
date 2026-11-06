@@ -400,6 +400,8 @@ struct CarControlSP @0xa5cd762cd951a455 {
     pulsing @1 :Bool;       # the overspeed sawtooth is braking
     overspeed @2 :Float32;  # m/s over set speed
     gatePaused @3 :Bool;    # clutch/shift gate is capping the throttle (clutch in)
+    holdState @4 :Int8;     # fork-only: low-speed hold inside the PCM's fuel-cut hole - 0 off, 1 driving (speed rising to
+                            # the top of the band), 2 coasting (throttle closed, falling to the bottom)
   }
 
   struct Handback {

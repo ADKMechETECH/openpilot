@@ -69,7 +69,8 @@ class ControlsExt(ModelStateBase):
 
   def nonacc_lower_limit(self, long_active: bool, CS, calibrated_pose, force_decel: bool, lower_limit: float) -> float:
     """fork-only: raise LongControl's lower accel limit for the non-ACC overspeed controller. Returns the (possibly
-    raised) lower limit; a no-op (returns lower_limit) whenever the controller steps aside."""
+    raised) lower limit; a no-op (returns lower_limit) whenever the controller steps aside. The low-speed hold may
+    also ask for an upper cap: nonacc_upper_limit()."""
     v_set = CS.vCruise * CV.KPH_TO_MS
     cs_sp = self.sm['carStateSP']
     # numeric gear 1..6, trusted only while the clutch signal is live and the drivetrain is coupled
@@ -88,10 +89,16 @@ class ControlsExt(ModelStateBase):
     lead_accel_limit = None
     if self.sm.alive['longitudinalPlanSP'] and self.sm.valid['longitudinalPlanSP'] and not self.sm['longitudinalPlan'].fcw:
       lead_accel_limit = float(self.sm['longitudinalPlanSP'].coastFloorBound)
+    plan_is_cruise = self.sm['longitudinalPlan'].longitudinalPlanSource == log.LongitudinalPlan.LongitudinalPlanSource.cruise
     return self.nonacc.update(long_active, CS.vEgo, v_set, gear, pitch, force_decel, lower_limit,
                               bool(CS.cruiseState.nonAdaptive), decoupled=decoupled,
                               last_accel=float(self.LoC.last_output_accel), lead_accel_limit=lead_accel_limit,
-                              computer_braking=bool(cs_sp.computerBraking))
+                              computer_braking=bool(cs_sp.computerBraking), plan_is_cruise=bool(plan_is_cruise))
+
+  def nonacc_upper_limit(self, upper_limit: float) -> float:
+    """fork-only: the low-speed hold pins the request on its coasting side (an upper cap); otherwise a no-op."""
+    cap = self.nonacc.upper_cap
+    return upper_limit if cap is None else min(upper_limit, float(cap))
 
   def initialize_lateral_control(self, lac, CI, dt):
     enforce_torque_control = self.params.get_bool("EnforceTorqueControl")
@@ -178,6 +185,7 @@ class ControlsExt(ModelStateBase):
     CC_SP.nonAcc.pulsing = bool(self.nonacc.active and self.nonacc.state == PULSING)
     CC_SP.nonAcc.overspeed = float(self.nonacc.overspeed)
     CC_SP.nonAcc.gatePaused = bool(self.clutch_gate.paused)
+    CC_SP.nonAcc.holdState = int(self.nonacc.hold)
 
     # manual low-speed handback (controlsd owns; selfdrived acts on this)
     CC_SP.handback.active = bool(self.handback.active)
