@@ -120,7 +120,9 @@ class ClutchShiftGate:
     return self.state in PAUSED
 
   def limit_accel(self, lower: float, upper: float) -> tuple[float, float]:
-    """Cap the throttle while decoupled; braking (the lower limit) always passes."""
+    """Cap the throttle while decoupled; braking (the lower limit) always passes. A lower limit ABOVE the cap (the
+    non-ACC floor on a descent, where the declutched car would speed up) gives way to the cap - never throttle with the
+    clutch in - so the range stays ordered."""
     if self.paused:
-      return lower, min(upper, self.coast_accel)
+      return min(lower, self.coast_accel), min(upper, self.coast_accel)
     return lower, upper

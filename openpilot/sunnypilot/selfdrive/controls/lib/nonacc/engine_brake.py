@@ -32,6 +32,9 @@ import numpy as np
 G = 9.81
 MARGIN = 0.8                # use 80 % of the measured closed-throttle decel
 UNKNOWN_GEAR_FLOOR = 0.0    # gear not trusted (clutch in, neutral, phantom): coast only, no decel request
+# Road load with the drivetrain decoupled (clutch in / neutral), m/s^2 = A + B*v^2, from the Stage 3 coasts (analysis/stage3)
+ROAD_LOAD_A = 0.188
+ROAD_LOAD_B = 1.52e-4
 
 # Speed bin centres (m/s) and flat-road closed-throttle decel (m/s^2, positive) per gear, from Stage 1 + Stage 3.
 V_MIDS = (5.0, 9.0, 13.0, 17.0, 21.0, 25.0, 29.0, 35.5)
@@ -65,3 +68,10 @@ def brake_free_floor(gear: int, v_ego: float, pitch: float) -> float:
   margin on D for model + pitch error. Raising LongControl's lower limit to this keeps the brakes off while the plan
   wants no more decel than engine braking provides."""
   return -MARGIN * table_decel(gear, v_ego) - G * math.sin(pitch)
+
+
+def declutched_coast_accel(v_ego: float, pitch: float) -> float:
+  """The car's own accel with the drivetrain decoupled (clutch in or neutral): road load and grade only, no engine
+  braking. Needs no gear, so the non-ACC floor can stay up through a shift (session 14: stepping aside on clutch-in
+  let the planner's -1.2 m/s^2 through in one frame)."""
+  return -(ROAD_LOAD_A + ROAD_LOAD_B * v_ego * v_ego) - G * math.sin(pitch)

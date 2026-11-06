@@ -11,6 +11,7 @@ import numpy as np
 from opendbc.car.honda.values import CAR
 from opendbc.car.honda.interface import CarInterface
 from openpilot.sunnypilot.selfdrive.controls.lib.nonacc import controller as C
+from openpilot.sunnypilot.selfdrive.controls.lib.nonacc import engine_brake as E
 from openpilot.sunnypilot.selfdrive.controls.lib.nonacc.engine_brake import coast_accel
 
 DT = 0.01
@@ -131,3 +132,105 @@ class TestClosedLoop:
     assert (cmds > 0.05).any(), "should coast (drift up) between pulses, not ride the brakes"
     brake_duty = float((cmds < -0.5).mean())
     assert 0.05 < brake_duty < 0.9, f"expected intermittent braking (sawtooth), got duty {brake_duty:.2f}"
+
+
+class TestFloorContinuity:
+  """Session 14 (routes 00000056/57): the floor dropped out on every clutch-in and gas override and took ~2 s to ramp
+  back from the raw lower limit; the planner braked at up to -1.2 m/s^2 meanwhile."""
+
+  def _coasting(self, c, over=1.5, pitch=-0.04, gear=6, frames=300):
+    floor = None
+    for _ in range(frames):
+      floor = c.update(True, SET + over, SET, gear, pitch, False, LOWER, True, decoupled=False, last_accel=0.0)
+    return floor
+
+  def test_clutch_in_keeps_the_floor(self):
+    # 6th, a 4 % descent, 3.4 mph over set (800.65 s on route 00000056): clutch in must not hand the brakes to the plan
+    c = _ctrl()
+    before = self._coasting(c)
+    floors = [c.update(True, SET + 1.5, SET, None, -0.04, False, LOWER, True, decoupled=True, last_accel=before)
+              for _ in range(200)]
+    assert min(floors) > -0.3, "the floor dropped on clutch-in"
+    assert abs(floors[0] - before) <= C.PULSE_JERK * DT + 1e-9, "the floor stepped on clutch-in"
+    assert abs(floors[-1] - min(E.declutched_coast_accel(SET + 1.5, -0.04), 0.0)) < 1e-6   # a descent: request 0
+    # and back in gear: still no step, still no drop
+    back = [c.update(True, SET + 1.5, SET, 4, -0.04, False, LOWER, True, decoupled=False, last_accel=floors[-1])
+            for _ in range(200)]
+    assert min(back) > -0.3
+    assert max(abs(b - a) for a, b in zip([floors[-1]] + back, back, strict=False)) <= C.PULSE_JERK * DT + 1e-9
+
+  def test_declutched_floor_on_the_flat_is_road_load_only(self):
+    c = _ctrl()
+    for _ in range(300):
+      floor = c.update(True, SET + 1.0, SET, None, 0.0, False, LOWER, True, decoupled=True, last_accel=0.0)
+    assert -0.35 < floor < -0.15            # road load at 21 m/s, no engine braking
+    assert floor > coast_accel(4, SET + 1.0, 0.0)
+
+  def test_dead_clutch_signal_still_steps_aside(self):
+    # gear untrusted and NOT a live clutch-in (signal dead, reverse): inert, as every feature is without the signal
+    c = _ctrl()
+    self._coasting(c)
+    assert c.update(True, SET + 1.5, SET, None, -0.04, False, LOWER, True, decoupled=False, last_accel=0.0) == LOWER
+
+  def test_force_decel_wins_with_the_clutch_in(self):
+    c = _ctrl()
+    self._coasting(c)
+    assert c.update(True, SET + 1.5, SET, None, -0.04, True, LOWER, True, decoupled=True, last_accel=0.0) == LOWER
+
+  def test_pulse_still_fires_with_the_clutch_in(self):
+    c = _ctrl()
+    for _ in range(300):
+      floor = c.update(True, SET + C.DEFAULT_TRIGGER + 0.5, SET, None, -0.08, False, LOWER, True, decoupled=True, last_accel=0.0)
+    assert c.state == C.PULSING and floor < -0.9
+
+  def test_gas_release_above_set_has_the_floor_at_once(self):
+    # gas override (longitudinal inactive, last command 0), released 6.8 mph over set in 5th on the flat (1038.6 s)
+    c = _ctrl()
+    for _ in range(300):
+      assert c.update(False, SET + 3.0, SET, 5, 0.0, False, LOWER, True, decoupled=False, last_accel=0.0) == LOWER
+    floor = c.update(True, SET + 3.0, SET, 5, 0.0, False, LOWER, True, decoupled=False, last_accel=0.0)
+    assert floor >= coast_accel(5, SET + 3.0, 0.0) - 0.02, "no floor on the first frame after the gas release"
+    assert c.state == C.COASTING
+
+  def test_gas_release_above_the_trigger_pulses(self):
+    # owner: no brakes on the way down unless over the sawtooth trigger - then the sawtooth as normal
+    c = _ctrl()
+    for _ in range(50):
+      c.update(False, SET + C.DEFAULT_TRIGGER + 1.0, SET, 5, 0.0, False, LOWER, True, decoupled=False, last_accel=0.0)
+    floor = c.update(True, SET + C.DEFAULT_TRIGGER + 1.0, SET, 5, 0.0, False, LOWER, True, decoupled=False, last_accel=0.0)
+    assert c.state == C.PULSING and floor <= C.PULSE_DECEL + 1e-6
+
+  def test_acc_to_nonacc_while_braking_is_released_on_the_ramp(self):
+    # the car's mode flips live while ACC brakes at -2.0 for a lead: the brake must come off at PULSE_JERK, not at once
+    c = _ctrl()
+    c.update(True, SET - 1.0, SET, 6, 0.0, False, LOWER, False, decoupled=False, last_accel=-2.0)
+    floors = []
+    last = -2.0
+    for _ in range(100):
+      last = c.update(True, SET - 1.0, SET, 6, 0.0, False, LOWER, True, decoupled=False, last_accel=last)
+      floors.append(last)
+    assert floors[0] <= -2.0 + C.PULSE_JERK * DT + 1e-9
+    assert max(b - a for a, b in zip(floors, floors[1:], strict=False)) <= C.PULSE_JERK * DT + 1e-9
+
+  def test_unknown_last_accel_ramps_from_the_lower_limit(self):
+    # callers that do not pass last_accel keep the old behaviour
+    c = _ctrl()
+    c.update(False, SET + 1.0, SET, 4, 0.0, False, LOWER, True)
+    assert c.update(True, SET + 1.0, SET, 4, 0.0, False, LOWER, True) <= LOWER + C.PULSE_JERK * DT + 1e-9
+
+  def test_shift_on_a_descent_closed_loop(self):
+    # 6th -> clutch in 2 s -> 4th on a 4 % descent, 1.5 m/s over set, the plan wanting -1.2 throughout: the command
+    # never goes below the car's own accel by more than a whisker, and never steps
+    c = _ctrl()
+    cmd, cmds, own = 0.0, [], []
+    seq = [(6, False)] * 300 + [(None, True)] * 200 + [(4, False)] * 300
+    for gear, dec in seq:
+      floor = c.update(True, SET + 1.5, SET, gear, -0.04, False, LOWER, True, decoupled=dec, last_accel=cmd)
+      upper = 0.0 if dec else 1.5
+      cmd = float(np.clip(-1.2, min(floor, upper), upper))
+      cmds.append(cmd)
+      own.append(E.declutched_coast_accel(SET + 1.5, -0.04) if dec else coast_accel(gear, SET + 1.5, -0.04))
+    cmds, own = np.array(cmds), np.array(own)
+    assert np.abs(np.diff(cmds)).max() <= 0.05, "the command stepped at the clutch"
+    assert (cmds[100:] >= np.minimum(own[100:], 0.0) - 0.02).all(), "a request below the car's own accel = brakes"
+    assert cmds.min() > -0.2, f"brake request during the shift: {cmds.min():+.2f}"

@@ -319,6 +319,9 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     // fork-only (civic-cruise): non-ACC ("set-speed only") mode follows the car's own ACC <-> Cruise switch (no param).
     // This one only decides whether the gauge cluster shows the conventional-cruise icon in that mode (default ON).
     {"NonAccClusterLabel", {PERSISTENT | BACKUP, BOOL, "1"}},
+    // fork-only (civic-cruise): non-ACC approach warning - chime + text when closing inside half of ACC's closest gap.
+    // Warning only, non-ACC never acts on a lead (owner 2026-11-06: default ON, this is the off switch).
+    {"NonAccApproachWarning", {PERSISTENT | BACKUP, BOOL, "1"}},
     // fork-only (civic-cruise): m/s over set speed before the non-ACC sawtooth starts firm braking (user-settable, ~8 mph)
     {"NonAccOverspeedThreshold", {PERSISTENT | BACKUP, FLOAT, "3.6"}},
     // fork-only (civic-cruise): learned per-gear engine-brake table (JSON), refined from brake-free coasts, applied live

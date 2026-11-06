@@ -12,7 +12,9 @@ toggle, which fired on the same hold as the car's switch: openpilot's stock wron
 whenever non-ACC was armed. There is no param and no write on the driving path; the car remembers the mode.
 
 Owner decisions:
-- Non-ACC ignores leads entirely (no emergency collision backstop) - FCW still warns, the driver brakes.
+- Non-ACC ignores leads entirely (no emergency collision backstop) - the driver brakes. Stock FCW still warns, and
+  since 2026-11-06 an approach warning (approach.py, chime + text only, toggle NonAccApproachWarning, default ON)
+  sounds when closing inside half of ACC's closest gap. Neither ever acts.
 - The mode flips LIVE, engaged or not (no latch). The ACC<->non-ACC transition is smoothed by the consumers, not here.
 - Only on a manual with openpilot longitudinal (the fork's scope). Everywhere else the mode is never active and the
   stock wrongCruiseMode refusal stays.

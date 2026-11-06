@@ -16,8 +16,10 @@ from openpilot.sunnypilot.selfdrive.controls.lib.speed_limit.speed_limit_assist 
 from openpilot.sunnypilot.selfdrive.controls.lib.speed_limit.speed_limit_resolver import SpeedLimitResolver
 from openpilot.sunnypilot.selfdrive.selfdrived.events import EventsSP
 from openpilot.sunnypilot.models.helpers import get_active_bundle
+from openpilot.common.params import Params
 from openpilot.common.realtime import DT_MDL
 from openpilot.sunnypilot.selfdrive.controls.lib.nonacc.mode import NonAccMode
+from openpilot.sunnypilot.selfdrive.controls.lib.nonacc.approach import ApproachWarning
 from openpilot.sunnypilot.selfdrive.controls.lib.nonacc.learner import EngineBrakeLearner
 
 DecState = custom.LongitudinalPlanSP.DynamicExperimentalControl.DynamicExperimentalControlState
@@ -49,6 +51,12 @@ class LongitudinalPlannerSP:
 
     # fork-only (civic-cruise, Task 16 port): gas-override re-surge guard (always on for manuals)
     self.gas_override_reset = False
+
+    # fork-only (civic-cruise): non-ACC approach warning (chime + text only; owner 2026-11-06, default ON)
+    self.approach = ApproachWarning(DT_MDL)
+    self._approach_params = Params()
+    self.approach_enabled = self._approach_params.get_bool("NonAccApproachWarning")
+    self._approach_frame = 0
 
     self.output_v_target = 0.
     self.output_a_target = 0.
@@ -116,6 +124,20 @@ class LongitudinalPlannerSP:
     self.dec.update(sm)
     self.e2e_alerts_helper.update(sm, self.events_sp)
     self.update_eb_learner(sm)
+    self.update_approach_warning(sm)
+
+  def update_approach_warning(self, sm: messaging.SubMaster) -> None:
+    # fork-only (civic-cruise): warn (never act) when non-ACC cruise is closing inside half of ACC's closest gap.
+    if self._approach_frame % int(1. / DT_MDL) == 0:
+      self.approach_enabled = self._approach_params.get_bool("NonAccApproachWarning")
+    self._approach_frame += 1
+    CS = sm['carState']
+    lead = sm['radarState'].leadOne
+    active = bool(self.approach_enabled and self.nonacc.available and CS.cruiseState.nonAdaptive
+                  and sm['selfdriveState'].enabled and not CS.gasPressed)
+    if self.approach.update(active, float(CS.vEgo), bool(lead.present), float(lead.dRel), float(lead.vLead),
+                            float(lead.vRel), float(lead.modelProb)):
+      self.events_sp.add(custom.OnroadEventSP.EventName.nonAccApproach)
 
   def update_eb_learner(self, sm: messaging.SubMaster) -> None:
     # fork-only (civic-cruise): feed the engine-brake learner. Learns only from brake-free coasts (disengaged, no gas /

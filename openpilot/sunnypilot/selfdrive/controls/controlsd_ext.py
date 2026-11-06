@@ -73,11 +73,18 @@ class ControlsExt(ModelStateBase):
     v_set = CS.vCruise * CV.KPH_TO_MS
     cs_sp = self.sm['carStateSP']
     # numeric gear 1..6, trusted only while the clutch signal is live and the drivetrain is coupled
-    gear = cs_sp.gearRaw if (cs_sp.clutchSignalValid and not CS.deprecated.clutchPressed
-                             and 1 <= cs_sp.gearRaw <= 6) else None
+    gear_raw = int(cs_sp.gearRaw)
+    in_gear = bool(cs_sp.clutchSignalValid and not CS.deprecated.clutchPressed and 1 <= gear_raw <= 6)
+    gear = gear_raw if in_gear else None
     pitch = calibrated_pose.orientation.xyz[1] if calibrated_pose is not None else None
+    # a real clutch-in / neutral (signal live): the controller keeps a declutched floor instead of stepping aside.
+    # "Not in gear" rather than clutchPressed alone: carState and carStateSP are two messages, and for a frame as the
+    # clutch comes up one can say "coupled" while the other still says "no gear" (session 14 replay: that one frame
+    # of step-aside let the planner's request through and cost 0.6 s of ramp). Reverse (14) still steps aside.
+    decoupled = bool(cs_sp.clutchSignalValid and not in_gear and gear_raw != 14)
     return self.nonacc.update(long_active, CS.vEgo, v_set, gear, pitch, force_decel, lower_limit,
-                              bool(CS.cruiseState.nonAdaptive))
+                              bool(CS.cruiseState.nonAdaptive), decoupled=decoupled,
+                              last_accel=float(self.LoC.last_output_accel))
 
   def initialize_lateral_control(self, lac, CI, dt):
     enforce_torque_control = self.params.get_bool("EnforceTorqueControl")

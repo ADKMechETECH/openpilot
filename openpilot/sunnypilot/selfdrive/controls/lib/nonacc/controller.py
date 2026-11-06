@@ -9,7 +9,15 @@ Only ever RAISES LongControl's lower accel limit (never lowers it), and only abo
   - PULSING (v >= set + trigger): a firm but bounded brake (PULSE_DECEL, ramped at PULSE_JERK) down to within RELEASE
     (3 mph) of set, then release -> back to COASTING. Repeats = sawtooth.
   - Steps aside (returns the incoming limit unchanged -> stock/plan braking) on: forceDecel, above the hard ceiling,
-    no calibrated pitch, an untrusted gear, below set speed, standstill, or when the mode / longitudinal is off.
+    no calibrated pitch, a gear that is untrusted for any reason other than a live clutch-in (clutch signal dead,
+    reverse), standstill, or when the mode / longitudinal is off.
+  - Clutch in / neutral with the clutch signal live (session 14, owner: "the clutch-in behaviour is not good"): the
+    floor STAYS, at the declutched car's own accel (road load + grade, no gear needed). Before, the controller stepped
+    aside there and the planner's request went from +0.05 to -1.20 m/s^2 in one frame on a downshift above set.
+  - Coming back from a step-aside (gas override released, mode switched, hard ceiling left) the floor restarts from
+    the last commanded accel, not from the raw lower limit: no ~2 s window in which the planner brakes unfloored
+    (session 14: -1.19 m/s^2 on releasing the gas 6.8 mph over set), and a release of real braking (ACC -> non-ACC
+    while ACC brakes for a lead) is still ramped at PULSE_JERK.
 
 No lead-based backstops: non-ACC ignores leads by design (the driver brakes; FCW still warns).
 """
@@ -19,7 +27,7 @@ import numpy as np
 
 from openpilot.common.params import Params
 from openpilot.sunnypilot.selfdrive.controls.lib.nonacc.mode import NonAccMode
-from openpilot.sunnypilot.selfdrive.controls.lib.nonacc.engine_brake import G
+from openpilot.sunnypilot.selfdrive.controls.lib.nonacc.engine_brake import G, declutched_coast_accel
 from openpilot.sunnypilot.selfdrive.controls.lib.nonacc.learner import effective_decel, load_applied
 
 COASTING, PULSING = 0, 1
@@ -45,6 +53,7 @@ class NonAccController:
     self.trigger = DEFAULT_TRIGGER
     self.state = COASTING
     self.floor_cmd = 0.0     # the ramped lower-limit the controller is requesting
+    self._aside = False      # stepped aside last frame: the next active frame re-seeds floor_cmd
     self.learned = load_applied(self._params)   # applied learned engine-brake table (from the learner in plannerd)
     # exposed for the overlay
     self.active = False
@@ -56,8 +65,17 @@ class NonAccController:
       self.trigger = float(np.clip(float(t), TRIGGER_MIN, TRIGGER_MAX))
     self.learned = load_applied(self._params)
 
+  def _step_aside(self, lower_limit: float) -> float:
+    self.floor_cmd = lower_limit
+    self._aside = True
+    return lower_limit
+
   def update(self, long_active: bool, v_ego: float, v_set: float, gear, pitch, force_decel: bool,
-             lower_limit: float, car_non_adaptive: bool) -> float:
+             lower_limit: float, car_non_adaptive: bool, decoupled: bool = False,
+             last_accel: float | None = None) -> float:
+    """decoupled: the drivetrain is decoupled AND the clutch signal is live (a real clutch-in / neutral, not a dead
+    signal). last_accel: the accel LongControl commanded last frame (0 while longitudinal was inactive); None = unknown,
+    then a resume ramps from the raw lower limit as it always did."""
     if self._frame % self._read_period == 0:
       self._read_params()
     self._frame += 1
@@ -70,9 +88,8 @@ class NonAccController:
     if not (mode_active and long_active) or v_set <= 0. or v_ego < MIN_SPEED or force_decel \
        or pitch is None or not math.isfinite(pitch):
       self.state = COASTING
-      self.floor_cmd = lower_limit
       self.active = False
-      return lower_limit
+      return self._step_aside(lower_limit)
 
     self.active = True
 
@@ -84,13 +101,12 @@ class NonAccController:
 
     # too far over set: hand back to full plan braking (+ the overlay flags it)
     if self.overspeed > HARD_CEILING:
-      self.floor_cmd = lower_limit
-      return lower_limit
+      return self._step_aside(lower_limit)
 
-    if self.state == COASTING and gear is None:
-      # gear not trusted: cannot estimate engine braking -> let the plan hold set speed (stock)
-      self.floor_cmd = lower_limit
-      return lower_limit
+    if self.state == COASTING and gear is None and not decoupled:
+      # gear not trusted and not a live clutch-in (clutch signal dead, reverse): cannot estimate what the car does on
+      # its own -> let the plan hold set speed (stock)
+      return self._step_aside(lower_limit)
 
     # COASTING target = the car's closed-throttle accel (engine-brake priority): command it and the car coasts -
     # engine-brakes back to set on the flat, drifts up toward the trigger on a descent, service brakes off. Capped on
@@ -98,9 +114,20 @@ class NonAccController:
     # refines the engine-brake estimate; else the static seed.
     if self.state == PULSING:
       target = PULSE_DECEL
+    elif gear is None:
+      # clutch in / neutral: no engine braking, the car rolls on road load + grade. Keep the floor there so a shift
+      # above set does not hand the brakes to the planner. Never above 0: there is no throttle to give a declutched
+      # car (the clutch gate caps that side anyway), so on a descent the floor is a request of 0.
+      target = min(declutched_coast_accel(v_ego, pitch), 0.0)
     else:
       coast = -effective_decel(gear, v_ego, self.learned) - G * math.sin(pitch)
       target = min(coast, COAST_CAP)
+    if self._aside:
+      # back from a step-aside: restart from what was last commanded (never above the target), so the floor is there
+      # at once after a gas override (last command 0) and real braking (ACC -> non-ACC) is still released on the ramp
+      seed = lower_limit if last_accel is None else max(lower_limit, float(last_accel))
+      self.floor_cmd = min(target, seed)
+      self._aside = False
     step = PULSE_JERK * self.dt
     self.floor_cmd = float(np.clip(target, self.floor_cmd - step, self.floor_cmd + step))
     # only ever raise the lower limit

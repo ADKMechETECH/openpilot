@@ -253,6 +253,15 @@ EVENTS_SP: dict[int, dict[str, Alert | AlertCallbackType]] = {
       Priority.LOW, VisualAlert.none, AudibleAlert.prompt, 0.1),
   },
 
+  # fork-only (civic-cruise): non-ACC ignores leads by owner decision - this only warns, the driver brakes
+  EventNameSP.nonAccApproach: {
+    ET.WARNING: Alert(
+      "Closing on Vehicle Ahead",
+      "Non-ACC Will Not Brake",
+      AlertStatus.userPrompt, AlertSize.mid,
+      Priority.MID, VisualAlert.none, AudibleAlert.prompt, .1),
+  },
+
   EventNameSP.bigModelReady: {
     ET.PERMANENT: Alert(
       "Big Model Ready",

@@ -67,3 +67,11 @@ class TestClutchGate:
     g = ClutchShiftGate(CP, DT)
     _step(g, 5, decoupled=True)
     assert g.state == GateState.idle
+
+  def test_floor_above_the_cap_gives_way(self):
+    # the non-ACC floor can sit above the throttle cap (descent, or a negative ClutchShiftGateCoastAccel): the cap
+    # wins - never throttle with the clutch in - and the range stays ordered. Braking below the cap is untouched.
+    g = _gate()
+    _step(g, 1, decoupled=True)
+    assert g.limit_accel(0.2, 2.0) == (0.0, 0.0)
+    assert g.limit_accel(-1.0, 2.0) == (-1.0, 0.0)
